@@ -182,9 +182,13 @@ pub fn prompt_for(notes: &[ReviewNoteRow], author: &str) -> String {
 
 /// Store and type a send. `mark` turns the prompt into what is typed (the
 /// hub adds its untrusted-input marker for a caller that needs one).
+/// `author` is stored on the notes ("Ada · pixel"); `typed_author` is the
+/// name the prompt opens with: the person alone, never their device, since
+/// the prompt becomes a turn every grantee of the session reads.
 pub async fn send(
     args: SendReviewNotesArgs,
     author: &str,
+    typed_author: &str,
     author_person_id: Option<i64>,
     mark: impl FnOnce(String) -> Result<String, IpcError>,
     store: &Mutex<Store>,
@@ -193,7 +197,8 @@ pub async fn send(
     check_batch(&args.client_msg_id)?;
     let notes = check_review_notes(&args.notes)?;
     let author = scrub_line(author.trim());
-    check_prompt_size(&notes, &author)?;
+    let typed_author = scrub_line(typed_author.trim());
+    check_prompt_size(&notes, &typed_author)?;
     // Held until this call answers: a repeat while it types is told so, not
     // `repeat` (its device would drop the drafts of a send that may yet fail).
     let _flight = InFlight::claim(store, args.session_id, &args.client_msg_id)?;
@@ -221,7 +226,7 @@ pub async fn send(
         });
     }
     let typed = async {
-        let prompt = mark(prompt_for(&stored, &author))?;
+        let prompt = mark(prompt_for(&stored, &typed_author))?;
         queue_prompt(
             QueuePromptArgs {
                 session_id: args.session_id,
@@ -337,6 +342,7 @@ pub async fn review_notes_local(
                     client_msg_id: args.client_msg_id.unwrap_or_default(),
                     notes: args.notes.unwrap_or_default(),
                 },
+                &author,
                 &author,
                 person,
                 Ok,
@@ -456,6 +462,7 @@ mod tests {
         let err = send(
             args.clone(),
             "Ada",
+            "Ada",
             None,
             |_| Err(IpcError::new(codes::E_FORBIDDEN, "no")),
             &store,
@@ -473,6 +480,7 @@ mod tests {
         let again = send(
             args.clone(),
             "Ada",
+            "Ada",
             None,
             |_| panic!("a repeat types nothing"),
             &store,
@@ -487,6 +495,7 @@ mod tests {
         other.notes[0].body = "y".into();
         let err = send(
             other,
+            "Ada",
             "Ada",
             None,
             |_| panic!("types nothing"),
@@ -536,6 +545,7 @@ mod tests {
         let err = send(
             one_note("rn-2", sid),
             "Ada",
+            "Ada",
             None,
             |_| Err(IpcError::new(codes::E_SSH_TIMEOUT, "slow host")),
             &store,
@@ -549,6 +559,7 @@ mod tests {
         assert_eq!(kept[0].delivery.as_deref(), Some("uncertain"));
         let again = send(
             one_note("rn-2", sid),
+            "Ada",
             "Ada",
             None,
             |_| panic!("twice"),

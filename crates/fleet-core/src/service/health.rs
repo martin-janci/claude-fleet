@@ -1489,6 +1489,7 @@ mod tests {
             turn_outcome: None,
             pinned_at: None,
             prompt_suggestion: None,
+            launch_model: None,
             proposals: Vec::new(),
             pending_form: None,
             form_draft: None,

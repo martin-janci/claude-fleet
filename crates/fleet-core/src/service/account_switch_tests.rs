@@ -296,12 +296,76 @@ fn the_pick_is_the_least_used_and_the_hosts_own_wins_a_tie() {
         account_uuid: p.unwrap_or("own").to_string(),
         used_pct: Some(u),
         signed_out: false,
+        conflicted: false,
     };
     let c = [l(None, 20.0), l(Some("a"), 20.0), l(Some("b"), 30.0)];
     assert_eq!(pick(&c).unwrap().profile, None);
     let c = [l(None, 50.0), l(Some("a"), 20.0)];
     assert_eq!(pick(&c).unwrap().profile.as_deref(), Some("a"));
     assert!(pick(&[]).is_none());
+}
+
+/// Review w09-9: a login a conflict names is picked only when no other is
+/// a candidate.
+#[test]
+fn a_conflicted_login_is_the_last_pick() {
+    let l = |p: &str, u: f64, conflicted: bool| HostLogin {
+        profile: Some(p.to_string()),
+        account_uuid: p.to_string(),
+        used_pct: Some(u),
+        signed_out: false,
+        conflicted,
+    };
+    let c = [
+        l("copied", 5.0, true),
+        l("b", 60.0, false),
+        l("c", 70.0, false),
+    ];
+    assert_eq!(pick(&c).unwrap().profile.as_deref(), Some("b"));
+    let c = [l("copied", 5.0, true), l("other", 2.0, true)];
+    assert_eq!(pick(&c).unwrap().profile.as_deref(), Some("other"));
+}
+
+/// Review w10-5: a spent model window moves only the sessions launched on
+/// that model, and only to a login whose window for it has room.
+#[test]
+fn a_spent_model_window_moves_only_the_sessions_on_that_model() {
+    use crate::service::account_usage::{AccountUsage, Window};
+    use crate::store::UsageSnapshotRow;
+    let (s, id, _) = fleet();
+    let w = |u: f64| {
+        Some(Window {
+            utilization: u,
+            resets_at: Some(NOW + 3_600),
+        })
+    };
+    let put = |uuid: &str, opus: f64| {
+        s.insert_usage_snapshot(&UsageSnapshotRow {
+            account_uuid: uuid.into(),
+            fetched_at: NOW - 30,
+            usage: AccountUsage {
+                five_hour: w(if uuid == "acct-spare" { 10.0 } else { 40.0 }),
+                seven_day: w(if uuid == "acct-spare" { 10.0 } else { 40.0 }),
+                seven_day_opus: w(opus),
+                seven_day_sonnet: None,
+            },
+            subscription: None,
+            source_host: None,
+        })
+        .unwrap();
+    };
+    // The session's account has room overall but its Opus week is spent;
+    // so is spare's.
+    put("acct-out", 100.0);
+    put("acct-spare", 100.0);
+    put("acct-work", 30.0);
+    assert!(plan_now(&s).is_empty(), "a default-model session stays");
+    s.set_session_launch_model(id, Some("sonnet")).unwrap();
+    assert!(plan_now(&s).is_empty(), "a Sonnet session stays");
+    s.set_session_launch_model(id, Some("opus")).unwrap();
+    let p = plan_now(&s);
+    assert_eq!(p.len(), 1);
+    assert_eq!(p[0].target.profile.as_deref(), Some("work"));
 }
 
 #[derive(Default)]
@@ -779,8 +843,21 @@ fn a_session_whose_login_is_signed_out_moves_off_it() {
 #[test]
 fn off_a_signed_out_login_its_own_account_is_a_way_out() {
     let (s, _) = on_work_nothing_spent();
-    // A setup token of the same account beside the expired `/login`.
+    // A setup token of the same account beside the expired `/login` (a
+    // token, not a second `/login`: no login conflict, review w09-9).
     seed_usage(&s, "mac", Some("tok"), "acct-work", 5.0, NOW);
+    let mut profiles = s
+        .get_host_row("mac")
+        .unwrap()
+        .unwrap()
+        .claude_profiles
+        .unwrap();
+    for p in &mut profiles {
+        if p.name == "tok" {
+            p.credential = Some(crate::service::add_account::SETUP_TOKEN_CREDENTIAL.into());
+        }
+    }
+    s.set_host_profiles("mac", &profiles).unwrap();
     sign_out(&s, &["work"]);
     let p = plan_now(&s);
     assert_eq!(p[0].target.profile.as_deref(), Some("tok"));

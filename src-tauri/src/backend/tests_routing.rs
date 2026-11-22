@@ -637,6 +637,7 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     host_alias: "mac".into(),
                     profile: Some("work".into()),
                     project_id: None,
+                    model: None,
                 };
                 block_on(commands::account_usage::routed::check_account_headroom(
                     b, args, s, &cache,

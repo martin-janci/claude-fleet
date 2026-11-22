@@ -87,3 +87,34 @@ describe('SignInAgain', () => {
     expect(calls.some((c) => c.action === 'start_login')).toBe(false);
   });
 });
+
+// Review w02-7: on a Mac fleet reaches over SSH (the probe reports
+// login_split, true or false), the host's own login is not signed in from
+// fleet straight away: a line recommends a login profile and offers
+// + Add account, with Sign in here anyway.
+describe('SignInAgain on a Mac', () => {
+  it('recommends a login profile before signing the own login in again', async () => {
+    hosts.set([{ alias: 'mac', hidden: false, login_split: false } as never]);
+    render(SignInAgain, { host: 'mac', profile: null, onclose: vi.fn(), pollMs: 20 });
+    expect((await screen.findByTestId('sign-in-again-mac-note')).textContent).toContain('login profile');
+    expect(calls).toEqual([]);
+    await fireEvent.click(screen.getByTestId('sign-in-again-mac-add'));
+    await waitFor(() => expect(screen.queryByTestId('sign-in-again-mac')).toBeNull());
+    expect(calls).toEqual([]);
+  });
+
+  it('still signs in there when asked to', async () => {
+    hosts.set([{ alias: 'mac', hidden: false, login_split: true } as never]);
+    render(SignInAgain, { host: 'mac', profile: null, onclose: vi.fn(), pollMs: 20 });
+    await fireEvent.click(await screen.findByTestId('sign-in-again-mac-anyway'));
+    await screen.findByTestId('add-account-login');
+    expect(calls[0]).toMatchObject({ action: 'start_login', host_alias: 'mac', profile: '', again: true });
+  });
+
+  it("a profile's sign-in, or a host that is not a Mac, goes straight to the pane", async () => {
+    hosts.set([{ alias: 'mac', hidden: false, login_split: false } as never]);
+    render(SignInAgain, { host: 'mac', profile: 'work', onclose: vi.fn(), pollMs: 20 });
+    await screen.findByTestId('add-account-login');
+    expect(screen.queryByTestId('sign-in-again-mac')).toBeNull();
+  });
+});

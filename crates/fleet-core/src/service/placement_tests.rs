@@ -12,6 +12,7 @@ fn login(profile: Option<&str>, account: &str, used: Option<f64>) -> LoginFacts 
         signed_out_since: None,
         live_sessions: 0,
         forbidden: false,
+        conflicted: false,
     }
 }
 
@@ -231,6 +232,36 @@ fn the_store_wrapper_reads_logins_usage_health_and_the_project() {
     let p = suggest_with(&s, Some(other), &Want::default(), false, now).unwrap();
     assert_eq!(places(&p), vec![("mac".into(), None)]);
     assert!(p.note.is_some());
+}
+
+/// Review w09-9: a login a conflict names ranks after every other, however
+/// much room it has, and is still a candidate when it is all there is.
+#[test]
+fn a_conflicted_login_ranks_last_but_still_counts() {
+    let copied = LoginFacts {
+        conflicted: true,
+        ..login(None, "acct-a", Some(5.0))
+    };
+    let hosts = vec![host(
+        "h",
+        Some(10.0),
+        Some(80.0),
+        vec![copied.clone(), login(Some("b"), "acct-b", Some(80.0))],
+    )];
+    let p = rank(&hosts, &Want::default(), 90.0);
+    assert_eq!(
+        places(&p),
+        vec![("h".into(), Some("b".into())), ("h".into(), None)]
+    );
+    assert!(p.candidates[1]
+        .reasons
+        .iter()
+        .any(|r| r.contains("conflict")));
+    let alone = vec![host("h", Some(10.0), Some(80.0), vec![copied])];
+    assert_eq!(
+        places(&rank(&alone, &Want::default(), 90.0)),
+        vec![("h".into(), None)]
+    );
 }
 
 /// Live sessions on an account cost it: the usage reading lags the runs a

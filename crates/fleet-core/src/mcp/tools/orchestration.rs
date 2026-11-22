@@ -2142,20 +2142,42 @@ impl FleetTools {
             // A project's new worktree setup: a command run on the fleet's
             // hosts, fleet configuration a person sets.
             refuse_operator_decision(&caller)?;
+            // Reading it stays a person's; setting it is the fleet admin's,
+            // and each change is in the admin log.
+            let writes = args.globs.is_some() || args.command.is_some();
+            if writes {
+                project_config_writer(&caller, "setting a project's worktree setup")?;
+            }
             let view_scope = self.view_scope(&caller)?;
-            return ok_json(
-                &crate::service::work::worktree_setup::setup(&args, &self.store, &view_scope)
-                    .map_err(to_mcp_err)?,
-            );
+            let out = crate::service::work::worktree_setup::setup(&args, &self.store, &view_scope)
+                .map_err(to_mcp_err)?;
+            if writes {
+                self.log_project_config(
+                    &caller,
+                    "worktree_setup",
+                    out.project_id,
+                    serde_json::json!({ "copy": out.copy, "command": out.command }),
+                );
+            }
+            return ok_json(&out);
         }
         if args.action == "check_setup" {
-            // A project's AI check switch: fleet configuration a person sets.
+            // A project's AI check switch and command: fleet configuration
+            // (the command runs on the fleet's hosts), the fleet admin's.
             refuse_operator_decision(&caller)?;
+            project_config_writer(&caller, "setting a project's AI check")?;
             let view_scope = self.view_scope(&caller)?;
-            return ok_json(
-                &crate::service::work::ticket_check::setup(&args, &self.store, &view_scope)
-                    .map_err(to_mcp_err)?,
-            );
+            let out = crate::service::work::ticket_check::setup(&args, &self.store, &view_scope)
+                .map_err(to_mcp_err)?;
+            if let Some(pid) = args.project_id {
+                self.log_project_config(
+                    &caller,
+                    "check_setup",
+                    pid,
+                    serde_json::to_value(&out).unwrap_or_default(),
+                );
+            }
+            return ok_json(&out);
         }
         // A proposal decision is `accept` or `reject` with nothing else named;
         // `reject` WITH a session, a link or a key is the link decision, which
@@ -3502,6 +3524,29 @@ fn graph_item(args: &crate::service::work::WorkLinkArgs) -> Result<i64, McpError
 }
 
 impl super::FleetTools {
+    /// Record a change to a project's worktree setup or AI check in the admin
+    /// log: a command that runs on the fleet's hosts is fleet configuration.
+    fn log_project_config(
+        &self,
+        caller: &Caller,
+        action: &'static str,
+        project_id: i64,
+        mut representation: serde_json::Value,
+    ) {
+        if let Some(o) = representation.as_object_mut() {
+            o.insert("by".into(), serde_json::json!(caller.label()));
+        }
+        let Ok(s) = lock(&self.store) else { return };
+        s.record_admin_event_or_log(&crate::store::AdminEvent {
+            actor_person: super::fleet::owner_for(caller, &s),
+            actor_device: caller.client.as_ref().map(|c| c.id),
+            action,
+            resource_type: "project",
+            resource_id: &project_id.to_string(),
+            representation,
+        });
+    }
+
     /// The mission of the work item a `work_link` start / run / resume
     /// names, for the operator's grant check, with how many sessions the
     /// call would start. The item is the one the action resolves: `item_id`,
@@ -3653,6 +3698,25 @@ fn mission_caller(caller: &Caller) -> Result<(), McpError> {
         ));
     }
     Ok(())
+}
+
+/// Who sets a project's worktree setup command or AI check (review w18-7):
+/// a command run on every host that starts the project's work, so fleet
+/// configuration. The master, or the hub owner's own (fleet admin) device
+/// that the hub's operator trusts and that is `full` ([`owner_device_admin`]);
+/// never a colleague's device, a named act token, a host token or Control.
+pub(super) fn project_config_writer(caller: &Caller, what: &str) -> Result<(), McpError> {
+    if !caller.is_master() && !caller.is_master_or_fleet_admin_device() {
+        return Err(mcp_err(
+            "E_FORBIDDEN",
+            format!(
+                "{what} is fleet configuration: the master token or the hub owner's trusted \
+                 full device sets it"
+            ),
+            None,
+        ));
+    }
+    super::fleet::owner_device_admin(caller, what)
 }
 
 /// The operator is an unbound client, so its view scope is `All` and the

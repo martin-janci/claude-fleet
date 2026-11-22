@@ -108,16 +108,20 @@ pub struct MergeProjectArgs {
     /// Nonce from an approved `E_CONFIRM_REQUIRED`.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
+    /// Report what would move, write nothing (no confirm needed).
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 /// Fold project `from` into `into` (see `Store::merge_project`): for a
 /// repository that changed owner or name and was registered a second time.
+/// With `dry_run`, what it would move, rolled back.
 pub fn merge_project(
     args: MergeProjectArgs,
     store: &Mutex<Store>,
 ) -> Result<crate::store::ProjectMergeReport, IpcError> {
     let s = lock(store)?;
-    s.merge_project(args.from, args.into)
+    s.merge_project_with(args.from, args.into, args.dry_run)
 }
 
 /// The configured `projects.layout`.

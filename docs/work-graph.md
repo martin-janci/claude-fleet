@@ -939,9 +939,13 @@ output (from its last 4 000 bytes, each line cut at 300 characters), and where t
 skips setup, so fix the command or the checkout and start again.
 
 The setup is the project's (migration 221, `projects.setup_copy` /
-`setup_command`), and only a person sets or reads it: the command runs on
+`setup_command`), and only a person reads it: the command runs on
 the fleet's hosts. A per-host token, an org-bound client and the operator
-are refused. The wire is `work_link { action: worktree_setup, project_id,
+are refused. Setting it is fleet configuration: on a hub only the master
+token or the hub owner's trusted full device sets it (`owner_device_admin`;
+a colleague's device, an untrusted one and a named act token are refused
+`E_FORBIDDEN`), and each change is written to the admin log
+(`worktree_setup` on resource `project`). The wire is `work_link { action: worktree_setup, project_id,
 globs?, command? }`: with neither it reads, with either it sets both
 (`globs: []` and `command: ""` clear them); the desktop command is
 `worktree_setup` (Routed).
@@ -1216,7 +1220,10 @@ the item's organisation.
 
 Test now, Rerun and the switch are a person's: a per-host token, the
 operator and an organisation-scoped caller are refused, and the item must
-be one the caller can see.
+be one the caller can see. The switch and its command are fleet
+configuration, set as the worktree setup is: on a hub the master token or
+the hub owner's trusted full device, each change in the admin log
+(`check_setup` on resource `project`).
 
 | You do | Desktop command | MCP action |
 |---|---|---|

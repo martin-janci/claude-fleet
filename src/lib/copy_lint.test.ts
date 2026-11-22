@@ -39,6 +39,9 @@ const SELF_GATED: Record<string, string | null> = {
   // HostsView mounts it behind its own showAddPicker; its `{#if added}` only
   // swaps the form for what to do next (review w14).
   HubAddHostDialog: null,
+  // Its parents mount it behind their own signingIn state; its `{#if macNote}`
+  // only puts the Mac own-login note before the sign-in step (review w02-7).
+  SignInAgain: null,
 };
 
 // Findings that wait, each with why. An entry that no longer matches a finding

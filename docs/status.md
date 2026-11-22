@@ -276,7 +276,12 @@ account off a project*, migrations 217 and 218): every start, resume, switch, ro
 and mission run of such a project refuses or avoids its logins. A login profile can be
 signed in with a `claude setup-token` token (landed, docs/accounts.md →
 *Setup token*): written to the host only, exported as
-`CLAUDE_CODE_OAUTH_TOKEN`. Not built: a hub vault for setup-tokens and API
+`CLAUDE_CODE_OAUTH_TOKEN`. A login profile can be removed (landed, review
+w11-7; docs/accounts.md → *Remove a login*): `add_account { action: "remove" }`
+deletes fleet's token and key files and the profile dir, refused while a live
+session uses it, and sweeps the made-up `apikey-`/`setuptoken-` accounts no
+login uses; Remove host can also delete fleet's tokens and keys there (off by
+default, best effort). Not built: a hub vault for setup-tokens and API
 keys (fleet keeps no copy; each token lives on its host).
 
 Placement and login health (Control review F5/F6, landed, ON): one rule,
@@ -299,11 +304,24 @@ one line in Control's feed. **Sign in again** (#1116, landed; docs/accounts.md
 → *Signed-out logins*) fixes it from the app: the card, the session's row and
 the Accounts page open + Add account's sign-in step over that login, and its
 signed-out note clears when the pane says "Login successful" (MCP: `again:
-true` on the login tools). Copied logins are detected (#1117, landed;
+true` on the login tools). On a remote Mac the host's own login first gets a
+line recommending a login profile, with + Add account (review w02-7). Copied logins are detected (#1117, landed;
 docs/accounts.md → *Two copies of one login*): the health probe prints a
 short hash of each login's refresh token (`loginfp=`, migration 228,
 `service::login_conflicts`), and one login copied onto another host or
-profile is flagged in Hosts and `fleet_health`. Control's own account (F7, ON:
+profile is flagged in Hosts and `fleet_health`. Every login a conflict
+names now ranks last wherever fleet picks a login (review w09-9, landed:
+`best_login`, placement, auto-switch, a move's target login, the desktop's
+New session default and Switch suggestion), still used when nothing else is
+left, never refused. Per-model weekly windows (`seven_day_opus`,
+`seven_day_sonnet`) count for sessions launched on that model (review
+w10-5, landed; docs/accounts.md → *Accounts and usage*): the session row
+carries `launch_model` on the wire, the attention facts `limited_models`
+(hub and desktop), and "Paused · limit", auto-switch, the headroom check (`model`) and
+`new_session` / `restart_session`'s over-limit refusal read them on the
+hub and the desktop; routines, missions, resumes and ticket starts still
+read the account windows alone, and the phone mirrors it in its own
+change. Control's own account (F7, ON:
 `control.switch_at_limit`): `operator_status` reports its login, usage and
 "Paused · limit" / "signed out"; a birth takes the login it had on that host
 or the best one there, not the host's default; at its limit or signed out,
@@ -1557,8 +1575,10 @@ target); a provisioning records its content fingerprint, so an older one
 reads `provision_stale` (`fleet-hub provision --host <alias>
 --content-only` refreshes it); `forget_project` drops a project row, and
 `refresh_projects` drops rows that vanished. `merge_project` /
-`fleet-hub project merge <from> <into>` folds a repository registered twice
-(it changed owner or name) into one project row.
+`fleet-hub project merge <from> <into> [--dry-run]` folds a repository
+registered twice (it changed owner or name) into one project row, picks,
+local workspaces and fleet agent project inputs included; `--dry-run`
+previews it.
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;

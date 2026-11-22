@@ -589,13 +589,25 @@ impl FleetTools {
     }
 
     #[tool(description = "Remove a host; its sessions are orphaned. Returns \
-        the removed row.")]
+        the removed row. delete_credentials: also delete fleet's token and \
+        key files from its login profiles first (best effort, reported as \
+        `credentials`).")]
     pub(super) async fn remove_host(
         &self,
-        Parameters(args): Parameters<hosts::HostAliasArgs>,
+        Parameters(args): Parameters<hosts::RemoveHostArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit("remove_host", &format!("alias={}", args.alias));
-        ok_json(&hosts::remove_host(args, &self.store, &self.tunnels).map_err(to_mcp_err)?)
+        audit(
+            "remove_host",
+            &format!(
+                "alias={} delete_credentials={}",
+                args.alias, args.delete_credentials
+            ),
+        );
+        ok_json(
+            &hosts::remove_host(args, &self.store, &self.tunnels, &self.ssh)
+                .await
+                .map_err(to_mcp_err)?,
+        )
     }
 
     #[tool(description = "Fold host `from` into `into` in one transaction: \
@@ -1156,7 +1168,8 @@ impl FleetTools {
     }
 
     #[tool(description = "Approve or deny one waiting call by nonce; \
-        false if already answered or expired.")]
+        false if already answered or expired. Approving needs a trusted \
+        device; any may deny.")]
     pub(super) async fn answer_mcp_confirm(
         &self,
         Extension(caller): Extension<Caller>,
@@ -1164,6 +1177,9 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit("answer_mcp_confirm", &format!("approved={}", p.approved));
         refuse_operator_answer(&caller)?;
+        if p.approved {
+            confirm_approver(&caller)?;
+        }
         // `answer`, not `resolve`: an operator call waiting here runs on
         // approval and Control is told either way (review 2026-10-17, F1).
         let answered = self.guards.confirms.answer(&p.nonce, p.approved);
@@ -1943,6 +1959,30 @@ pub(super) fn owner_device_admin(caller: &Caller, what: &str) -> Result<(), McpE
         "E_FORBIDDEN",
         format!(
             "{what} from a device needs the hub's operator to trust it (a full device): \
+             fleet-hub client trust {}",
+            caller.client.as_ref().map_or("<name>", |c| c.name.as_str())
+        ),
+        None,
+    ))
+}
+
+/// Who may APPROVE a waiting call (review w18-8): an approval runs a held
+/// write, the class of `decide_setting_proposals`, so the master or a
+/// person's own unbound device that the hub's operator trusts and that is
+/// `full`, as [`settings_writer`] decides for a device. A deny is always
+/// safe and needs none of it.
+pub(super) fn confirm_approver(caller: &Caller) -> Result<(), McpError> {
+    if caller.is_master()
+        || (caller.is_person_device()
+            && caller.is_trusted_client()
+            && caller.mode == TokenMode::Full)
+    {
+        return Ok(());
+    }
+    Err(mcp_err(
+        "E_FORBIDDEN",
+        format!(
+            "approving a waiting call needs a trusted full device (this one may deny it): \
              fleet-hub client trust {}",
             caller.client.as_ref().map_or("<name>", |c| c.name.as_str())
         ),

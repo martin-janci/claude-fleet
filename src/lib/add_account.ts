@@ -162,6 +162,39 @@ export function setDailyLimit(host: string, profile: string, usd: number | null)
   return call({ action: 'daily_limit', host_alias: host, profile, daily_limit_usd: usd ?? 0 });
 }
 
+/** What `remove` did (review w11-7). */
+export interface LoginRemoved {
+  host_alias: string;
+  profile: string;
+  /** Made-up accounts (`apikey-`, `setuptoken-`) no login uses any more, now deleted. */
+  accounts_removed?: string[];
+}
+
+/** Take the login profile `profile` off `host`: its login pane closes, fleet's
+ *  token and key files and `~/.claude-profiles/<name>` are deleted. The backend
+ *  refuses (E_INVALID_STATE, naming them) while a live session runs under it. */
+export function removeLogin(host: string, profile: string): Promise<Result<LoginRemoved>> {
+  return call<LoginRemoved>({ action: 'remove', host_alias: host, profile });
+}
+
+/** The confirm line for Remove on a login profile. */
+export function removeLoginMessage(host: string, profile: string, kind: 'login' | 'setup_token' | 'api_key'): string {
+  const what = kind === 'api_key' ? 'its API key' : kind === 'setup_token' ? 'its setup token' : 'its sign-in';
+  return (
+    `Fleet closes any sign-in pane for ${profile}, deletes ${what} and the profile folder ~/.claude-profiles/${profile} on ${host}. ` +
+    'The host’s own login (~/.claude) is not touched. Refused while a session runs under this profile. ' +
+    'Using it again means adding it again.'
+  );
+}
+
+/** Whether the host's own login is on a Mac fleet reaches over SSH: the
+ *  health probe reports `login_split` (true or false) only there, and `local`
+ *  never has it. Signing that login in again over SSH writes
+ *  ~/.claude/.credentials.json beside the Keychain copy (review w02-7). */
+export function ownLoginSplitRisk(host: { login_split?: boolean | null } | null | undefined): boolean {
+  return host?.login_split != null;
+}
+
 /** The numbered choices on the pane's screen ("❯ 1. Claude account …"),
  *  for buttons beside the pane. At most nine, in screen order. */
 export function paneChoices(pane: string | undefined): { key: LoginKey; label: string }[] {

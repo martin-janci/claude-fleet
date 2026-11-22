@@ -1910,6 +1910,94 @@ fn forbidden(e: McpError) {
     assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
 }
 
+/// A project's worktree setup command and AI check run on the fleet's
+/// hosts: the master or the owner's trusted full device sets them (review
+/// w18-7), and each change is in the admin log. Reading the setup stays open
+/// to a person's device.
+#[tokio::test]
+async fn a_projects_setup_command_needs_a_trusted_owner_device_and_is_logged() {
+    use crate::service::work::WorkLinkArgs;
+    let (s, pid, _) = two_host_store();
+    let t = test_tools(s);
+    let setup = |command: Option<&str>| WorkLinkArgs {
+        action: "worktree_setup".into(),
+        project_id: Some(pid),
+        command: command.map(str::to_string),
+        ..Default::default()
+    };
+    let check = WorkLinkArgs {
+        action: "check_setup".into(),
+        project_id: Some(pid),
+        mode: Some("ask".into()),
+        command: Some("pnpm test".into()),
+        ..Default::default()
+    };
+    let phone = client_caller("phone", TokenMode::Full);
+    for who in [
+        phone.clone(),
+        another_person(trusted(phone.clone())),
+        operator(),
+    ] {
+        forbidden(
+            t.work_link(
+                Extension(who.clone()),
+                Parameters(setup(Some("curl x | sh"))),
+            )
+            .await
+            .unwrap_err(),
+        );
+        forbidden(
+            t.work_link(Extension(who), Parameters(check.clone()))
+                .await
+                .unwrap_err(),
+        );
+    }
+    t.work_link(Extension(phone.clone()), Parameters(setup(None)))
+        .await
+        .expect("an untrusted device still reads the setup");
+    let events = || {
+        t.store
+            .lock()
+            .unwrap()
+            .admin_events(&crate::store::AdminEventQuery {
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap()
+    };
+    assert!(events().is_empty(), "a refusal and a read log nothing");
+    t.work_link(
+        Extension(trusted(phone.clone())),
+        Parameters(setup(Some("pnpm install"))),
+    )
+    .await
+    .expect("the owner's trusted full device");
+    t.work_link(Extension(Caller::master()), Parameters(check))
+        .await
+        .expect("the master");
+    let ev = events();
+    let actions: Vec<(&str, &str, &str)> = ev
+        .iter()
+        .map(|e| {
+            (
+                e.action.as_str(),
+                e.resource_type.as_str(),
+                e.resource_id.as_str(),
+            )
+        })
+        .collect();
+    let id = pid.to_string();
+    assert_eq!(
+        actions,
+        [
+            ("check_setup", "project", id.as_str()),
+            ("worktree_setup", "project", id.as_str()),
+        ]
+    );
+    assert_eq!(ev[1].representation["command"], "pnpm install");
+    assert_eq!(ev[1].actor_device, Some(7));
+}
+
 /// Work links are session-addressed: a per-host token decides and reads only
 /// its own host's sessions, and never another host's past work by key.
 #[tokio::test]
@@ -6523,6 +6611,9 @@ fn one_full_row() -> serde_json::Value {
     // each is skipped when absent (review wave 24, w24-1).
     row.pinned_at = Some(11);
     row.prompt_suggestion = Some("run the tests".into());
+    // A launch model, for the same reason (review w10-5: a model's weekly
+    // window holds the session).
+    row.launch_model = Some("opus".into());
     row.last_viewed_at = Some(12);
     row.origin = Some("operator".to_string());
     row.origin_ref = Some("9".to_string());
@@ -6565,6 +6656,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "last_stop_at",
             "last_turn_at",
             "last_viewed_at",
+            "launch_model",
             "lost_at",
             "lost_reason",
             "needs_attention",
@@ -10092,10 +10184,27 @@ async fn a_paired_device_lists_and_answers_the_operators_waiting_start() {
         assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
     }
 
+    // An untrusted device does not approve (review w18-8); it may deny,
+    // as the last answer below does.
+    let e = t
+        .answer_mcp_confirm(
+            Extension(phone.clone()),
+            Parameters(AnswerMcpConfirmParams {
+                nonce: nonce.clone(),
+                approved: true,
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        e.message.starts_with("E_FORBIDDEN") && e.message.contains("trusted"),
+        "{}",
+        e.message
+    );
     bus.take();
     let answered = t
         .answer_mcp_confirm(
-            Extension(phone.clone()),
+            Extension(trusted(phone.clone())),
             Parameters(AnswerMcpConfirmParams {
                 nonce: nonce.clone(),
                 approved: true,
@@ -14125,14 +14234,14 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
     (
         "work_link",
         "check_setup",
-        "a project's AI check switch (a project, not a session); refused as \
-         `check` is",
+        "a project's AI check switch (a project, not a session); setting it \
+         is the master's or the owner's trusted full device's",
     ),
     (
         "work_link",
         "worktree_setup",
         "a project's new worktree setup, a command run on the fleet's hosts \
-         (a project, not a session); refused as `check_setup` is",
+         (a project, not a session); set as `check_setup` is",
     ),
     (
         "work_link",

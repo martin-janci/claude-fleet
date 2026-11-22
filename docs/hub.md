@@ -3688,8 +3688,11 @@ row into the new one in one transaction:
    first, then merge, or the next scan registers it again. It also refuses
    while the `from` row has a live session (`E_INVALID_STATE`), as
    `forget_project` does: kill or move those sessions first.
-2. Find the two ids with `list_projects`, then, with the hub running:
-   `fleet-hub project merge <from> <into>` (or the
+2. Find the two ids with `list_projects`, then, with the hub running,
+   preview it: `fleet-hub project merge <from> <into> --dry-run` (or
+   `merge_project {from, into, dry_run: true}`) runs the merge, prints
+   what would move and rolls it back; it needs no confirmation. Then
+   merge: `fleet-hub project merge <from> <into>` (or the
    `merge_project {from, into}` tool with the master token). `from` is the
    row that goes. `mcp.confirm_destructive` applies as it does to
    `merge_host`.
@@ -3704,11 +3707,17 @@ host and name (the sessions and mission lanes on `from`'s row point at
 account, a project-scope environment variable, a routine's project
 notebook (per circle) and the ticket space (a `from` space left beside
 `into`'s own is named in the reply as `ticket_space_left`; its keys still
-resolve). Forbidden accounts add
+resolve). The choices that name the repository as `owner/repo` move too,
+`into`'s own winning: a person's pin, hide and group (`project_picks`;
+`picks_moved`), the local workspaces synced from it (`workspaces_moved`; a
+`from` workspace on a host and worktree `into` already syncs is dropped,
+`workspaces_dropped`, and its local files stay where they are), and a fleet
+agent's input whose value is exactly the old `owner/repo`
+(`agent_inputs_moved`). Forbidden accounts add
 up: after the merge the project forbids every account either row did. What is
-left alone: rows that name the repository in words (`org_rules`,
-`project_picks`, the review tables), and the checkouts on the hosts. What is
-deleted: the `from` project row. It cannot be undone except from the backup.
+left alone: history that names the repository in words (`org_rules`, the
+review tables), and the checkouts on the hosts. What is deleted: the `from`
+project row. It cannot be undone except from the backup.
 
 The hub's default data dir is separate from the desktop's on every
 platform, so a hub and a desktop app on the same machine never share a
@@ -4351,7 +4360,9 @@ deliberately.
 - **`mcp.confirm_destructive`.** This desktop setting gates destructive
   tools (`broadcast_prompt`, `kill_session`, `delete_worktree`, …) behind a
   UI confirmation dialog. On a hub the request waits for a fleet admin's
-  paired device instead (`mcp_confirms`, `answer_mcp_confirm`) and expires after
+  paired device instead (`mcp_confirms`, `answer_mcp_confirm`; approving
+  needs a device the hub's operator trusted, `fleet-hub client trust
+  <name>`, while any of them may deny) and expires after
   ten minutes unanswered; leave the setting off (its default) unless one of
   your devices will answer. A `state.db` copied from a desktop can carry it
   switched on; `fleet-hub serve` logs a warning at startup when it is.

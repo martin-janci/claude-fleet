@@ -938,6 +938,13 @@ impl AttentionInputs {
         let until = facts
             .limited_accounts
             .values()
+            .copied()
+            .chain(
+                facts
+                    .limited_models
+                    .values()
+                    .flat_map(|m| m.all().map(|(_, l)| l)),
+            )
             .filter_map(|l| l.resets_at)
             .min();
         self.facts = Some((facts.clone(), until));

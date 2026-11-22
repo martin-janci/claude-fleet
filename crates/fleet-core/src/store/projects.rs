@@ -914,9 +914,13 @@ impl Store {
     /// move. A start rule, PR-shepherd rule, mission repo, forbidden account
     /// or project-scope environment variable `into` already has keeps
     /// `into`'s; the rest move
-    /// ([`PROJECT_ID_COLUMNS`]). Rows that name the repository in words
-    /// (`org_rules`, `project_picks`, the review tables) are left as they
-    /// are. The project notebooks of `from`'s routines and its ticket space
+    /// ([`PROJECT_ID_COLUMNS`]). The choices that name the repository in
+    /// words move too, `into`'s own winning: its pin, hide and group
+    /// (`project_picks`), the local workspaces synced from it (one `into`
+    /// already has for the same host and worktree is kept and `from`'s
+    /// dropped), and a fleet agent's input whose value is exactly `from`'s
+    /// `owner/repo` (`agent_rules.config`). History that names it
+    /// (`org_rules`, the review tables) is left as it is. The project notebooks of `from`'s routines and its ticket space
     /// (`PROJECT_REFS_BY_OTHER_NAME`) become `into`'s unless it has its
     /// own. Emits `session:updated` per moved or re-pointed session,
     /// `worktree:updated` per moved local worktree row, `worktree:removed`
@@ -931,6 +935,18 @@ impl Store {
         &self,
         from: i64,
         into: i64,
+    ) -> Result<ProjectMergeReport, crate::ipc_error::IpcError> {
+        self.merge_project_with(from, into, false)
+    }
+
+    /// [`Self::merge_project`]; with `dry_run` the transaction runs and its
+    /// report is built, then it is rolled back and nothing is emitted: what
+    /// the merge would move, with nothing written.
+    pub fn merge_project_with(
+        &self,
+        from: i64,
+        into: i64,
+        dry_run: bool,
     ) -> Result<ProjectMergeReport, crate::ipc_error::IpcError> {
         use crate::ipc_error::{codes, IpcError};
         if from == into {
@@ -1124,7 +1140,74 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()?;
+        // The person's pin, hide and group (`project_picks`, keyed by the
+        // words): into's own wins.
+        let (fo, fr) = from_name.split_once('/').unwrap_or((&from_name, ""));
+        let (io, ir) = into_name.split_once('/').unwrap_or((&into_name, ""));
+        let picks_moved = tx.execute(
+            "UPDATE OR IGNORE project_picks SET owner = ?3, repo = ?4 \
+              WHERE owner = ?1 AND repo = ?2",
+            rusqlite::params![fo, fr, io, ir],
+        )?;
+        tx.execute(
+            "DELETE FROM project_picks WHERE owner = ?1 AND repo = ?2",
+            rusqlite::params![fo, fr],
+        )?;
+        // Local workspaces synced from it: one into already has for the same
+        // host and worktree wins, and from's twin goes (its sync state with
+        // it; the local files stay where they are).
+        let workspaces_moved = tx.execute(
+            "UPDATE OR IGNORE local_workspaces SET owner = ?3, repo = ?4 \
+              WHERE owner = ?1 AND repo = ?2",
+            rusqlite::params![fo, fr, io, ir],
+        )?;
+        let workspaces_dropped = tx.execute(
+            "DELETE FROM local_workspaces WHERE owner = ?1 AND repo = ?2",
+            rusqlite::params![fo, fr],
+        )?;
+        // A fleet agent's project input is its `owner/repo` (validated so
+        // by `fleet_agents::grant::check_values`): a top-level config value
+        // that is exactly from's name now names into.
+        let agent_inputs_moved = {
+            let rules: Vec<(i64, String)> = {
+                let mut stmt = tx.prepare("SELECT id, config FROM agent_rules")?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            let mut n = 0;
+            for (id, config) in rules {
+                if let Some(next) = rename_config_inputs(&config, &from_name, &into_name) {
+                    tx.execute(
+                        "UPDATE agent_rules SET config = ?2 WHERE id = ?1",
+                        rusqlite::params![id, next],
+                    )?;
+                    n += 1;
+                }
+            }
+            n
+        };
         tx.execute("DELETE FROM projects WHERE id = ?1", [from])?;
+        let report = ProjectMergeReport {
+            from,
+            into,
+            from_name,
+            into_name,
+            sessions_moved,
+            worktrees_moved: wt_moved.len(),
+            worktrees_folded: wt_folded.len(),
+            other_rows_moved,
+            picks_moved,
+            workspaces_moved,
+            workspaces_dropped,
+            agent_inputs_moved,
+            ticket_space_left,
+            dry_run,
+        };
+        if dry_run {
+            // Dropping the transaction rolls it back.
+            drop(tx);
+            return Ok(report);
+        }
         tx.commit()?;
         for id in &wt_folded {
             self.bus.worktree_removed(*id);
@@ -1144,17 +1227,7 @@ impl Store {
         if let Some(row) = fetch_project(&self.conn, into)? {
             self.bus.project_updated(&row);
         }
-        Ok(ProjectMergeReport {
-            from,
-            into,
-            from_name,
-            into_name,
-            sessions_moved,
-            worktrees_moved: wt_moved.len(),
-            worktrees_folded: wt_folded.len(),
-            other_rows_moved,
-            ticket_space_left,
-        })
+        Ok(report)
     }
 
     /// Delete one worktree row unless any session row (alive, ghost or dead)
@@ -1406,6 +1479,21 @@ impl Store {
     }
 }
 
+/// PURE: `config` (a fleet agent's input values, a JSON object) with every
+/// top-level string value that is exactly `from` (an `owner/repo`) set to
+/// `into`; `None` when no value changes or it is not an object.
+fn rename_config_inputs(config: &str, from: &str, into: &str) -> Option<String> {
+    let mut v: serde_json::Value = serde_json::from_str(config).ok()?;
+    let mut changed = false;
+    for val in v.as_object_mut()?.values_mut() {
+        if val.as_str().is_some_and(|s| s.trim() == from) {
+            *val = serde_json::Value::String(into.to_string());
+            changed = true;
+        }
+    }
+    changed.then(|| v.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1606,7 +1694,12 @@ mod tests {
                 worktrees_folded: 1,
                 // The start rule and the forbidden account only the old had.
                 other_rows_moved: 2,
+                picks_moved: 0,
+                workspaces_moved: 0,
+                workspaces_dropped: 0,
+                agent_inputs_moved: 0,
                 ticket_space_left: None,
+                dry_run: false,
             }
         );
         let events = bus.take();
@@ -1735,6 +1828,149 @@ mod tests {
             ],
             "all under the survivor's name; its own value wins"
         );
+    }
+
+    /// The choices keyed by `owner/repo` follow the merge, the survivor's
+    /// own winning (review w05-8): picks, local workspaces and a fleet
+    /// agent's project input. A dry run reports the same and writes nothing.
+    #[test]
+    fn a_merge_carries_the_choices_named_by_owner_and_repo() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mac").unwrap();
+        let old = s.upsert_project("frantisek", "app", "/p/app").unwrap();
+        let new = s.upsert_project("sales-twins", "app", "/p/app").unwrap();
+        let c = s.conn_for_test();
+        // A pick under both names (the survivor's group wins) and one on
+        // another repository of the old owner (left alone).
+        for (o, r, grp) in [
+            ("frantisek", "app", "old-grp"),
+            ("sales-twins", "app", "new-grp"),
+            ("frantisek", "lib", "lib-grp"),
+        ] {
+            c.execute(
+                "INSERT INTO project_picks (owner, repo, pinned, grp, updated_at) \
+                 VALUES (?1, ?2, 1, ?3, 1)",
+                rusqlite::params![o, r, grp],
+            )
+            .unwrap();
+        }
+        // A workspace on the same worktree under both names (the survivor's
+        // stays) and one only the old name has (it moves).
+        for (o, key, local) in [
+            ("frantisek", "main", "/l/old-main"),
+            ("sales-twins", "main", "/l/new-main"),
+            ("frantisek", "feat", "/l/old-feat"),
+        ] {
+            c.execute(
+                "INSERT INTO local_workspaces (host_alias, owner, repo, worktree_key, \
+                 remote_path, local_path, created_at) VALUES ('mac', ?1, 'app', ?2, '/r', ?3, 1)",
+                rusqlite::params![o, key, local],
+            )
+            .unwrap();
+        }
+        for (scope, config) in [
+            (
+                "a",
+                r#"{"repo":"frantisek/app","note":"frantisek/app is old"}"#,
+            ),
+            ("b", r#"{"repo":"frantisek/lib"}"#),
+        ] {
+            c.execute(
+                "INSERT INTO agent_rules (agent, scope, level, host_alias, config, granted_by, \
+                 granted_at, definition) VALUES ('fleet', ?1, 'watch', 'mac', ?2, 'me', 1, 'd')",
+                rusqlite::params![scope, config],
+            )
+            .unwrap();
+        }
+        let picks = || {
+            let mut st = c
+                .prepare("SELECT owner || '/' || repo, grp FROM project_picks ORDER BY 1")
+                .unwrap();
+            let v = st
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .unwrap();
+            v.collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        let spaces = || {
+            let mut st = c
+                .prepare(
+                    "SELECT owner || '/' || worktree_key, local_path FROM local_workspaces \
+                     ORDER BY 1, 2",
+                )
+                .unwrap();
+            let v = st
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .unwrap();
+            v.collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        let configs = || {
+            let mut st = c
+                .prepare("SELECT config FROM agent_rules ORDER BY scope")
+                .unwrap();
+            let v = st.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            v.collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        let before = (picks(), spaces(), configs());
+
+        let dry = s.merge_project_with(old, new, true).unwrap();
+        assert!(dry.dry_run);
+        assert_eq!(
+            (
+                dry.picks_moved,
+                dry.workspaces_moved,
+                dry.workspaces_dropped,
+                dry.agent_inputs_moved
+            ),
+            (0, 1, 1, 1)
+        );
+        assert_eq!(
+            (picks(), spaces(), configs()),
+            before,
+            "a dry run writes nothing"
+        );
+        assert!(s.get_project(old).unwrap().is_some());
+
+        let rep = s.merge_project(old, new).unwrap();
+        assert!(!rep.dry_run);
+        assert_eq!(
+            (
+                rep.picks_moved,
+                rep.workspaces_moved,
+                rep.workspaces_dropped,
+                rep.agent_inputs_moved
+            ),
+            (
+                dry.picks_moved,
+                dry.workspaces_moved,
+                dry.workspaces_dropped,
+                dry.agent_inputs_moved
+            )
+        );
+        assert_eq!(
+            picks(),
+            [
+                ("frantisek/lib".to_string(), "lib-grp".to_string()),
+                ("sales-twins/app".into(), "new-grp".into()),
+            ],
+            "the survivor's pick wins; another project's stays"
+        );
+        assert_eq!(
+            spaces(),
+            [
+                ("sales-twins/feat".to_string(), "/l/old-feat".to_string()),
+                ("sales-twins/main".into(), "/l/new-main".into()),
+            ]
+        );
+        let cfg: Vec<serde_json::Value> = configs()
+            .iter()
+            .map(|t| serde_json::from_str(t).unwrap())
+            .collect();
+        assert_eq!(cfg[0]["repo"], "sales-twins/app");
+        assert_eq!(
+            cfg[0]["note"], "frantisek/app is old",
+            "only an exact value"
+        );
+        assert_eq!(cfg[1]["repo"], "frantisek/lib");
     }
 
     fn account_row(s: &Store, uuid: &str) {

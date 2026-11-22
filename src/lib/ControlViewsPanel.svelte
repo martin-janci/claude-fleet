@@ -56,7 +56,7 @@
   import { loadMissionList, missionList } from './mission_room';
   import { openMission, WAIT_WORDS } from './missions';
   import { onWorkChangedDebounced } from './work';
-  import { classify } from './attention';
+  import { classify, limitFor } from './attention';
   import { attentionFacts } from './attention_facts';
   import { accountByUuid, accountLabel } from './accounts';
   import { openRoutines } from './routines';
@@ -353,7 +353,7 @@
                 <div class="limit" data-testid="control-needs-you-limit">
                   <LimitActions
                     sess={s}
-                    resetsAt={$attentionFacts?.limited_accounts?.[s.account_uuid ?? '']?.resets_at ?? null}
+                    resetsAt={limitFor($attentionFacts, s)?.resets_at ?? null}
                     accountName={(u) => accountLabel($accountByUuid.get(u))}
                   />
                 </div>

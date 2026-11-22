@@ -60,7 +60,7 @@
   import { dayLabel, loginCardText, loginShellCommand } from './control_escalations';
   import { copyText } from './clipboard';
   import { push } from './toasts';
-  import { attentionState, displayName } from './attention';
+  import { attentionState, displayName, limitFor } from './attention';
   import { STATE_LABELS } from './row_groups';
   import { attentionIdleMinutes } from './notify';
   import { showFriendlyNames } from './sessions';
@@ -71,6 +71,7 @@
   import { autoSwitchState, loadAutoSwitch, setAutoSwitch, type AutoSwitchPatch } from './account_switch';
   import AddAccountDialog from './AddAccountDialog.svelte';
   import SignInAgain from './SignInAgain.svelte';
+  import RemoveLoginDialog from './RemoveLoginDialog.svelte';
   import { untrack } from 'svelte';
   import { get } from 'svelte/store';
 
@@ -145,7 +146,7 @@
   }
 
   const pausedOf = (a: AccountSummary): SessionRow[] =>
-    pausedSessions(a, $attentionFacts?.limited_accounts, now);
+    pausedSessions(a, $attentionFacts?.limited_accounts, now, $attentionFacts?.limited_models);
 
   // "Show": the detail's Sessions list narrows to the paused ones.
   let pausedOnly = $state<string | null>(null);
@@ -153,6 +154,8 @@
   let adding = $state(false);
   /** The signed-out login whose "Sign in again" is open. */
   let signingIn = $state<{ host: string; profile: string | null; token: boolean } | null>(null);
+  /** The login profile whose Remove is being confirmed (review w11-7). */
+  let removingLogin = $state<{ host: string; profile: string; kind: 'login' | 'setup_token' | 'api_key' } | null>(null);
   function showPaused(uuid: string) {
     picked = uuid;
     pausedOnly = uuid;
@@ -305,9 +308,17 @@
   /** "Wait until <reset>" on the paused panel: every paused session of the
    *  account waits out its limit, as each row's own Wait does. */
   function waitAll(a: AccountSummary) {
-    const at = limitOf(a.uuid);
-    if (at == null) return;
-    for (const s of pausedOf(a)) waitOut(s.id, at);
+    // Each session waits for its own limit: a model's weekly window holds
+    // only the sessions on that model (review w10-5).
+    const paused = pausedOf(a);
+    const atOf = (s: SessionRow) => limitFor($attentionFacts, { account_uuid: a.uuid, launch_model: s.launch_model })?.resets_at ?? null;
+    const ats = paused.map(atOf).filter((t): t is number => t != null);
+    if (ats.length === 0) return;
+    const at = Math.max(...ats);
+    for (const s of paused) {
+      const t = atOf(s);
+      if (t != null) waitOut(s.id, t);
+    }
     // Wait sends nothing (review w03-4): the rows read "Waiting until …" and
     // are ready again once the limit resets; a turn the limit cut off stays
     // where it stopped.
@@ -443,6 +454,10 @@
   {#if signingIn}
     {@const g = signingIn}
     <SignInAgain host={g.host} profile={g.profile} token={g.token} onclose={() => (signingIn = null)} />
+  {/if}
+  {#if removingLogin}
+    {@const g = removingLogin}
+    <RemoveLoginDialog host={g.host} profile={g.profile} kind={g.kind} onclose={() => (removingLogin = null)} />
   {/if}
 
   {#if list.length === 0}
@@ -683,6 +698,21 @@
                       >{l.setupToken ? 'New token…' : 'Sign in again'}</button
                     >
                   {/if}
+                  {#if l.profile}
+                    {@const profile = l.profile}
+                    <button
+                      type="button"
+                      class="link"
+                      data-testid="account-login-remove"
+                      title={`Remove profile ${profile} from ${l.host}: its token or key and ~/.claude-profiles/${profile}`}
+                      onclick={() =>
+                        (removingLogin = {
+                          host: l.host,
+                          profile,
+                          kind: l.setupToken ? 'setup_token' : a.uuid.startsWith('apikey-') ? 'api_key' : 'login',
+                        })}>Remove…</button
+                    >
+                  {/if}
                 </li>
               {/each}
             </ul>
@@ -709,7 +739,7 @@
                       ? 'Paused · limit'
                       : STATE_LABELS[attentionState(s, { idleSecs: $attentionIdleMinutes * 60, now, facts: $attentionFacts })]}</span>
                   {#if onlyPaused}
-                    <LimitActions sess={s} resetsAt={limitOf(a.uuid)} accountName={(u) => ($accountByUuid.get(u) ? labelOf($accountByUuid.get(u)) : u.slice(0, 8))} />
+                    <LimitActions sess={s} resetsAt={limitFor($attentionFacts, { account_uuid: a.uuid, launch_model: s.launch_model })?.resets_at ?? null} accountName={(u) => ($accountByUuid.get(u) ? labelOf($accountByUuid.get(u)) : u.slice(0, 8))} />
                   {/if}
                 </li>
               {/each}

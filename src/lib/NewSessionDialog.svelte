@@ -1556,7 +1556,14 @@
     const submittedWorktreeId = inNewMode ? null : chosenWorktreeId;
     if (runsClaude && !limitConfirmed) {
       busy = true;
-      const h = await checkAccountHeadroom(submittedHost, chosenProfile.trim() || null, project.project.id);
+      // Read for the model it starts on: that model's own weekly window
+      // counts too (review w10-5).
+      const h = await checkAccountHeadroom(
+        submittedHost,
+        chosenProfile.trim() || null,
+        project.project.id,
+        chosenModel || null,
+      );
       busy = false;
       // No answer (a hub client, an unknown host): start as before.
       if (h.ok && h.value?.over) {

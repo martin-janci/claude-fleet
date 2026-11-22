@@ -18,7 +18,7 @@
   import { selectedSession } from './selection';
   import { hostByAlias } from './hosts';
   import { hintAnchor } from './hints';
-  import { bucketState, rank } from './attention';
+  import { bucketState, limitFor, rank } from './attention';
   import { attentionIdleMinutes } from './notify';
   import { attentionFacts, blockedLine } from './attention_facts';
   import { slideIn, wash } from './motion_catalog';
@@ -1031,7 +1031,7 @@
           {#if triage.bucket === 'account_limit'}
             <LimitActions
               {sess}
-              resetsAt={$attentionFacts?.limited_accounts?.[sess.account_uuid ?? '']?.resets_at ?? null}
+              resetsAt={limitFor($attentionFacts, sess)?.resets_at ?? null}
               accountName={(u) => accountLabel($accountByUuid.get(u))}
             />
           {:else if triage.bucket === 'no_credentials'}

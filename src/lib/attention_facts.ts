@@ -10,7 +10,14 @@ import type { HostRow } from './hosts';
 import { hosts } from './hosts';
 import type { AccountUsageSnapshot, UsageStatus } from './account_usage_store';
 import { accountUsage } from './account_usage_store';
-import { loginSignedOut, type AttentionFacts, type AttentionLimit, type AttentionLogin } from './attention';
+import {
+  limitFor,
+  loginSignedOut,
+  type AttentionFacts,
+  type AttentionLimit,
+  type AttentionLogin,
+  type ModelFamily,
+} from './attention';
 
 /** The usage windows' lengths, seconds. */
 const FIVE_HOUR_SECS = 5 * 3600;
@@ -49,6 +56,7 @@ export function attentionFactsFrom(
     (h.signed_out_logins ?? []).map((l) => ({ host: h.alias, profile: l.profile ?? null })),
   );
   const limited_accounts: Record<string, AttentionLimit> = {};
+  const limited_models: Record<string, Partial<Record<ModelFamily, AttentionLimit>>> = {};
   const uncredentialed_accounts: string[] = [];
   for (const snap of Object.values(usage)) {
     if (LOGIN_GONE.has(snap.status) && everyLoginSignedOut(hostRows, snap.account_uuid)) {
@@ -73,8 +81,18 @@ export function attentionFactsFrom(
     } else if (weekly) {
       limited_accounts[snap.account_uuid] = { window: 'weekly', resets_at: weekly.resets_at };
     }
+    // A model's own weekly window (review w10-5): kept apart, since it holds
+    // only the sessions launched on that model.
+    const models: Partial<Record<ModelFamily, AttentionLimit>> = {};
+    if (atLimit(u.seven_day_opus, WEEK_SECS)) models.opus = { window: 'weekly_opus', resets_at: u.seven_day_opus!.resets_at };
+    if (atLimit(u.seven_day_sonnet, WEEK_SECS))
+      models.sonnet = { window: 'weekly_sonnet', resets_at: u.seven_day_sonnet!.resets_at };
+    if (models.opus || models.sonnet) limited_models[snap.account_uuid] = models;
   }
-  return { down_hosts, limited_accounts, uncredentialed_accounts, signed_out_logins };
+  // `limited_models` only when some account has one, as the hub leaves it out.
+  return Object.keys(limited_models).length > 0
+    ? { down_hosts, limited_accounts, limited_models, uncredentialed_accounts, signed_out_logins }
+    : { down_hosts, limited_accounts, uncredentialed_accounts, signed_out_logins };
 }
 
 /** The facts the stores hold now. The
@@ -90,13 +108,20 @@ export const attentionFacts: Readable<AttentionFacts> = stable(
   (a, b) => JSON.stringify(a) === JSON.stringify(b),
 );
 
+const LIMIT_WORDS: Record<AttentionLimit['window'], string> = {
+  five_hour: '5-hour',
+  weekly: 'weekly',
+  weekly_opus: 'weekly Opus',
+  weekly_sonnet: 'weekly Sonnet',
+};
+
 /** The reason line of a Blocked row (step 2.4), as the Main board words it:
  *  "Paused · weekly limit on tech.silvester". Blocked is not a status word:
  *  a row blocked on its host or its sign-in reads "Needs you · …" with what
  *  it is blocked on. `null` for any other bucket. */
 export function blockedLine(
   bucket: string,
-  sess: { host_alias: string; account_uuid: string | null; claude_profile?: string | null },
+  sess: { host_alias: string; account_uuid: string | null; claude_profile?: string | null; launch_model?: string | null },
   facts: AttentionFacts | undefined,
   accountName: (uuid: string) => string,
 ): string | null {
@@ -105,7 +130,7 @@ export function blockedLine(
       return `Needs you · blocked on ${sess.host_alias}, which is down`;
     case 'account_limit': {
       const uuid = sess.account_uuid ?? '';
-      const w = facts?.limited_accounts?.[uuid]?.window === 'five_hour' ? '5-hour' : 'weekly';
+      const w = LIMIT_WORDS[limitFor(facts, sess)?.window ?? 'weekly'];
       return `Paused · ${w} limit on ${accountName(uuid)}`;
     }
     case 'no_credentials':

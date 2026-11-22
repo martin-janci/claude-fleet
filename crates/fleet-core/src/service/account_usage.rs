@@ -242,6 +242,68 @@ pub struct AccountUsage {
     pub seven_day_sonnet: Option<Window>,
 }
 
+/// A model with a weekly window of its own (`seven_day_opus`,
+/// `seven_day_sonnet`, review w10-5). That window counts only for a session
+/// launched on the model (`sessions.launch_model`, `claude --model`), and
+/// for a start that names it: a session on the host's default model is
+/// moved to another model by Claude Code itself at the model's cap, and one
+/// on another model never touches the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelFamily {
+    Opus,
+    Sonnet,
+}
+
+impl ModelFamily {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ModelFamily::Opus => "opus",
+            ModelFamily::Sonnet => "sonnet",
+        }
+    }
+
+    /// "Opus", "Sonnet": for a person.
+    pub fn label(self) -> &'static str {
+        match self {
+            ModelFamily::Opus => "Opus",
+            ModelFamily::Sonnet => "Sonnet",
+        }
+    }
+}
+
+/// PURE: the model family a `claude --model` value bills: an alias
+/// (`opus`, `opus[1m]`, `sonnet`, `sonnet[1m]`) or a full id
+/// (`claude-opus-4-5-20251101`, `us.anthropic.claude-sonnet-4-5…`), any
+/// case. `None` for no model (the host's default), for one with no window
+/// of its own (`haiku`, `fable`), and for one that is not one model
+/// (`opusplan`: Opus in plan mode, Sonnet otherwise; `default`, `best`):
+/// no model window counts then. Mirrored by `modelFamily` in
+/// `src/lib/attention.ts`.
+pub fn model_family(model: Option<&str>) -> Option<ModelFamily> {
+    let m = model?.trim().to_ascii_lowercase();
+    let m = m.split('[').next().unwrap_or_default();
+    if m.contains("opusplan") {
+        None
+    } else if m.contains("opus") {
+        Some(ModelFamily::Opus)
+    } else if m.contains("sonnet") {
+        Some(ModelFamily::Sonnet)
+    } else {
+        None
+    }
+}
+
+impl AccountUsage {
+    /// The weekly window of `family`'s own, when the reading has one.
+    pub fn model_window(&self, family: ModelFamily) -> Option<&Window> {
+        match family {
+            ModelFamily::Opus => self.seven_day_opus.as_ref(),
+            ModelFamily::Sonnet => self.seven_day_sonnet.as_ref(),
+        }
+    }
+}
+
 /// What one host's script run said.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -1332,6 +1394,31 @@ mod tests {
                 "{code} must let the sweep try the next host"
             );
         }
+    }
+
+    /// Review w10-5: `launch_model` holds aliases and full ids alike.
+    #[test]
+    fn a_launch_model_maps_to_the_family_whose_window_it_bills() {
+        use ModelFamily::{Opus, Sonnet};
+        for (m, want) in [
+            ("opus", Some(Opus)),
+            ("Opus", Some(Opus)),
+            ("opus[1m]", Some(Opus)),
+            ("claude-opus-4-5-20251101", Some(Opus)),
+            ("us.anthropic.claude-opus-4-1-20250805-v1:0", Some(Opus)),
+            ("sonnet", Some(Sonnet)),
+            ("sonnet[1m]", Some(Sonnet)),
+            ("claude-sonnet-4-5", Some(Sonnet)),
+            ("opusplan", None),
+            ("haiku", None),
+            ("fable", None),
+            ("default", None),
+            ("best", None),
+            ("", None),
+        ] {
+            assert_eq!(model_family(Some(m)), want, "{m}");
+        }
+        assert_eq!(model_family(None), None);
     }
 
     const OK_BODY: &str = r#"{"five_hour":{"utilization":35.0,"resets_at":"2026-02-06T22:00:00+00:00"},"seven_day":{"utilization":14.0,"resets_at":"2026-02-12T20:00:00+00:00"},"seven_day_opus":{"utilization":12.0,"resets_at":"2026-02-12T20:00:00+00:00"},"seven_day_sonnet":null,"extra_usage":{"is_enabled":false}}"#;

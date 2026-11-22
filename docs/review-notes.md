@@ -21,7 +21,8 @@ session that is given the same id does not inherit them.
 
 The bar above the diff counts the drafts: **Send N notes to Claude** (or the
 session's agent) types every draft of the session, from every file, into
-the session as **one** numbered message: who wrote them, then each note
+the session as **one** numbered message: who wrote them (the person, not
+the device), then each note
 with its file, line and the quoted line. If the session is busy it goes in
 when its turn ends, through the same queue as Send later.
 
@@ -49,11 +50,29 @@ it); the agent's reply in the conversation says what it changed.
 An answer-only device sends nothing. The prompt goes through the hub's
 untrusted-input marker for a caller that needs one, as `queue_prompt` does.
 
+### What a grantee sees of the other grantees
+
+The rule `session_conversation` keeps for turn authors holds for notes
+too: the session's owner and the master token see every author; anyone
+else sees the owner's name and their own, and a note another grantee wrote
+reads **someone else**, with no `author_person_id` (the body stays). A
+`resolved_by` that is not the reader's own name or the owner's reads the
+same. An author with no person (an agent's host token, a named token) is
+nobody's secret and stays as it is. The typed prompt names the sender by
+person only ("Review notes from Ada"), never their device, since it
+becomes a turn every grantee reads.
+
+A send still waiting for the session's turn to end (`delivery: waiting`)
+is what the session is about to be typed, so `list` shows it only to a
+caller with `drive` on the session, as `queued_prompts` does: a watcher
+sees it once it is sent.
+
 ## Wire
 
 `review_notes { session_id, action? }`:
 
-- `list` (default): the sent notes, newest send first.
+- `list` (default): the sent notes, newest send first, veiled for a
+  grantee as above.
 - `send { client_msg_id, notes: [{path, line?, side?: new|old, quote?, body}] }`:
   at most 50 notes, each at most 4000 characters; a path is relative to the
   checkout. Answers `{ session_id, notes, delivered, queued_id?, repeat? }`.

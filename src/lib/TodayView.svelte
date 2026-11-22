@@ -15,7 +15,7 @@
   // records no install per device).
   import { onDestroy } from 'svelte';
   import LimitActions from './LimitActions.svelte';
-  import { classify } from './attention';
+  import { classify, limitFor } from './attention';
   import { attentionFacts } from './attention_facts';
   import { accountByUuid, accountLabel } from './accounts';
   import { effectiveHostFilter, hosts } from './hosts';
@@ -263,7 +263,7 @@
                   <div class="limit" data-testid="today-limit">
                     <LimitActions
                       sess={row}
-                      resetsAt={$attentionFacts?.limited_accounts?.[row.account_uuid ?? '']?.resets_at ?? null}
+                      resetsAt={limitFor($attentionFacts, row)?.resets_at ?? null}
                       accountName={(u) => accountLabel($accountByUuid.get(u))}
                     />
                   </div>

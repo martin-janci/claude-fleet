@@ -271,6 +271,10 @@ export interface SessionRow {
    *  empty prompt box (migration 206); absent when nothing is proposed. The
    *  next prompt clears it. */
   prompt_suggestion?: string | null;
+  /** The `claude --model` the session launches with (an alias or an id);
+   *  absent = the host's default. A model's own weekly window holds the
+   *  row only when this names that model (review w10-5, `limitFor`). */
+  launch_model?: string | null;
   /** What a rule, Jev or an LLM proposes about the session, one per
    *  feature (redesign 2.8). Absent when nothing proposes anything. */
   proposals?: DecisionProposal[];

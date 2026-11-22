@@ -214,6 +214,62 @@ pub fn copied_on(alias: &str, groups: &[Vec<LoginAt>]) -> Vec<LoginConflict> {
     out
 }
 
+/// The logins a conflict names (review w09-9): the host login of a host
+/// whose default login is kept in the Keychain and a file, each login in a
+/// [`LoginConflict::SharedAccount`] group, and each login in a [`copied`]
+/// group. A start, a switch or a move that picks a login for the person
+/// ranks these last (`account_limits::best_login`, placement, auto-switch,
+/// move's target login): a session started there feeds the sign-out loop.
+/// Still used when nothing else is left, never refused.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Flagged(std::collections::BTreeSet<(String, Option<String>)>);
+
+impl Flagged {
+    /// PURE: the flagged logins of the fleet `hosts` (a hidden host takes
+    /// no part, as in [`copied`]).
+    pub fn of(hosts: &[HostRow]) -> Self {
+        let mut set = std::collections::BTreeSet::new();
+        for h in hosts.iter().filter(|h| !h.hidden) {
+            for c in for_host(h) {
+                match c {
+                    LoginConflict::KeychainAndFile => {
+                        set.insert((h.alias.clone(), None));
+                    }
+                    LoginConflict::SharedAccount { logins, .. } => {
+                        for l in logins {
+                            set.insert((h.alias.clone(), l));
+                        }
+                    }
+                    LoginConflict::Copied { .. } => {}
+                }
+            }
+        }
+        for g in copied(hosts) {
+            for l in g {
+                set.insert((l.host, l.profile));
+            }
+        }
+        Self(set)
+    }
+
+    /// The flagged logins of every host in the store; none on a failed read.
+    pub fn in_store(s: &crate::store::Store) -> Self {
+        s.list_hosts().map(|h| Self::of(&h)).unwrap_or_default()
+    }
+
+    /// Whether the login `profile` (`None` = the host's own) on `host` is
+    /// flagged.
+    pub fn has(&self, host: &str, profile: Option<&str>) -> bool {
+        self.0
+            .iter()
+            .any(|(h, p)| h == host && p.as_deref() == profile)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// PURE: the conflicts on one host.
 pub fn for_host(host: &HostRow) -> Vec<LoginConflict> {
     find(
@@ -414,6 +470,27 @@ mod tests {
             }]
         );
         assert!(copied_on("trn", &groups).is_empty());
+    }
+
+    /// Review w09-9: every login a conflict names is flagged, and no other.
+    #[test]
+    fn flagged_names_each_login_a_conflict_names() {
+        let mut mac = host_with("mac", &[(Some("work"), &["aaaaaaaaaaaa"])]);
+        mac.login_split = Some(true);
+        let mut trn = host_with("trn", &[(None, &["aaaaaaaaaaaa"])]);
+        trn.account_uuid = Some("a".into());
+        trn.claude_profiles = Some(vec![
+            profile("one", Some("b"), None),
+            profile("two", Some("b"), None),
+            profile("three", Some("c"), None),
+        ]);
+        let f = Flagged::of(&[mac, trn]);
+        assert!(f.has("mac", None), "the Keychain and a file");
+        assert!(f.has("mac", Some("work")), "copied onto trn");
+        assert!(f.has("trn", None), "the copy");
+        assert!(f.has("trn", Some("one")) && f.has("trn", Some("two")));
+        assert!(!f.has("trn", Some("three")));
+        assert!(Flagged::of(&[]).is_empty());
     }
 
     #[test]

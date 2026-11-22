@@ -119,6 +119,10 @@ use serde_json::Value;
 /// * `prompt_suggestion` — the chip over the phone's composer offering the
 ///   next prompt Claude Code proposes (migration 206).
 ///
+/// * `launch_model` — the model the session launches with: a model's own
+///   weekly window (`seven_day_opus` / `seven_day_sonnet`) holds the row
+///   "Paused · limit" only when this names that model (review w10-5).
+///
 /// Added 2026-09-23 when fleet-mobile's pager (its PR #19) began reading
 /// them: the first cut of this view was taken against the list screen alone.
 ///
@@ -146,6 +150,7 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "last_stop_at",
     "last_turn_at",
     "last_viewed_at",
+    "launch_model",
     "lost_at",
     "lost_reason",
     "needs_attention",

@@ -267,6 +267,7 @@
       "last_stop_at",
       "last_turn_at",
       "last_viewed_at",
+      "launch_model",
       "link_version",
       "lost_at",
       "lost_reason",
@@ -452,6 +453,7 @@
     ],
     "HostLogin": [
       "account_uuid",
+      "conflicted",
       "profile",
       "used_pct"
     ],
@@ -787,6 +789,7 @@
       "last_stop_at",
       "last_turn_at",
       "last_viewed_at",
+      "launch_model",
       "lost_at",
       "lost_reason",
       "model",
