@@ -1868,19 +1868,48 @@ pub const ANSWER_TOOLS: &[&str] = &["send_prompt", "ask"];
 /// a viewer, so without this the ask could never reach them.
 pub const PERSON_INBOX_TOOLS: &[&str] = &["review_request"];
 
+/// Tools that mix reads and writes, with the actions that only read. A
+/// readonly or answer-only device is admitted to the tool and its handler
+/// refuses it every other action ([`mode_allows_action`]): a person's
+/// readonly device shows the dashboards every device of theirs re-reads,
+/// and a viewer asked to review a session (always readonly) reads the notes
+/// already sent on it.
+pub const READ_ACTIONS: &[(&str, &[&str])] = &[
+    ("dashboards", &["list", "get", "feeds"]),
+    ("review_notes", &["list"]),
+];
+
 /// May a token in `mode` call `tool` at all (the readonly and answer-only
 /// half of `enforce_mode`)?
 pub fn mode_allows_tool(mode: crate::mcp::auth::TokenMode, tool: &str) -> bool {
     use crate::mcp::auth::TokenMode;
+    let reads_some = || READ_ACTIONS.iter().any(|(t, _)| *t == tool);
     match mode {
-        TokenMode::Readonly => is_readonly_tool(tool) || PERSON_INBOX_TOOLS.contains(&tool),
+        TokenMode::Readonly => {
+            is_readonly_tool(tool) || PERSON_INBOX_TOOLS.contains(&tool) || reads_some()
+        }
         TokenMode::Answer => {
             is_readonly_tool(tool)
                 || ANSWER_TOOLS.contains(&tool)
                 || PERSON_INBOX_TOOLS.contains(&tool)
+                || reads_some()
         }
         _ => true,
     }
+}
+
+/// May a token in `mode` call `action` of `tool`, a tool on
+/// [`READ_ACTIONS`]? A readonly or answer-only device only its read
+/// actions; every other mode any action (the tool's own gates still apply).
+pub fn mode_allows_action(mode: crate::mcp::auth::TokenMode, tool: &str, action: &str) -> bool {
+    use crate::mcp::auth::TokenMode;
+    if !matches!(mode, TokenMode::Readonly | TokenMode::Answer) {
+        return true;
+    }
+    READ_ACTIONS
+        .iter()
+        .find(|(t, _)| *t == tool)
+        .is_some_and(|(_, reads)| reads.contains(&action))
 }
 
 /// Tools gated by the `mcp.confirm_destructive` toggle.
@@ -4335,5 +4364,38 @@ mod tests {
         }
         assert!(!is_readonly_tool("review_request"));
         assert!(!mode_allows_tool(TokenMode::Readonly, "session_share"));
+    }
+
+    /// w18-5: a readonly or answer-only device reads its person's
+    /// dashboards and a session's review notes, and writes neither.
+    #[test]
+    fn a_readonly_device_reads_the_tools_that_mix_reads_and_writes() {
+        use crate::mcp::auth::TokenMode;
+        for mode in [TokenMode::Readonly, TokenMode::Answer] {
+            for tool in ["dashboards", "review_notes"] {
+                assert!(mode_allows_tool(mode, tool), "{mode:?} {tool}");
+            }
+            for action in ["list", "get", "feeds"] {
+                assert!(
+                    mode_allows_action(mode, "dashboards", action),
+                    "{mode:?} {action}"
+                );
+            }
+            for action in ["pin", "unpin", "undo", "feed", ""] {
+                assert!(
+                    !mode_allows_action(mode, "dashboards", action),
+                    "{mode:?} {action}"
+                );
+            }
+            assert!(mode_allows_action(mode, "review_notes", "list"));
+            for action in ["send", "resolve"] {
+                assert!(
+                    !mode_allows_action(mode, "review_notes", action),
+                    "{mode:?} {action}"
+                );
+            }
+        }
+        assert!(mode_allows_action(TokenMode::Full, "dashboards", "pin"));
+        assert!(mode_allows_action(TokenMode::Full, "review_notes", "send"));
     }
 }

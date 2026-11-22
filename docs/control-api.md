@@ -101,7 +101,7 @@ login pane fleet opens on the host (`start_login`, `login_status`,
 with Anthropic and written to the host only (`api_key`, with an optional
 `daily_limit_usd`; `daily_limit` changes it). Served to the master and a
 fleet admin's devices; everything but `login_status` needs the master or a
-trusted full device. The key and the code are never logged or returned.
+trusted full device, and Control (the operator) is refused `login_status` too. The key and the code are never logged or returned.
 
 ### Environment
 

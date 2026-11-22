@@ -25,6 +25,18 @@ impl FleetTools {
             "auto_switch_account",
             &format!("enabled={:?}", args.enabled),
         );
+        // Control's client is bound to the owner, so its write would land
+        // on the owner's own answer: sessions resumed under other logins and
+        // typed into, with no card at any position. It may read it, as
+        // `env_vars` lets it read and never write the owner's settings.
+        if caller.is_operator() && (args.enabled.is_some() || args.continue_after.is_some()) {
+            return Err(mcp_err(
+                codes::E_FORBIDDEN,
+                "a person turns automatic account switching on or off, from the desktop or \
+                 the phone; the operator may only read it",
+                None,
+            ));
+        }
         let s = lock(&self.store).map_err(to_mcp_err)?;
         let person = super::fleet::owner_for(&caller, &s);
         let view = account_switch::my_auto_switch(&s, person, &args).map_err(to_mcp_err)?;

@@ -1174,6 +1174,7 @@ fn sends_review_notes(caller: &Caller) -> bool {
     caller.host_alias.is_none()
         && !caller.is_operator()
         && caller.mode != TokenMode::Answer
+        && caller.mode != TokenMode::Readonly
         && caller.mode != TokenMode::Peer
 }
 

@@ -29,6 +29,15 @@ impl FleetTools {
                 p.id.as_deref().unwrap_or("")
             ),
         );
+        // A readonly or answer-only device reads them and never pins,
+        // unpins or feeds (`guard::READ_ACTIONS`).
+        if !guard::mode_allows_action(caller.mode, "dashboards", &p.action) {
+            return Err(mcp_err(
+                codes::E_FORBIDDEN,
+                "this device reads dashboards; pinning and changing them needs a full device",
+                None,
+            ));
+        }
         let scope = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             caller.view_scope(&s).map_err(to_mcp_err)?

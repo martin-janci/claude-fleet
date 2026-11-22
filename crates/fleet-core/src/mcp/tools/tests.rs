@@ -10491,7 +10491,7 @@ async fn the_operator_never_accepts_many_undoes_an_accept_or_verifies() {
 #[tokio::test]
 async fn the_operator_never_makes_start_rules_or_routines() {
     let t = test_tools(Store::open_in_memory().unwrap());
-    for action in ["save", "accept"] {
+    for action in ["save", "accept", "dismiss", "delete"] {
         let e = t
             .start_rules(
                 Extension(production_operator()),
@@ -10508,7 +10508,19 @@ async fn the_operator_never_makes_start_rules_or_routines() {
             e.message
         );
     }
-    for action in ["save", "run_now"] {
+    // Every action that writes (w18-1): an allow-list of reads, so a
+    // paused routine is not re-enabled and a person's routine not deleted.
+    for action in [
+        "save",
+        "run_now",
+        "set_enabled",
+        "delete",
+        "skip_next",
+        "tune_prompt",
+        "set_memory",
+        "forget_seen",
+        "set_run_outcome",
+    ] {
         let e = t
             .routines(
                 Extension(production_operator()),
@@ -10539,6 +10551,43 @@ async fn the_operator_never_makes_start_rules_or_routines() {
     )
     .await
     .expect("the operator may list routines");
+}
+
+/// w18-3: Control's client is bound to the owner, so its write to
+/// `auto_switch_account` turned the OWNER's switching (and the typed
+/// "Continue where you left off.") on with no card. It may read it.
+#[tokio::test]
+async fn the_operator_reads_but_never_sets_automatic_account_switching() {
+    let t = test_tools(Store::open_in_memory().unwrap());
+    for args in [
+        serde_json::json!({ "enabled": true }),
+        serde_json::json!({ "continue_after": true }),
+        serde_json::json!({ "enabled": false, "continue_after": false }),
+    ] {
+        let e = t
+            .auto_switch_account(
+                Extension(production_operator()),
+                Parameters(serde_json::from_value(args.clone()).unwrap()),
+            )
+            .await
+            .expect_err("the operator does not set it");
+        assert!(
+            e.message.starts_with("E_FORBIDDEN") && e.message.contains("may only read"),
+            "{args}: {}",
+            e.message
+        );
+    }
+    // A read passes the operator gate (the test client may still answer
+    // that it speaks for no person, which is not this gate's refusal).
+    if let Err(e) = t
+        .auto_switch_account(
+            Extension(production_operator()),
+            Parameters(serde_json::from_value(serde_json::json!({})).unwrap()),
+        )
+        .await
+    {
+        assert!(!e.message.contains("may only read"), "{}", e.message);
+    }
 }
 
 /// The operator saves a mission for the hub's owner — created rooted at a

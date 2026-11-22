@@ -16,8 +16,20 @@ impl FleetTools {
         Parameters(args): Parameters<AddAccountArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("add_account", &args.audit_detail());
+        // `login_status` stays open to a fleet admin's other devices, which
+        // follow a sign-in a trusted one started. It is not only a read: it
+        // syncs the host's profiles and writes the profile's `.claude.json`
+        // over SSH, and shows the login pane and its sign-in link. Control
+        // reaches it through its owner binding (`Access::Person`) and gets
+        // none of that.
         if args.action != "login_status" {
             super::fleet::owner_device_admin(&caller, "adding an account")?;
+        } else if caller.is_operator() {
+            return Err(mcp_err(
+                codes::E_FORBIDDEN,
+                "the agent does not follow a Claude sign-in; the person does, on the Accounts page",
+                None,
+            ));
         }
         let out = add_account::run_with_client(&args, &self.store, &self.ssh)
             .await

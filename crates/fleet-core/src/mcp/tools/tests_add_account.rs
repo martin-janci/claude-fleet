@@ -76,3 +76,33 @@ async fn an_untrusted_device_cannot_write_an_account() {
     assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
     assert!(!e.message.contains("sk-ant"), "the key never comes back");
 }
+
+/// w18-6: `login_status` is open to a fleet admin's other devices, but it
+/// writes the profile's `.claude.json` over SSH and shows the sign-in link.
+/// Control reaches it through its owner binding and is refused.
+#[tokio::test]
+async fn control_does_not_follow_a_sign_in() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("mercury").unwrap();
+    let t = super::tests::test_tools(s);
+    let mut control = device(true);
+    if let Some(c) = control.client.as_mut() {
+        c.name = crate::service::operator::OPERATOR_CLIENT_NAME.into();
+    }
+    assert!(control.is_operator());
+    let e = t
+        .add_account(
+            Extension(control),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action": "login_status",
+                    "host_alias": "mercury",
+                    "profile": "work",
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+}
