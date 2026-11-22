@@ -9051,14 +9051,12 @@ mod env_launch {
         let launched = h.panes().len();
         // Live on the account it runs on: the rule itself lets it restart
         // (`a_relaunch_is_checked_unless_the_session_is_live_on_the_same_account`).
-        assert!(
-            crate::service::project_accounts::refuse_forbidden_relaunch_of(
-                &h.store.lock().unwrap(),
-                row.id,
-                now_unix()
-            )
-            .is_ok()
-        );
+        assert!(crate::service::run_login::refuse_relaunch_of(
+            &h.store.lock().unwrap(),
+            row.id,
+            now_unix()
+        )
+        .is_ok());
 
         set("lost_at = 5, lost_reason = 'host_reboot'");
         let recreate = serde_json::from_value(serde_json::json!({ "session_id": row.id })).unwrap();

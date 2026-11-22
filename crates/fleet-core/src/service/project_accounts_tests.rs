@@ -359,7 +359,7 @@ fn a_relaunch_is_checked_unless_the_session_is_live_on_the_same_account() {
 
     // Live, on the account it already runs on: forbidding stops nothing.
     assert!(check(None).is_ok());
-    assert!(refuse_forbidden_relaunch_of(&s, id, NOW).is_ok());
+    assert!(crate::service::run_login::refuse_relaunch_of(&s, id, NOW).is_ok());
     // The same row under a login on another, allowed account is fine too.
     assert!(check(Some("work")).is_ok());
     // The row ran on another account than its login is on now.
@@ -371,7 +371,7 @@ fn a_relaunch_is_checked_unless_the_session_is_live_on_the_same_account() {
     // A lost or ghost row coming back is work going somewhere again.
     set("account_uuid = 'acct-own', lost_at = 5");
     assert!(check(None).is_err());
-    assert!(refuse_forbidden_relaunch_of(&s, id, NOW).is_err());
+    assert!(crate::service::run_login::refuse_relaunch_of(&s, id, NOW).is_err());
     set("lost_at = NULL, status = 'ghost'");
     assert!(check(None).is_err());
     // A shell bills no login; a session outside a project has no rule.
@@ -380,5 +380,5 @@ fn a_relaunch_is_checked_unless_the_session_is_live_on_the_same_account() {
     set("kind = 'work', project_id = NULL");
     assert!(check(None).is_ok());
     // A row that is gone refuses nothing.
-    assert!(refuse_forbidden_relaunch_of(&s, id + 99, NOW).is_ok());
+    assert!(crate::service::run_login::refuse_relaunch_of(&s, id + 99, NOW).is_ok());
 }

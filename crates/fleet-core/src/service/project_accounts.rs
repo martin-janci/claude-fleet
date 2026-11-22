@@ -285,16 +285,6 @@ pub fn refuse_forbidden_relaunch(
     refuse_forbidden(s, row.project_id, &row.host_alias, profile, now)
 }
 
-/// [`refuse_forbidden_relaunch`] of session `session_id` under its stored
-/// login. A row that is gone refuses nothing.
-pub fn refuse_forbidden_relaunch_of(s: &Store, session_id: i64, now: i64) -> Result<(), IpcError> {
-    let Some(row) = s.get_session_by_id(session_id)? else {
-        return Ok(());
-    };
-    let profile = crate::service::sessions::stored_launch(s, row.id)?.profile;
-    refuse_forbidden_relaunch(s, &row, profile.as_deref(), now)
-}
-
 /// `set_account_projects`: replace the projects and/or orgs an account is
 /// forbidden for.
 #[derive(Debug, Clone, Deserialize, Serialize, rmcp::schemars::JsonSchema)]

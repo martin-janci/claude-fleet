@@ -1569,17 +1569,6 @@ impl Store {
         Ok(ids.len())
     }
 
-    /// Announce every live session on `host_alias` again, as
-    /// [`Self::reemit_live_sessions_on_account`] does for an account: its
-    /// signed-out logins changed. Returns how many.
-    pub fn reemit_live_sessions_on_host(&self, host_alias: &str) -> Result<usize, rusqlite::Error> {
-        let ids = self.live_session_ids_on_host(host_alias)?;
-        for &id in &ids {
-            self.emit_session(id)?;
-        }
-        Ok(ids.len())
-    }
-
     fn live_session_ids_on_host(&self, host_alias: &str) -> Result<Vec<i64>, rusqlite::Error> {
         self.conn
             .prepare_cached(

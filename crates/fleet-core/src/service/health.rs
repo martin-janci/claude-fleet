@@ -303,11 +303,11 @@ pub struct HostHealthThresholds {
     pub hooks_silent_secs: i64,
     /// `health.mem_low_pct` (migration 193).
     pub mem_low_pct: f64,
+    /// `health.version_max_age_secs`: how old a host's Claude version stamp
+    /// may be and still be compared (default 24 h), the same setting the
+    /// desktop's badge reads (review 20 w20-3).
+    pub version_max_age_secs: i64,
 }
-
-/// A version stamp young enough to compare: the same 24 h the desktop's
-/// `health.version_max_age_secs` defaults to.
-const VERSION_FRESH_SECS: i64 = 86_400;
 
 /// A health sample (`HostRow::health_at`) young enough to judge `disk_low`
 /// on. The sample is rewritten on every reconcile pass (~20 s) of a
@@ -453,7 +453,7 @@ pub fn hosts_health(
 ) -> Vec<HostHealthRow> {
     let fresh = |h: &HostRow| {
         h.claude_version_at
-            .is_some_and(|at| now - at <= VERSION_FRESH_SECS)
+            .is_some_and(|at| now - at <= t.version_max_age_secs)
     };
     let newest = hosts
         .iter()
@@ -569,6 +569,7 @@ pub fn overlay_agents(rows: &mut [HostHealthRow], agents: &[(String, String)], h
 pub fn host_thresholds(s: &Store) -> HostHealthThresholds {
     use crate::service::settings::{
         get_string, HEALTH_CLAUDE_MAX_BEHIND, HEALTH_DISK_LOW_PCT, HEALTH_HOOKS_SILENT_SECS,
+        HEALTH_VERSION_MAX_AGE_SECS,
     };
     HostHealthThresholds {
         disk_low_pct: get_string(s, HEALTH_DISK_LOW_PCT).parse().unwrap_or(90),
@@ -579,6 +580,9 @@ pub fn host_thresholds(s: &Store) -> HostHealthThresholds {
             .parse()
             .unwrap_or(3600),
         mem_low_pct: load_limits(s).mem_low_pct,
+        version_max_age_secs: get_string(s, HEALTH_VERSION_MAX_AGE_SECS)
+            .parse()
+            .unwrap_or(86_400),
     }
 }
 
@@ -1420,6 +1424,7 @@ mod tests {
         claude_max_behind: 30,
         hooks_silent_secs: 3600,
         mem_low_pct: 10.0,
+        version_max_age_secs: 86_400,
     };
     use crate::service::tunnel::TunnelHealth;
     use std::collections::HashMap;
@@ -1604,6 +1609,43 @@ mod tests {
         let fine = rows.iter().find(|r| r.alias == "fine").unwrap();
         assert_eq!(fine.disk_home_pct, Some(25));
         assert!(!fine.disk_low && !fine.claude_behind && !fine.agent_behind && !fine.hooks_silent);
+    }
+
+    /// `claude_behind` trusts a version stamp only as long as
+    /// `health.version_max_age_secs` says, the setting the desktop's badge
+    /// reads too (review 20 w20-3): a 30 h old stamp counts at 72 h and not
+    /// at the 24 h default; and the setting reaches `host_thresholds`.
+    #[test]
+    fn claude_behind_follows_the_version_max_age_setting() {
+        let now = 1_700_000_000;
+        let mut old = host("old", true);
+        old.claude_version = Some("2.1.214".into());
+        old.claude_version_at = Some(now - 30 * 3600);
+        let mut new = host("new", true);
+        new.claude_version = Some("2.1.282".into());
+        new.claude_version_at = Some(now - 60);
+        let behind = |max_age: i64| {
+            let t = HostHealthThresholds {
+                version_max_age_secs: max_age,
+                ..THRESHOLDS
+            };
+            hosts_health(&[old.clone(), new.clone()], &[], &t, &[], "0.3.1", now)
+                .into_iter()
+                .find(|r| r.alias == "old")
+                .unwrap()
+                .claude_behind
+        };
+        assert!(!behind(86_400), "a 30 h stamp is too old at the default");
+        assert!(behind(72 * 3600), "and trusted at 72 h");
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(host_thresholds(&s).version_max_age_secs, 86_400);
+        crate::service::settings::set(
+            &s,
+            crate::service::settings::HEALTH_VERSION_MAX_AGE_SECS,
+            "259200",
+        )
+        .unwrap();
+        assert_eq!(host_thresholds(&s).version_max_age_secs, 259_200);
     }
 
     /// Idle, failed, stopped and blocked sessions call no hooks, so a host
