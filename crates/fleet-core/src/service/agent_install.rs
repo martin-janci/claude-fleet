@@ -495,7 +495,8 @@ async fn run(
             .unwrap_or("no answer");
         return Err(format!("could not reach the host over SSH: {}", why.trim()));
     }
-    let uname = crate::ssh::last_line(&out.stdout);
+    // `target_for` already skips a chatty login profile's lines.
+    let uname = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let target = target_for(&uname).ok_or_else(|| {
         format!("no fleet-agent release for {uname:?}: releases are for x86_64 and aarch64 Linux and macOS")
     })?;

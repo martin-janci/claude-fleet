@@ -401,6 +401,10 @@ fn book(
     }
 }
 
+/// How a `claude -p --output-format json` envelope starts. A const, so the
+/// launch-path guard test's brace counter does not read the `{` in the body.
+const ENVELOPE_START: &str = "{\"type\"";
+
 /// Summarise past work `link_id` of `key` (`work_link { action: summarize }`).
 /// The store is locked only to plan and to store; the run itself is off the
 /// lock.
@@ -493,7 +497,7 @@ pub async fn summarize(
             env.result
         }
         // An envelope the output cap cut: its text is JSON, not a summary.
-        None if text.trim_start().starts_with("{\"type\"") => {
+        None if text.trim_start().starts_with(ENVELOPE_START) => {
             book(store, &p, None);
             return Err(IpcError::new(
                 codes::E_CLAUDE_CLI,

@@ -755,7 +755,12 @@ async fn login_status_again(
             .get_host_row(&args.host_alias)?
             .and_then(|h| h.account_uuid),
         Some(p) => {
-            crate::service::hosts::sync_host_profiles(&s, &args.host_alias, live.as_deref())?
+            // Only a reading that lists this profile replaces the stored set:
+            // an empty or partial read must not drop the host's other logins.
+            let live = live
+                .as_deref()
+                .filter(|ps| ps.iter().any(|hp| hp.name == p));
+            crate::service::hosts::sync_host_profiles(&s, &args.host_alias, live)?
                 .remove(p)
                 .flatten()
         }

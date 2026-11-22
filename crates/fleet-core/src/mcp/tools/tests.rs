@@ -4847,8 +4847,11 @@ fn a_readonly_token_is_served_no_mutating_tools_and_a_client_no_admin_tools() {
         "a readonly token must be served fewer tools than the master"
     );
     for name in &readonly {
+        // A tool that mixes reads and writes is served for its read actions
+        // only (`guard::READ_ACTIONS`, enforced per action).
+        let reads_only = guard::READ_ACTIONS.iter().any(|(t, _)| t == name);
         assert!(
-            guard::is_readonly_tool(name),
+            guard::is_readonly_tool(name) || reads_only,
             "{name} mutates and must not be served to a readonly token"
         );
     }

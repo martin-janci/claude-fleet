@@ -3308,6 +3308,13 @@ mod tests {
     }
 
     /// The step [`write_host_file`] issues to write `body` at `path`.
+    /// A secret upload (`cat > '<abs>'` over stdin), as opposed to a plain
+    /// host file, which since w15-5 also arrives over stdin through
+    /// `remote_write_script`.
+    fn is_secret_upload(c: &Call) -> bool {
+        c.stdin.is_some() && !c.script().is_some_and(|s| s.contains("t=\"$p.fleet-tmp\""))
+    }
+
     fn write_step(dir: &str, path: &str, body: &str) -> Step {
         Step::Write(remote_write_script(dir, path), body.to_string())
     }
@@ -4251,10 +4258,11 @@ mod tests {
         assert_quoting_invariants(&calls);
         // The secret reached the host exactly three times (claude.json, the
         // hook settings, and the SessionStart headers file), all over stdin.
-        let uploads = calls.iter().filter(|c| c.stdin.is_some()).count();
+        let uploads = calls.iter().filter(|c| is_secret_upload(c)).count();
         assert_eq!(uploads, 3);
         assert!(calls
             .iter()
+            .filter(|c| is_secret_upload(c))
             .filter_map(Call::stdin_str)
             .all(|s| s.contains(TOKEN)));
     }
@@ -4560,9 +4568,7 @@ mod tests {
         // writes nothing.
         let skill_writes = steps
             .iter()
-            .filter(
-                |s| matches!(s, Step::Script(b) if b.contains(".claude/skills") && b.contains("printf")),
-            )
+            .filter(|s| matches!(s, Step::Write(b, _) if b.contains(".claude/skills")))
             .count();
         assert_eq!(skill_writes, 8);
     }
@@ -4691,7 +4697,7 @@ mod tests {
         assert!(err.message.contains("~/.claude.json"), "{}", err.message);
         let calls = fake.calls();
         assert!(
-            calls.iter().all(|c| c.stdin.is_none()),
+            calls.iter().all(|c| !is_secret_upload(c)),
             "no upload may happen after a parse failure"
         );
         // The prompt-suggestion plugin's source names settings.json (it
@@ -4799,6 +4805,7 @@ mod tests {
         let uploaded = fake
             .calls_for("up")
             .into_iter()
+            .filter(is_secret_upload)
             .filter_map(|c| c.stdin_str())
             .collect::<Vec<_>>();
         assert!(uploaded.iter().all(|u| u.contains(&up_token.token)));
@@ -5273,6 +5280,7 @@ mod tests {
         let uploaded = fake
             .calls()
             .iter()
+            .filter(|c| is_secret_upload(c))
             .filter_map(Call::stdin_str)
             .collect::<Vec<_>>()
             .join("\n");
