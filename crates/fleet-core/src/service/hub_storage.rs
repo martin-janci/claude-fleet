@@ -189,6 +189,14 @@ pub fn disk_space(dir: &Path) -> Option<(u64, u64)> {
 #[cfg(not(unix))]
 pub fn disk_space(dir: &Path) -> Option<(u64, u64)> {
     let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    // Windows canonicalizes to a verbatim `\\?\D:\…` path, which no
+    // mount point (`D:\`) prefixes: drop the verbatim marker first.
+    let plain = dir
+        .to_str()
+        .and_then(|s| s.strip_prefix(r"\\?\"))
+        .filter(|rest| !rest.starts_with("UNC\\"))
+        .map(std::path::PathBuf::from);
+    let dir = plain.unwrap_or(dir);
     let disks = sysinfo::Disks::new_with_refreshed_list();
     disks
         .list()
