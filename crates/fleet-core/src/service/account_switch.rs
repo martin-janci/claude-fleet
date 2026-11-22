@@ -17,7 +17,9 @@
 //! not stuck (a session Claude Code parked at its quota with a
 //! `quota_auto_resume_*` notification reads as blocked but is no dialog, so
 //! it is switched too), whose account has a 5-hour or weekly window fully used that
-//! has not reset. With `accounts.auto_switch_early` on (off by default), the
+//! has not reset, or, for a session launched on a model with a weekly
+//! window of its own (`launch_model` Opus or Sonnet), that window (review
+//! w10-5). With `accounts.auto_switch_early` on (off by default), the
 //! same session moves once its account passes `accounts.pause_at`, so its
 //! next turn does not stall at the limit. The same rows also move when
 //! their own login (the host's, or the row's profile) is signed out
@@ -36,7 +38,9 @@
 //! project does not forbid
 //! (`project_accounts`), not signed out, with a reading under `accounts.pause_at` no older
 //! than [`STALE_TARGET_SECS`], not at a limit and not past its daily spend
-//! limit, the least used first. An account takes one session per wave
+//! limit, the least used first (use read for the session's own model), a
+//! login a login conflict names only when no other is left (review w09-9).
+//! An account takes one session per wave
 //! ([`plan`]), so a dozen sessions on a spent account do not all land on
 //! the same spare login off one reading. No candidate, no
 //! switch: the row stays "Paused · limit" for a person. With two or more,
@@ -72,6 +76,7 @@ use serde::Serialize;
 
 use crate::ipc_error::{lock, IpcError};
 use crate::service::account_limits::{self, HostLogin};
+use crate::service::account_usage::{model_family, ModelFamily};
 use crate::service::settings;
 use crate::ssh::SshClient;
 use crate::store::{HostRow, SessionRow, Store, UsageSnapshotRow};
@@ -266,11 +271,13 @@ pub fn candidates(
 }
 
 /// PURE: the rule's pick: the least used candidate, the first on a tie (so
-/// the host's own login wins one).
+/// the host's own login wins one). A login a conflict names
+/// ([`HostLogin::conflicted`]) only when no other is a candidate (review
+/// w09-9): moving a session onto a copied login feeds the sign-out loop.
 pub fn pick(candidates: &[HostLogin]) -> Option<&HostLogin> {
     candidates
         .iter()
-        .filter_map(|l| l.used_pct.map(|u| (u, l)))
+        .filter_map(|l| l.used_pct.map(|u| ((l.conflicted, u), l)))
         .reduce(|best, next| if next.0 < best.0 { next } else { best })
         .map(|(_, l)| l)
 }
@@ -293,15 +300,23 @@ pub fn plan(
         return Ok(Vec::new());
     }
     let snaps: Vec<UsageSnapshotRow> = s.latest_usage_snapshots()?;
-    let used = |uuid: &str| {
-        snaps
-            .iter()
-            .find(|r| r.account_uuid == uuid)
-            .and_then(|r| account_limits::used_pct_of(&r.usage, Some(r.fetched_at), now))
+    // Use for a session on the model `family` (review w10-5): that model's
+    // own weekly window counts too.
+    let used_on = |uuid: &str, family: Option<ModelFamily>| {
+        snaps.iter().find(|r| r.account_uuid == uuid).and_then(|r| {
+            account_limits::used_pct_family(&r.usage, Some(r.fetched_at), now, family)
+        })
     };
-    let is_limited = |uuid: &str| used(uuid).is_some_and(|u| u >= 100.0);
+    // The most any session could find used: either model's window.
+    let used_any = |uuid: &str| {
+        [None, Some(ModelFamily::Opus), Some(ModelFamily::Sonnet)]
+            .into_iter()
+            .filter_map(|f| used_on(uuid, f))
+            .reduce(f64::max)
+    };
     let sessions = s.list_all_sessions()?;
     let all_hosts: Vec<HostRow> = s.list_hosts()?;
+    let flagged = crate::service::login_conflicts::Flagged::of(&all_hosts);
     let signed_out_at = |host: &str, profile: Option<&str>| {
         all_hosts
             .iter()
@@ -353,16 +368,17 @@ pub fn plan(
     };
     // A fresh target's use now: its reading's, or nothing used once every
     // window it read has reset since (an idle account's often has).
-    let target_used = |uuid: &str| used(uuid).or(Some(0.0));
+    let target_used = |uuid: &str, family| used_on(uuid, family).or(Some(0.0));
     let pause_at = account_limits::pause_at_pct(s);
     let line = switch_line(s, pause_at);
-    let due = |uuid: &str| used(uuid).is_some_and(|u| u >= line);
     let hosts: Vec<HostRow> =
         crate::service::hosts::active_hosts(all_hosts.clone(), local_host_enabled)
             .into_iter()
             .filter(|h| h.reachable || h.alias == "local")
             .collect();
-    if !snaps.iter().any(|r| due(&r.account_uuid))
+    if !snaps
+        .iter()
+        .any(|r| used_any(&r.account_uuid).is_some_and(|u| u >= line))
         && hosts.iter().all(|h| h.signed_out_logins.is_empty())
     {
         return Ok(Vec::new());
@@ -385,6 +401,11 @@ pub fn plan(
         };
         let login_out =
             crate::service::login_health::is_signed_out(host, row.claude_profile.as_deref());
+        // The row's model (`launch_model`): its own weekly window holds the
+        // row, and must have room where it goes (review w10-5).
+        let family = model_family(row.launch_model.as_deref());
+        let due = |uuid: &str| used_on(uuid, family).is_some_and(|u| u >= line);
+        let is_limited = |uuid: &str| used_on(uuid, family).is_some_and(|u| u >= 100.0);
         let Some(reason) = switchable(row, due, login_out, parked) else {
             continue;
         };
@@ -429,7 +450,8 @@ pub fn plan(
                 (own_way_out || fresh_target(&l.account_uuid)) && !taken.contains(&l.account_uuid)
             })
             .map(|mut l| {
-                l.used_pct = target_used(&l.account_uuid);
+                l.used_pct = target_used(&l.account_uuid, family);
+                l.conflicted = flagged.has(&host.alias, l.profile.as_deref());
                 l
             })
             .collect();
@@ -512,11 +534,14 @@ pub fn still_due(
     };
     let snaps = s.latest_usage_snapshots()?;
     let line = switch_line(s, account_limits::pause_at_pct(s));
+    let family = model_family(row.launch_model.as_deref());
     let due = |uuid: &str| {
         snaps
             .iter()
             .find(|r| r.account_uuid == uuid)
-            .and_then(|r| account_limits::used_pct_of(&r.usage, Some(r.fetched_at), now))
+            .and_then(|r| {
+                account_limits::used_pct_family(&r.usage, Some(r.fetched_at), now, family)
+            })
             .is_some_and(|u| u >= line)
     };
     let parked = row.claude_status.as_deref() == Some("blocked")

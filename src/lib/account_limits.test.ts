@@ -4,7 +4,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { accounts } from './accounts';
 import { hosts } from './hosts';
-import { forbiddenOf } from './account_limits';
+import { forbiddenOf, freestLogin, headroomForAccount, type HostLogin } from './account_limits';
 
 afterEach(() => {
   accounts.set([]);
@@ -24,5 +24,28 @@ describe('forbiddenOf', () => {
     expect(forbiddenOf({ project_id: 3, host_alias: 'elsewhere', org_id: 7 }).sort()).toEqual(['blocked-here', 'personal']);
     // No project, no rule applies (as the hub's).
     expect(forbiddenOf({ project_id: null, host_alias: 'client-box' })).toEqual([]);
+  });
+});
+
+// Review w09-9: a login a conflict names is picked after every other, and
+// still picked when it is all there is.
+describe('conflicted logins rank last', () => {
+  const l = (profile: string, used: number, conflicted = false): HostLogin => ({
+    profile,
+    account_uuid: profile,
+    used_pct: used,
+    conflicted,
+  });
+  it('in the New session default', () => {
+    expect(freestLogin([l('copied', 5, true), l('b', 60)])?.profile).toBe('b');
+    expect(freestLogin([l('copied', 5, true)])?.profile).toBe('copied');
+  });
+  it('in the switch suggestion', () => {
+    const own = l('own', 95);
+    const h = headroomForAccount(
+      { pause_at_pct: 90, chosen: own, over: true, suggestion: null, logins: [own, l('copied', 5, true), l('b', 60)] },
+      'own',
+    );
+    expect(h.suggestion?.profile).toBe('b');
   });
 });

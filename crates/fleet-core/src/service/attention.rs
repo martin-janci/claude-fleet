@@ -32,7 +32,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::service::account_usage::{AccountUsageSnapshot, UsageOutcomeKind};
+use crate::service::account_usage::{AccountUsageSnapshot, ModelFamily, UsageOutcomeKind};
 use crate::store::{HostRow, SessionRow};
 
 /// Why a session needs a person. The order is the urgency order, and it is
@@ -238,8 +238,15 @@ pub const DEFAULT_CONTEXT_RED_PCT: f64 = 85.0;
 pub struct Facts {
     /// Aliases of hosts that were pinged and did not answer.
     pub down_hosts: BTreeSet<String>,
-    /// Accounts at a usage limit, by uuid.
+    /// Accounts at a usage limit, by uuid: the 5-hour or weekly window,
+    /// which holds every session on the account.
     pub limited_accounts: BTreeMap<String, Limit>,
+    /// Accounts with a model's own weekly window at its limit
+    /// (`seven_day_opus` / `seven_day_sonnet`, review w10-5), by uuid. It
+    /// holds only a session launched on that model
+    /// ([`Facts::limit_for`]). Absent from an older hub.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub limited_models: BTreeMap<String, ModelLimits>,
     /// Accounts whose login is gone, expired or rejected, by uuid.
     pub uncredentialed_accounts: BTreeSet<String>,
     /// The logins fleet saw signed out (`hosts.signed_out_logins`,
@@ -259,7 +266,68 @@ pub struct LoginRef {
     pub profile: Option<String>,
 }
 
+/// An account's model windows at their limit (review w10-5).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ModelLimits {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opus: Option<Limit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sonnet: Option<Limit>,
+}
+
+impl ModelLimits {
+    pub fn get(&self, family: ModelFamily) -> Option<Limit> {
+        match family {
+            ModelFamily::Opus => self.opus,
+            ModelFamily::Sonnet => self.sonnet,
+        }
+    }
+
+    fn set(&mut self, family: ModelFamily, limit: Limit) {
+        match family {
+            ModelFamily::Opus => self.opus = Some(limit),
+            ModelFamily::Sonnet => self.sonnet = Some(limit),
+        }
+    }
+
+    /// Every limit held, for when the earliest resets.
+    pub fn all(&self) -> impl Iterator<Item = (ModelFamily, Limit)> + '_ {
+        [
+            (ModelFamily::Opus, self.opus),
+            (ModelFamily::Sonnet, self.sonnet),
+        ]
+        .into_iter()
+        .filter_map(|(f, l)| l.map(|l| (f, l)))
+    }
+}
+
+/// Of two limits on one session, the one that frees last (no reset time
+/// holds longest); `a` wins a tie.
+fn frees_last(a: Option<Limit>, b: Option<Limit>) -> Option<Limit> {
+    let frees = |l: &Limit| l.resets_at.unwrap_or(i64::MAX);
+    match (a, b) {
+        (Some(a), Some(b)) if frees(&b) > frees(&a) => Some(b),
+        (Some(a), _) => Some(a),
+        (None, b) => b,
+    }
+}
+
 impl Facts {
+    /// The limit that holds a session on `account` launched on
+    /// `launch_model` (`sessions.launch_model`): the account's 5-hour or
+    /// weekly window, and the launch model's own weekly window
+    /// ([`account_usage::model_family`]); both at their limit, the one that
+    /// frees last. A session on the host's default model, or on a model
+    /// with no window of its own, ignores the model windows (review w10-5).
+    ///
+    /// [`account_usage::model_family`]: crate::service::account_usage::model_family
+    pub fn limit_for(&self, account: &str, launch_model: Option<&str>) -> Option<Limit> {
+        let model = crate::service::account_usage::model_family(launch_model)
+            .and_then(|f| self.limited_models.get(account).and_then(|m| m.get(f)));
+        frees_last(self.limited_accounts.get(account).copied(), model)
+    }
+
     /// Whether fleet saw the login `profile` on `host` signed out.
     pub fn login_signed_out(&self, host: &str, profile: Option<&str>) -> bool {
         self.signed_out_logins
@@ -281,6 +349,10 @@ pub struct Limit {
 pub enum LimitWindow {
     FiveHour,
     Weekly,
+    /// The weekly Opus window (`seven_day_opus`), review w10-5.
+    WeeklyOpus,
+    /// The weekly Sonnet window (`seven_day_sonnet`), review w10-5.
+    WeeklySonnet,
 }
 
 /// Whether every login on `account` that a reachable, shown host reports
@@ -335,6 +407,7 @@ impl Facts {
             })
             .collect();
         let mut limited_accounts = BTreeMap::new();
+        let mut limited_models = BTreeMap::new();
         let mut uncredentialed_accounts = BTreeSet::new();
         for snap in usage {
             if matches!(
@@ -377,10 +450,31 @@ impl Facts {
                     },
                 );
             }
+            // A model's own weekly window (review w10-5): kept apart, since
+            // it holds only the sessions launched on that model.
+            let mut models = ModelLimits::default();
+            for (family, window) in [
+                (ModelFamily::Opus, LimitWindow::WeeklyOpus),
+                (ModelFamily::Sonnet, LimitWindow::WeeklySonnet),
+            ] {
+                if let Some(w) = u.model_window(family).filter(|w| at_limit(w, WEEK_SECS)) {
+                    models.set(
+                        family,
+                        Limit {
+                            window,
+                            resets_at: w.resets_at,
+                        },
+                    );
+                }
+            }
+            if models != ModelLimits::default() {
+                limited_models.insert(snap.account_uuid.clone(), models);
+            }
         }
         Facts {
             down_hosts,
             limited_accounts,
+            limited_models,
             uncredentialed_accounts,
             signed_out_logins,
         }
@@ -458,7 +552,10 @@ pub fn needs_attention_in(
         Reason::Stuck
     } else if live && facts.down_hosts.contains(&row.host_alias) {
         Reason::HostDown
-    } else if live && !working && account.is_some_and(|a| facts.limited_accounts.contains_key(a)) {
+    } else if live
+        && !working
+        && account.is_some_and(|a| facts.limit_for(a, row.launch_model.as_deref()).is_some())
+    {
         Reason::AccountLimit
     } else if live
         && !working
@@ -672,6 +769,7 @@ mod tests {
             turn_outcome: None,
             pinned_at: None,
             prompt_suggestion: None,
+            launch_model: None,
             proposals: Vec::new(),
             pending_form: None,
             form_draft: None,
@@ -1263,6 +1361,71 @@ mod tests {
         assert_eq!(fresh.limited_accounts["acc"].window, LimitWindow::Weekly);
         let old = Facts::from_fleet(&[], &[snap(now - 8 * 86_400)], now);
         assert!(old.limited_accounts.is_empty(), "{old:?}");
+    }
+
+    /// Review w10-5: a spent model window is kept apart from the account's
+    /// own and holds only a session launched on that model; with both
+    /// spent, the one that frees last.
+    #[test]
+    fn a_models_weekly_window_holds_only_the_sessions_on_that_model() {
+        use crate::service::account_usage::{AccountUsage, Window};
+        let now = 1_000;
+        let w = |u: f64, at: i64| {
+            Some(Window {
+                utilization: u,
+                resets_at: Some(at),
+            })
+        };
+        let snap = AccountUsageSnapshot {
+            account_uuid: "acc".into(),
+            usage: Some(AccountUsage {
+                five_hour: w(30.0, now + 100),
+                seven_day: w(60.0, now + 9_000),
+                seven_day_opus: w(100.0, now + 9_000),
+                seven_day_sonnet: w(20.0, now + 9_000),
+            }),
+            subscription: None,
+            fetched_at: Some(now - 10),
+            source_host: None,
+            status: UsageOutcomeKind::Ok,
+            detail: None,
+            next_try_at: 0,
+        };
+        let f = Facts::from_fleet(&[], &[snap], now);
+        assert!(f.limited_accounts.is_empty());
+        let opus = f.limited_models["acc"].opus.unwrap();
+        assert_eq!(opus.window, LimitWindow::WeeklyOpus);
+        assert!(f.limited_models["acc"].sonnet.is_none());
+        assert_eq!(f.limit_for("acc", Some("opus")), Some(opus));
+        assert_eq!(f.limit_for("acc", Some("claude-opus-4-5")), Some(opus));
+        assert_eq!(f.limit_for("acc", Some("sonnet")), None);
+        assert_eq!(f.limit_for("acc", None), None);
+        let mut r = row();
+        r.claude_status = Some("idle".into());
+        r.account_uuid = Some("acc".into());
+        assert!(needs_attention_in(&r, DEFAULT_CONTEXT_RED_PCT, &f).is_none());
+        r.launch_model = Some("opus".into());
+        assert_eq!(
+            needs_attention_in(&r, DEFAULT_CONTEXT_RED_PCT, &f)
+                .unwrap()
+                .reason,
+            Reason::AccountLimit
+        );
+        // The account's 5-hour window spent too: it frees first, so the
+        // model window still decides when the row unblocks.
+        let mut both = f.clone();
+        both.limited_accounts.insert(
+            "acc".into(),
+            Limit {
+                window: LimitWindow::FiveHour,
+                resets_at: Some(now + 100),
+            },
+        );
+        assert_eq!(both.limit_for("acc", Some("opus")), Some(opus));
+        assert_eq!(
+            both.limit_for("acc", None).unwrap().window,
+            LimitWindow::FiveHour
+        );
     }
 
     #[test]

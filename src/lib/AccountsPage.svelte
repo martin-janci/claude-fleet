@@ -60,7 +60,7 @@
   import { dayLabel, loginCardText, loginShellCommand } from './control_escalations';
   import { copyText } from './clipboard';
   import { push } from './toasts';
-  import { attentionState, displayName } from './attention';
+  import { attentionState, displayName, limitFor } from './attention';
   import { STATE_LABELS } from './row_groups';
   import { attentionIdleMinutes } from './notify';
   import { showFriendlyNames } from './sessions';
@@ -145,7 +145,7 @@
   }
 
   const pausedOf = (a: AccountSummary): SessionRow[] =>
-    pausedSessions(a, $attentionFacts?.limited_accounts, now);
+    pausedSessions(a, $attentionFacts?.limited_accounts, now, $attentionFacts?.limited_models);
 
   // "Show": the detail's Sessions list narrows to the paused ones.
   let pausedOnly = $state<string | null>(null);
@@ -305,9 +305,17 @@
   /** "Wait until <reset>" on the paused panel: every paused session of the
    *  account waits out its limit, as each row's own Wait does. */
   function waitAll(a: AccountSummary) {
-    const at = limitOf(a.uuid);
-    if (at == null) return;
-    for (const s of pausedOf(a)) waitOut(s.id, at);
+    // Each session waits for its own limit: a model's weekly window holds
+    // only the sessions on that model (review w10-5).
+    const paused = pausedOf(a);
+    const atOf = (s: SessionRow) => limitFor($attentionFacts, { account_uuid: a.uuid, launch_model: s.launch_model })?.resets_at ?? null;
+    const ats = paused.map(atOf).filter((t): t is number => t != null);
+    if (ats.length === 0) return;
+    const at = Math.max(...ats);
+    for (const s of paused) {
+      const t = atOf(s);
+      if (t != null) waitOut(s.id, t);
+    }
     // Wait sends nothing (review w03-4): the rows read "Waiting until …" and
     // are ready again once the limit resets; a turn the limit cut off stays
     // where it stopped.
@@ -709,7 +717,7 @@
                       ? 'Paused · limit'
                       : STATE_LABELS[attentionState(s, { idleSecs: $attentionIdleMinutes * 60, now, facts: $attentionFacts })]}</span>
                   {#if onlyPaused}
-                    <LimitActions sess={s} resetsAt={limitOf(a.uuid)} accountName={(u) => ($accountByUuid.get(u) ? labelOf($accountByUuid.get(u)) : u.slice(0, 8))} />
+                    <LimitActions sess={s} resetsAt={limitFor($attentionFacts, { account_uuid: a.uuid, launch_model: s.launch_model })?.resets_at ?? null} accountName={(u) => ($accountByUuid.get(u) ? labelOf($accountByUuid.get(u)) : u.slice(0, 8))} />
                   {/if}
                 </li>
               {/each}

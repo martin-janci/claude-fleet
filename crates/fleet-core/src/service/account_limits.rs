@@ -23,7 +23,10 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::ipc_error::{codes, IpcError};
-use crate::service::account_usage::{AccountUsage, AccountUsageSnapshot, UsageCache, Window};
+use crate::service::account_usage::{
+    model_family, AccountUsage, AccountUsageSnapshot, ModelFamily, UsageCache, Window,
+};
+use crate::service::login_conflicts::Flagged;
 use crate::service::settings;
 use crate::store::{HostRow, Store};
 
@@ -51,6 +54,37 @@ pub struct HostLogin {
     /// says (review w02-4).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub signed_out: bool,
+    /// A login conflict names this login (`service::login_conflicts`: a
+    /// copied login, the macOS Keychain and a file, two logins on one
+    /// account): a pick ranks it last, so automation does not feed the
+    /// sign-out loop, but it is still used when nothing else is left
+    /// (review w09-9).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub conflicted: bool,
+}
+
+/// Mark each of `logins` on `host` that `flagged` names
+/// ([`HostLogin::conflicted`]).
+fn flag(mut logins: Vec<HostLogin>, host: &str, flagged: &Flagged) -> Vec<HostLogin> {
+    for l in &mut logins {
+        l.conflicted = flagged.has(host, l.profile.as_deref());
+    }
+    logins
+}
+
+/// The key a pick orders logins by (review w09-9): a flagged login after
+/// every other, then the least used.
+fn pick_key(l: &HostLogin, used: f64) -> (bool, f64) {
+    (l.conflicted, used)
+}
+
+fn min_pick<'a>(it: impl Iterator<Item = (f64, &'a HostLogin)>) -> Option<&'a HostLogin> {
+    it.min_by(|(a, la), (b, lb)| {
+        let (ca, ua) = pick_key(la, *a);
+        let (cb, ub) = pick_key(lb, *b);
+        ca.cmp(&cb).then(ua.total_cmp(&ub))
+    })
+    .map(|(_, l)| l)
 }
 
 /// The answer for one start or switch.
@@ -77,6 +111,39 @@ pub fn used_pct(snap: Option<&AccountUsageSnapshot>, now: i64) -> Option<f64> {
     used_pct_of(snap.usage.as_ref()?, snap.fetched_at, now)
 }
 
+/// [`used_pct_of`] for a session or a start on the model `launch_model`
+/// (`sessions.launch_model`, `claude --model`): the model's own weekly
+/// window (`seven_day_opus` / `seven_day_sonnet`) counts too when the model
+/// has one ([`model_family`], review w10-5). Any other model, or none (the
+/// host's default), reads the account's two windows alone.
+pub fn used_pct_on(
+    usage: &AccountUsage,
+    fetched_at: Option<i64>,
+    now: i64,
+    launch_model: Option<&str>,
+) -> Option<f64> {
+    used_pct_family(usage, fetched_at, now, model_family(launch_model))
+}
+
+/// [`used_pct_on`] for a model family already worked out.
+pub fn used_pct_family(
+    usage: &AccountUsage,
+    fetched_at: Option<i64>,
+    now: i64,
+    family: Option<ModelFamily>,
+) -> Option<f64> {
+    use crate::service::account_usage::WEEK_SECS;
+    let both = used_pct_of(usage, fetched_at, now);
+    let model = family
+        .and_then(|f| usage.model_window(f))
+        .filter(|w| w.utilization.is_finite() && w.live_at(fetched_at, WEEK_SECS, now))
+        .map(|w| w.utilization.clamp(0.0, 100.0));
+    match (both, model) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    }
+}
+
 /// [`used_pct`] of one reading, fetched at `fetched_at`.
 pub fn used_pct_of(usage: &AccountUsage, fetched_at: Option<i64>, now: i64) -> Option<f64> {
     let live = |w: &Option<Window>, len: i64| {
@@ -97,8 +164,19 @@ pub fn used_pct_of(usage: &AccountUsage, fetched_at: Option<i64>, now: i64) -> O
 /// Every login on `host` that is logged in to an account: its own, then each
 /// profile, in the order the host lists them.
 pub fn host_logins(host: &HostRow, usage: &[AccountUsageSnapshot], now: i64) -> Vec<HostLogin> {
+    host_logins_on(host, usage, now, None)
+}
+
+/// [`host_logins`] for a start on `launch_model` ([`used_pct_on`]).
+pub fn host_logins_on(
+    host: &HostRow,
+    usage: &[AccountUsageSnapshot],
+    now: i64,
+    launch_model: Option<&str>,
+) -> Vec<HostLogin> {
     logins_with(host, |uuid| {
-        used_pct(usage.iter().find(|s| s.account_uuid == uuid), now)
+        let snap = usage.iter().find(|s| s.account_uuid == uuid)?;
+        used_pct_on(snap.usage.as_ref()?, snap.fetched_at, now, launch_model)
     })
 }
 
@@ -110,6 +188,7 @@ fn logins_with(host: &HostRow, used: impl Fn(&str) -> Option<f64>) -> Vec<HostLo
         account_uuid: uuid.to_string(),
         used_pct: used(uuid),
         signed_out: signed_out(None),
+        conflicted: false,
     });
     let profiles = host.claude_profiles.iter().flatten().filter_map(|p| {
         p.account_uuid.as_deref().map(|uuid| HostLogin {
@@ -117,6 +196,7 @@ fn logins_with(host: &HostRow, used: impl Fn(&str) -> Option<f64>) -> Vec<HostLo
             account_uuid: uuid.to_string(),
             used_pct: used(uuid),
             signed_out: signed_out(Some(&p.name)),
+            conflicted: false,
         })
     });
     own.into_iter().chain(profiles).collect()
@@ -133,7 +213,34 @@ pub fn headroom(
     pause_at_pct: f64,
     now: i64,
 ) -> Headroom {
-    let logins = host_logins(host, usage, now);
+    headroom_on(
+        host,
+        profile,
+        usage,
+        pause_at_pct,
+        now,
+        None,
+        &Flagged::default(),
+    )
+}
+
+/// [`headroom`] for a start on `launch_model` ([`used_pct_on`]), with the
+/// logins `flagged` names marked [`HostLogin::conflicted`] and suggested
+/// only when no other login has room (review w09-9).
+pub fn headroom_on(
+    host: &HostRow,
+    profile: Option<&str>,
+    usage: &[AccountUsageSnapshot],
+    pause_at_pct: f64,
+    now: i64,
+    launch_model: Option<&str>,
+    flagged: &Flagged,
+) -> Headroom {
+    let logins = flag(
+        host_logins_on(host, usage, now, launch_model),
+        &host.alias,
+        flagged,
+    );
     let profile = profile.map(str::trim).filter(|p| !p.is_empty());
     let chosen = logins
         .iter()
@@ -145,15 +252,18 @@ pub fn headroom(
         .is_some_and(|u| u >= pause_at_pct);
     let suggestion = if over {
         let current = chosen.as_ref().map(|c| c.account_uuid.as_str());
-        logins
-            .iter()
-            .filter(|l| Some(l.account_uuid.as_str()) != current)
-            // A signed-out login answers a start with `/login`, whatever
-            // its last reading said.
-            .filter(|l| !crate::service::login_health::is_signed_out(host, l.profile.as_deref()))
-            .filter_map(|l| l.used_pct.filter(|u| *u < pause_at_pct).map(|u| (u, l)))
-            .min_by(|(a, _), (b, _)| a.total_cmp(b))
-            .map(|(_, l)| l.clone())
+        min_pick(
+            logins
+                .iter()
+                .filter(|l| Some(l.account_uuid.as_str()) != current)
+                // A signed-out login answers a start with `/login`, whatever
+                // its last reading said.
+                .filter(|l| {
+                    !crate::service::login_health::is_signed_out(host, l.profile.as_deref())
+                })
+                .filter_map(|l| l.used_pct.filter(|u| *u < pause_at_pct).map(|u| (u, l))),
+        )
+        .cloned()
     } else {
         None
     };
@@ -237,16 +347,25 @@ pub(crate) fn utc_stamp(at: i64) -> String {
 
 /// When every window of `usage` at or past `pause_at` has reset: the latest
 /// of their `resets_at`; `None` when none is past the line or none says.
-fn over_resets_at(usage: &AccountUsage, fetched_at: i64, pause_at: f64, now: i64) -> Option<i64> {
+/// A start on `launch_model` counts that model's own weekly window too
+/// ([`used_pct_on`]).
+fn over_resets_at(
+    usage: &AccountUsage,
+    fetched_at: i64,
+    pause_at: f64,
+    now: i64,
+    launch_model: Option<&str>,
+) -> Option<i64> {
     use crate::service::account_usage::{FIVE_HOUR_SECS, WEEK_SECS};
+    let model = model_family(launch_model).and_then(|f| usage.model_window(f));
     [
-        (&usage.five_hour, FIVE_HOUR_SECS),
-        (&usage.seven_day, WEEK_SECS),
+        (usage.five_hour.as_ref(), FIVE_HOUR_SECS),
+        (usage.seven_day.as_ref(), WEEK_SECS),
+        (model, WEEK_SECS),
     ]
     .into_iter()
     .filter_map(|(w, len)| {
-        w.as_ref()
-            .filter(|w| w.utilization >= pause_at && w.live_at(Some(fetched_at), len, now))
+        w.filter(|w| w.utilization >= pause_at && w.live_at(Some(fetched_at), len, now))
     })
     .map(|w| w.resets_at)
     .collect::<Option<Vec<i64>>>()
@@ -364,8 +483,19 @@ pub fn login_account(
     profile: Option<&str>,
     now: i64,
 ) -> Result<Option<LoginAccount>, IpcError> {
+    login_account_on(s, host_alias, profile, None, now)
+}
+
+/// [`login_account`] for a start on `launch_model` ([`used_pct_on`]).
+pub fn login_account_on(
+    s: &Store,
+    host_alias: &str,
+    profile: Option<&str>,
+    launch_model: Option<&str>,
+    now: i64,
+) -> Result<Option<LoginAccount>, IpcError> {
     let profile = profile.map(str::trim).filter(|p| !p.is_empty());
-    Ok(login_accounts(s, host_alias, now)?
+    Ok(login_accounts_on(s, host_alias, launch_model, now)?
         .into_iter()
         .find(|l| l.login.profile.as_deref() == profile))
 }
@@ -378,6 +508,16 @@ pub fn login_accounts(
     host_alias: &str,
     now: i64,
 ) -> Result<Vec<LoginAccount>, IpcError> {
+    login_accounts_on(s, host_alias, None, now)
+}
+
+/// [`login_accounts`] for a start on `launch_model` ([`used_pct_on`]).
+pub fn login_accounts_on(
+    s: &Store,
+    host_alias: &str,
+    launch_model: Option<&str>,
+    now: i64,
+) -> Result<Vec<LoginAccount>, IpcError> {
     let Some(host) = s.get_host_row(host_alias)? else {
         return Ok(Vec::new());
     };
@@ -387,7 +527,7 @@ pub fn login_accounts(
         snaps
             .iter()
             .find(|r| r.account_uuid == uuid)
-            .and_then(|r| used_pct_of(&r.usage, Some(r.fetched_at), now))
+            .and_then(|r| used_pct_on(&r.usage, Some(r.fetched_at), now, launch_model))
     });
     if logins.is_empty() {
         return Ok(Vec::new());
@@ -422,7 +562,20 @@ pub fn over_limit(
     profile: Option<&str>,
     now: i64,
 ) -> Result<Option<OverLimit>, IpcError> {
-    let Some(a) = login_account(s, host_alias, profile, now)?.filter(|a| a.over) else {
+    over_limit_on(s, host_alias, profile, None, now)
+}
+
+/// [`over_limit`] for a start on `launch_model`: that model's own weekly
+/// window counts too ([`used_pct_on`], review w10-5).
+pub fn over_limit_on(
+    s: &Store,
+    host_alias: &str,
+    profile: Option<&str>,
+    launch_model: Option<&str>,
+    now: i64,
+) -> Result<Option<OverLimit>, IpcError> {
+    let Some(a) = login_account_on(s, host_alias, profile, launch_model, now)?.filter(|a| a.over)
+    else {
         return Ok(None);
     };
     let pause_at = pause_at_pct(s);
@@ -430,7 +583,7 @@ pub fn over_limit(
         .latest_usage_snapshots()?
         .into_iter()
         .find(|r| r.account_uuid == a.login.account_uuid)
-        .and_then(|r| over_resets_at(&r.usage, r.fetched_at, pause_at, now));
+        .and_then(|r| over_resets_at(&r.usage, r.fetched_at, pause_at, now, launch_model));
     Ok(Some(OverLimit {
         host_alias: a.host_alias,
         login: a.login,
@@ -453,9 +606,21 @@ pub fn freer_login_for(
     not_account: &str,
     now: i64,
 ) -> Result<Option<HostLogin>, IpcError> {
+    freer_login_on(s, project_id, host_alias, not_account, None, now)
+}
+
+/// [`freer_login_for`] for a start on `launch_model` ([`used_pct_on`]).
+pub fn freer_login_on(
+    s: &Store,
+    project_id: Option<i64>,
+    host_alias: &str,
+    not_account: &str,
+    launch_model: Option<&str>,
+    now: i64,
+) -> Result<Option<HostLogin>, IpcError> {
     let forbidden =
         crate::service::project_accounts::forbidden_accounts_on(s, project_id, host_alias)?;
-    best_login(s, host_alias, now, false, |l| {
+    best_login(s, host_alias, now, false, launch_model, |l| {
         l.account_uuid != not_account && !forbidden.contains(&l.account_uuid)
     })
 }
@@ -463,12 +628,16 @@ pub fn freer_login_for(
 /// The signed-in login on `host_alias` that `keep` keeps with the most
 /// headroom: under `accounts.pause_at` first; with `any_reading`, failing
 /// that, the least used of the rest (a login without a reading counts as
-/// full). `None` when none is kept or the host is unknown.
+/// full). Within each, a login a conflict names
+/// ([`HostLogin::conflicted`]) only when no other is kept (review w09-9).
+/// Use is read for a start on `launch_model` ([`used_pct_on`]). `None`
+/// when none is kept or the host is unknown.
 fn best_login(
     s: &Store,
     host_alias: &str,
     now: i64,
     any_reading: bool,
+    launch_model: Option<&str>,
     keep: impl Fn(&HostLogin) -> bool,
 ) -> Result<Option<HostLogin>, IpcError> {
     let Some(host) = s.get_host_row(host_alias)? else {
@@ -476,25 +645,25 @@ fn best_login(
     };
     let snaps = s.latest_usage_snapshots()?;
     let pause_at = pause_at_pct(s);
-    let kept: Vec<HostLogin> = logins_with(&host, |uuid| {
+    let flagged = Flagged::in_store(s);
+    let all = logins_with(&host, |uuid| {
         snaps
             .iter()
             .find(|r| r.account_uuid == uuid)
-            .and_then(|r| used_pct_of(&r.usage, Some(r.fetched_at), now))
-    })
-    .into_iter()
-    .filter(|l| {
-        keep(l) && !crate::service::login_health::is_signed_out(&host, l.profile.as_deref())
-    })
-    .collect();
+            .and_then(|r| used_pct_on(&r.usage, Some(r.fetched_at), now, launch_model))
+    });
+    let kept: Vec<HostLogin> = flag(all, host_alias, &flagged)
+        .into_iter()
+        .filter(|l| {
+            keep(l) && !crate::service::login_health::is_signed_out(&host, l.profile.as_deref())
+        })
+        .collect();
     let least = |under: bool| {
-        kept.iter()
-            .filter_map(|l| {
-                let u = l.used_pct.unwrap_or(100.0);
-                (!under || l.used_pct.is_some_and(|u| u < pause_at)).then_some((u, l))
-            })
-            .min_by(|(a, _), (b, _)| a.total_cmp(b))
-            .map(|(_, l)| l.clone())
+        min_pick(kept.iter().filter_map(|l| {
+            let u = l.used_pct.unwrap_or(100.0);
+            (!under || l.used_pct.is_some_and(|u| u < pause_at)).then_some((u, l))
+        }))
+        .cloned()
     };
     Ok(least(true).or_else(|| if any_reading { least(false) } else { None }))
 }
@@ -525,6 +694,19 @@ pub fn login_with_headroom_for(
     profile: Option<&str>,
     now: i64,
 ) -> Result<Option<String>, IpcError> {
+    login_with_headroom_on(s, project_id, host_alias, profile, None, now)
+}
+
+/// [`login_with_headroom_for`] for a start on `launch_model`: use is read
+/// with that model's own weekly window ([`used_pct_on`], review w10-5).
+pub fn login_with_headroom_on(
+    s: &Store,
+    project_id: Option<i64>,
+    host_alias: &str,
+    profile: Option<&str>,
+    launch_model: Option<&str>,
+    now: i64,
+) -> Result<Option<String>, IpcError> {
     let profile = profile.map(str::trim).filter(|p| !p.is_empty());
     // Host-aware (review w09-2 / w01-3): an org the host is filed under
     // forbids like the project's own, as `refuse_forbidden` counts it.
@@ -533,7 +715,7 @@ pub fn login_with_headroom_for(
     if !forbidden.is_empty() {
         let account = login_account(s, host_alias, profile, now)?.map(|a| a.login.account_uuid);
         if account.is_some_and(|a| forbidden.contains(&a)) {
-            return Ok(best_login(s, host_alias, now, true, |l| {
+            return Ok(best_login(s, host_alias, now, true, launch_model, |l| {
                 !forbidden.contains(&l.account_uuid) && !daily_spent(s, &l.account_uuid, now)
             })?
             .map_or_else(|| profile.map(str::to_string), |l| l.profile));
@@ -545,19 +727,24 @@ pub fn login_with_headroom_for(
     // and the start reports it.
     if let Some(host) = s.get_host_row(host_alias)? {
         if crate::service::login_health::is_signed_out(&host, profile) {
-            return Ok(best_login(s, host_alias, now, true, |l| {
+            return Ok(best_login(s, host_alias, now, true, launch_model, |l| {
                 !forbidden.contains(&l.account_uuid) && !daily_spent(s, &l.account_uuid, now)
             })?
             .map_or_else(|| profile.map(str::to_string), |l| l.profile));
         }
     }
-    let Some(over) = over_limit(s, host_alias, profile, now)? else {
+    let Some(over) = over_limit_on(s, host_alias, profile, launch_model, now)? else {
         return Ok(profile.map(str::to_string));
     };
-    Ok(
-        freer_login_for(s, project_id, host_alias, &over.login.account_uuid, now)?
-            .map_or_else(|| profile.map(str::to_string), |l| l.profile),
-    )
+    Ok(freer_login_on(
+        s,
+        project_id,
+        host_alias,
+        &over.login.account_uuid,
+        launch_model,
+        now,
+    )?
+    .map_or_else(|| profile.map(str::to_string), |l| l.profile))
 }
 
 /// Step 4.4 on a start that did not come through the desktop's own dialog
@@ -585,7 +772,21 @@ pub fn refuse_over_limit_for(
     profile: Option<&str>,
     now: i64,
 ) -> Result<(), IpcError> {
-    let Some(over) = over_limit(s, host_alias, profile, now)? else {
+    refuse_over_limit_on(s, project_id, host_alias, profile, None, now)
+}
+
+/// [`refuse_over_limit_for`] for a start on `launch_model`: that model's
+/// own weekly window counts too ([`used_pct_on`], review w10-5), and the
+/// login it names instead has room for that model.
+pub fn refuse_over_limit_on(
+    s: &Store,
+    project_id: Option<i64>,
+    host_alias: &str,
+    profile: Option<&str>,
+    launch_model: Option<&str>,
+    now: i64,
+) -> Result<(), IpcError> {
+    let Some(over) = over_limit_on(s, host_alias, profile, launch_model, now)? else {
         return Ok(());
     };
     if over.daily.is_some() {
@@ -594,7 +795,14 @@ pub fn refuse_over_limit_for(
         return refuse_over_daily_limit(s, host_alias, profile, now);
     }
     let pause_at = over.pause_at_pct;
-    let suggestion = freer_login_for(s, project_id, host_alias, &over.login.account_uuid, now)?;
+    let suggestion = freer_login_on(
+        s,
+        project_id,
+        host_alias,
+        &over.login.account_uuid,
+        launch_model,
+        now,
+    )?;
     let email = |uuid: &str| {
         s.list_accounts()
             .ok()
@@ -608,6 +816,7 @@ pub fn refuse_over_limit_for(
         let want = crate::service::placement::Want {
             not_account: Some(over.login.account_uuid.clone()),
             not_host: Some(host_alias.to_string()),
+            model: launch_model.map(str::to_string),
             ..Default::default()
         };
         crate::service::placement::suggest_with(
@@ -701,6 +910,13 @@ pub struct CheckAccountHeadroomArgs {
     /// account it forbids.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<i64>,
+    /// The model the session runs or will run on (`claude --model`: an
+    /// alias or an id): its own weekly window (`seven_day_opus` /
+    /// `seven_day_sonnet`) counts toward every login's use. Omitted: the
+    /// host's default model, which reads the 5-hour and weekly windows
+    /// alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// [`Headroom::suggestion`] again without the accounts `forbidden` names:
@@ -714,15 +930,16 @@ fn without_forbidden(mut h: Headroom, host: &HostRow, forbidden: &[String]) -> H
         return h;
     }
     let current = h.chosen.as_ref().map(|c| c.account_uuid.clone());
-    h.suggestion = h
-        .logins
-        .iter()
-        .filter(|l| Some(&l.account_uuid) != current.as_ref())
-        .filter(|l| !forbidden.contains(&l.account_uuid))
-        .filter(|l| !crate::service::login_health::is_signed_out(host, l.profile.as_deref()))
-        .filter_map(|l| l.used_pct.filter(|u| *u < h.pause_at_pct).map(|u| (u, l)))
-        .min_by(|(a, _), (b, _)| a.total_cmp(b))
-        .map(|(_, l)| l.clone());
+    let pause_at = h.pause_at_pct;
+    h.suggestion = min_pick(
+        h.logins
+            .iter()
+            .filter(|l| Some(&l.account_uuid) != current.as_ref())
+            .filter(|l| !forbidden.contains(&l.account_uuid))
+            .filter(|l| !crate::service::login_health::is_signed_out(host, l.profile.as_deref()))
+            .filter_map(|l| l.used_pct.filter(|u| *u < pause_at).map(|u| (u, l))),
+    )
+    .cloned();
     h
 }
 
@@ -735,7 +952,7 @@ pub fn check_account_headroom(
     cache: &Mutex<UsageCache>,
     now: i64,
 ) -> Result<Headroom, IpcError> {
-    let ((host, pause_at, accounts), forbidden) = {
+    let ((host, pause_at, accounts), forbidden, flagged) = {
         let s = store
             .lock()
             .map_err(|_| IpcError::new(codes::E_INTERNAL, "store lock poisoned"))?;
@@ -746,13 +963,22 @@ pub fn check_account_headroom(
                 args.project_id,
                 &args.host_alias,
             )?,
+            Flagged::in_store(&s),
         )
     };
     let usage: Vec<AccountUsageSnapshot> = {
         let c = cache.lock().unwrap_or_else(|e| e.into_inner());
         accounts.iter().map(|a| c.snapshot(&a.uuid)).collect()
     };
-    let h = headroom(&host, args.profile.as_deref(), &usage, pause_at, now);
+    let h = headroom_on(
+        &host,
+        args.profile.as_deref(),
+        &usage,
+        pause_at,
+        now,
+        args.model.as_deref(),
+        &flagged,
+    );
     Ok(without_forbidden(h, &host, &forbidden))
 }
 
@@ -776,7 +1002,15 @@ pub fn served_check_account_headroom(
         &args.host_alias,
     )?;
     let usage = s.bus_account_usage();
-    let h = headroom(&host, args.profile.as_deref(), &usage, pause_at, now);
+    let h = headroom_on(
+        &host,
+        args.profile.as_deref(),
+        &usage,
+        pause_at,
+        now,
+        args.model.as_deref(),
+        &Flagged::in_store(&s),
+    );
     Ok(without_forbidden(h, &host, &forbidden))
 }
 
@@ -914,6 +1148,109 @@ mod tests {
         seed_usage(&s, "mac", Some("work"), "acct-busy", 97.0, NOW);
         let err = refuse_over_limit(&s, "mac", None, NOW).unwrap_err();
         assert!(err.message.contains("no other login"), "{}", err.message);
+    }
+
+    /// Review w09-9: two profiles on one account are a login conflict; a
+    /// login fleet picks is never one of them while another has room, and
+    /// one of them is still taken when nothing else is left.
+    #[test]
+    fn a_conflicted_login_is_picked_last_but_still_picked() {
+        let s = Store::open_in_memory().unwrap();
+        seed_usage(&s, "mac", None, "acct-full", 95.0, NOW);
+        seed_usage(&s, "mac", Some("free"), "acct-free", 60.0, NOW);
+        seed_usage(&s, "mac", Some("dup1"), "acct-dup", 10.0, NOW);
+        let mut list = s
+            .get_host_row("mac")
+            .unwrap()
+            .unwrap()
+            .claude_profiles
+            .unwrap();
+        list.push(HostProfileRow {
+            name: "dup2".into(),
+            account_uuid: Some("acct-dup".into()),
+            email: None,
+            credential: None,
+        });
+        s.set_host_profiles("mac", &list).unwrap();
+        assert_eq!(
+            login_with_headroom_for(&s, None, "mac", None, NOW).unwrap(),
+            Some("free".into())
+        );
+        let err = refuse_over_limit(&s, "mac", None, NOW).unwrap_err();
+        assert_eq!(err.details.unwrap()["suggested_profile"], "free");
+        // The headroom check marks them and suggests the other.
+        let usage = s.bus_account_usage();
+        let host = s.get_host_row("mac").unwrap().unwrap();
+        let flagged = Flagged::of(&s.list_hosts().unwrap());
+        let h = headroom_on(&host, None, &usage, 90.0, NOW, None, &flagged);
+        assert!(h.logins.iter().any(|l| l.conflicted));
+        // Nothing else left: the flagged login is used, not refused.
+        seed_usage(&s, "mac", Some("free"), "acct-busy", 97.0, NOW);
+        assert_eq!(
+            login_with_headroom_for(&s, None, "mac", None, NOW).unwrap(),
+            Some("dup1".into())
+        );
+    }
+
+    /// Review w10-5: a model's own weekly window counts for a start on that
+    /// model, and for no other.
+    #[test]
+    fn a_models_weekly_window_counts_only_for_a_start_on_that_model() {
+        use crate::store::UsageSnapshotRow;
+        let s = Store::open_in_memory().unwrap();
+        seed_usage(&s, "mac", None, "acct-a", 40.0, NOW - 100);
+        seed_usage(&s, "mac", Some("work"), "acct-b", 50.0, NOW - 100);
+        let opus_full = AccountUsage {
+            five_hour: Some(Window {
+                utilization: 40.0,
+                resets_at: Some(NOW + 3_600),
+            }),
+            seven_day: Some(Window {
+                utilization: 60.0,
+                resets_at: Some(NOW + 86_400),
+            }),
+            seven_day_opus: Some(Window {
+                utilization: 100.0,
+                resets_at: Some(NOW + 86_400),
+            }),
+            seven_day_sonnet: None,
+        };
+        assert_eq!(used_pct_on(&opus_full, Some(NOW), NOW, None), Some(60.0));
+        assert_eq!(
+            used_pct_on(&opus_full, Some(NOW), NOW, Some("sonnet")),
+            Some(60.0)
+        );
+        assert_eq!(
+            used_pct_on(&opus_full, Some(NOW), NOW, Some("opus[1m]")),
+            Some(100.0)
+        );
+        s.insert_usage_snapshot(&UsageSnapshotRow {
+            account_uuid: "acct-a".into(),
+            fetched_at: NOW - 10,
+            usage: opus_full,
+            subscription: None,
+            source_host: None,
+        })
+        .unwrap();
+        assert!(over_limit(&s, "mac", None, NOW).unwrap().is_none());
+        assert!(over_limit_on(&s, "mac", None, Some("sonnet"), NOW)
+            .unwrap()
+            .is_none());
+        let over = over_limit_on(&s, "mac", None, Some("opus"), NOW)
+            .unwrap()
+            .unwrap();
+        assert_eq!(over.resets_at, Some(NOW + 86_400));
+        assert!(refuse_over_limit_for(&s, None, "mac", None, NOW).is_ok());
+        let err = refuse_over_limit_on(&s, None, "mac", None, Some("opus"), NOW).unwrap_err();
+        assert_eq!(err.details.unwrap()["suggested_profile"], "work");
+        assert_eq!(
+            login_with_headroom_on(&s, None, "mac", None, Some("claude-opus-4-5"), NOW).unwrap(),
+            Some("work".into())
+        );
+        assert_eq!(
+            login_with_headroom_for(&s, None, "mac", None, NOW).unwrap(),
+            None
+        );
     }
 
     /// Control review F5: with no login on the host under the line, the
@@ -1109,6 +1446,7 @@ mod tests {
                 host_alias: "nowhere".into(),
                 profile: None,
                 project_id: None,
+                model: None,
             },
             &store,
             &cache,
@@ -1185,6 +1523,7 @@ mod tests {
             host_alias: "mac".into(),
             profile: None,
             project_id: None,
+            model: None,
         };
         let now = crate::store::now_unix();
         let unknown = served_check_account_headroom(&args, &store, now).unwrap();
@@ -1235,6 +1574,7 @@ mod tests {
             host_alias: "gone".into(),
             profile: None,
             project_id: None,
+            model: None,
         };
         let e = served_check_account_headroom(&missing, &store, now).unwrap_err();
         assert_eq!(e.code, codes::E_NOTFOUND);
@@ -1253,6 +1593,7 @@ mod tests {
                 account_uuid: "u1".into(),
                 used_pct: Some(12.0),
                 signed_out: false,
+                conflicted: false,
             },
             email: Some("me@x.com".into()),
             over: false,

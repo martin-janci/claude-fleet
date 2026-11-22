@@ -33,6 +33,8 @@ import {
   stuckSnapshot,
   worstSeverityByProject,
   type AttentionFacts,
+  limitFor,
+  modelFamily,
 } from './attention';
 import { CLAUDE_STATUSES, STUCK_KINDS, type SessionRow } from './sessions';
 import attentionTable from './attention_states.json';
@@ -424,5 +426,30 @@ describe('G1.6: Jev\'s "probably waiting"', () => {
     expect(countNeedsYou([r], opts)).toBe(0);
     // Jev's reading still says who read it.
     expect(jevOutcome(r)).toBe('asked');
+  });
+});
+
+// Review w10-5: a model's own weekly window holds only the sessions launched
+// on that model (mirrors `account_usage::model_family` / `Facts::limit_for`).
+describe('model windows', () => {
+  it('maps a launch model to the family whose window it bills', () => {
+    expect(modelFamily('opus')).toBe('opus');
+    expect(modelFamily('Opus[1m]')).toBe('opus');
+    expect(modelFamily('claude-opus-4-5-20251101')).toBe('opus');
+    expect(modelFamily('sonnet[1m]')).toBe('sonnet');
+    expect(modelFamily('opusplan')).toBeNull();
+    expect(modelFamily('haiku')).toBeNull();
+    expect(modelFamily(null)).toBeNull();
+  });
+
+  it('takes the limit that frees last, and ignores another model', () => {
+    const facts: AttentionFacts = {
+      limited_accounts: { acc: { window: 'five_hour', resets_at: 100 } },
+      limited_models: { acc: { opus: { window: 'weekly_opus', resets_at: 9000 } } },
+    };
+    expect(limitFor(facts, { account_uuid: 'acc', launch_model: 'opus' })?.window).toBe('weekly_opus');
+    expect(limitFor(facts, { account_uuid: 'acc', launch_model: 'sonnet' })?.window).toBe('five_hour');
+    expect(limitFor(facts, { account_uuid: 'acc' })?.window).toBe('five_hour');
+    expect(limitFor({ limited_models: facts.limited_models }, { account_uuid: 'acc' })).toBeUndefined();
   });
 });

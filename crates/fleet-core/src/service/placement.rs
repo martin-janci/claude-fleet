@@ -15,8 +15,13 @@
 //! (`login_health`), under `accounts.pause_at` and not past its daily spend
 //! limit.
 //!
-//! **Rank.** By headroom: the account's unused share first, then the host's
-//! idle CPU and free memory. A preferred host (the one the work last ran
+//! A start on a model (`Want::model`) reads the account's use with that
+//! model's own weekly window (`account_limits::used_pct_on`, review w10-5).
+//!
+//! **Rank.** A login a login conflict names (`login_conflicts::Flagged`: a
+//! copied login, the Keychain and a file, two logins on one account) after
+//! every other (review w09-9), still a candidate. Then by headroom: the
+//! account's unused share first, then the host's idle CPU and free memory. A preferred host (the one the work last ran
 //! on) gets a small bonus, so it wins a near tie and loses to a clearly
 //! better one. Jev's placement (`decide.jev.host_placement`) is not asked
 //! here; it stays its own, off-by-default proposal.
@@ -79,6 +84,10 @@ pub struct LoginFacts {
     /// (`service::project_accounts`).
     #[serde(default)]
     pub forbidden: bool,
+    /// A login conflict names it (`login_conflicts::Flagged`): ranked after
+    /// every other login (review w09-9).
+    #[serde(default)]
+    pub conflicted: bool,
 }
 
 /// One host, as placement sees it.
@@ -113,6 +122,11 @@ pub struct Want {
     pub not_host: Option<String>,
     /// Won on a near tie ([`PREFERRED_BONUS`]).
     pub prefer_host: Option<String>,
+    /// The model the work starts on (`claude --model`): its own weekly
+    /// window counts toward each account's use
+    /// (`account_limits::used_pct_on`, review w10-5). `None`: the host's
+    /// default model.
+    pub model: Option<String>,
 }
 
 /// A place the work can run, best first.
@@ -227,8 +241,9 @@ pub fn rank(hosts: &[HostFacts], want: &Want, pause_at: f64) -> Placement {
         pause_at_pct: pause_at,
         ..Default::default()
     };
-    // (score, host order, login order) so a tie keeps the listed order.
-    let mut scored: Vec<(f64, usize, usize, Candidate)> = Vec::new();
+    // (conflicted, score, host order, login order) so a flagged login
+    // comes last and a tie keeps the listed order.
+    let mut scored: Vec<(bool, f64, usize, usize, Candidate)> = Vec::new();
     for (hi, h) in hosts.iter().enumerate() {
         if want.hosts.as_ref().is_some_and(|l| !l.contains(&h.alias)) {
             continue;
@@ -289,7 +304,15 @@ pub fn rank(hosts: &[HostFacts], want: &Want, pause_at: f64) -> Placement {
             if h.has_repo == Some(true) {
                 reasons.push("has run the project".into());
             }
+            if l.conflicted {
+                reasons.push(
+                    "ranked last: a login conflict names this login (it shares a refresh token \
+                     with another copy)"
+                        .into(),
+                );
+            }
             scored.push((
+                l.conflicted,
                 round1(score),
                 hi,
                 li,
@@ -307,8 +330,13 @@ pub fn rank(hosts: &[HostFacts], want: &Want, pause_at: f64) -> Placement {
             ));
         }
     }
-    scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
-    out.candidates = scored.into_iter().map(|(_, _, _, c)| c).collect();
+    scored.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(b.1.total_cmp(&a.1))
+            .then(a.2.cmp(&b.2))
+            .then(a.3.cmp(&b.3))
+    });
+    out.candidates = scored.into_iter().map(|(_, _, _, _, c)| c).collect();
     out
 }
 
@@ -336,7 +364,19 @@ pub fn facts(
     local_enabled: bool,
     now: i64,
 ) -> Result<(Vec<HostFacts>, bool), IpcError> {
+    facts_on(s, project_id, local_enabled, None, now)
+}
+
+/// [`facts`] for a start on `launch_model` (`account_limits::used_pct_on`).
+pub fn facts_on(
+    s: &Store,
+    project_id: Option<i64>,
+    local_enabled: bool,
+    launch_model: Option<&str>,
+    now: i64,
+) -> Result<(Vec<HostFacts>, bool), IpcError> {
     let all = s.list_hosts()?;
+    let flagged = crate::service::login_conflicts::Flagged::of(&all);
     let hosts = crate::service::hosts::active_hosts(all.clone(), local_enabled);
     let snaps = s.latest_usage_snapshots()?;
     let accounts = s.list_accounts()?;
@@ -371,7 +411,9 @@ pub fn facts(
             let used = snaps
                 .iter()
                 .find(|r| r.account_uuid == l.account_uuid)
-                .and_then(|r| account_limits::used_pct_of(&r.usage, Some(r.fetched_at), now));
+                .and_then(|r| {
+                    account_limits::used_pct_on(&r.usage, Some(r.fetched_at), now, launch_model)
+                });
             let daily =
                 account_limits::daily_limit_hit(s, &l.account_uuid, now).is_ok_and(|d| d.is_some());
             logins.push(LoginFacts {
@@ -388,6 +430,7 @@ pub fn facts(
                 daily_limit_hit: daily,
                 live_sessions: live.get(&l.account_uuid).copied().unwrap_or(0),
                 forbidden: forbidden.contains(&l.account_uuid),
+                conflicted: flagged.has(&h.alias, l.profile.as_deref()),
                 profile: l.profile,
                 account_uuid: l.account_uuid,
             });
@@ -438,7 +481,7 @@ pub fn suggest_with(
     local_enabled: bool,
     now: i64,
 ) -> Result<Placement, IpcError> {
-    let (hosts, unseen) = facts(s, project_id, local_enabled, now)?;
+    let (hosts, unseen) = facts_on(s, project_id, local_enabled, want.model.as_deref(), now)?;
     let mut p = rank(&hosts, want, account_limits::pause_at_pct(s));
     if unseen {
         p.note = Some("no host has run this project yet; any host can take it".into());

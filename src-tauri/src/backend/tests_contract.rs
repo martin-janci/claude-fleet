@@ -108,6 +108,8 @@ pub(crate) fn sample_session() -> SessionRow {
         pinned_at: Some(1_700_000_200),
         // Some, so the golden pins the name the suggestion chip reads.
         prompt_suggestion: Some("run the tests".into()),
+        // Some, so the golden pins the name a model window reads (w10-5).
+        launch_model: Some("opus".into()),
         // One, so the golden pins the proposal shape every row carries.
         proposals: vec![fleet_core::store::DecisionProposal {
             feature: "turn_outcome".into(),
@@ -1116,6 +1118,9 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         account_uuid: "u".into(),
         used_pct: Some(40.0),
         signed_out: false,
+        // True, so the golden pins the name a login conflict ranks by
+        // (review w09-9).
+        conflicted: true,
     };
     put("HostLogin", wire_keys(&login));
     put(
@@ -1511,6 +1516,7 @@ fn a_session_rows_wire_names_are_these_exact_seventy_two() {
         "last_stop_at",
         "last_turn_at",
         "last_viewed_at",
+        "launch_model",
         "lost_at",
         "lost_reason",
         "model",
@@ -1560,7 +1566,7 @@ fn a_session_rows_wire_names_are_these_exact_seventy_two() {
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 74, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 75, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

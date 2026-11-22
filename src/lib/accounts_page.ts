@@ -10,6 +10,7 @@ import type { SessionRow } from './sessions';
 import type { AccountUsage, AccountUsageSnapshot } from './account_usage_store';
 import type { UsageWindowKind } from './account_usage';
 import { invokeCmd, type Result } from './result';
+import { limitFor, type AttentionFacts } from './attention';
 
 /** Mirrors `store::UsageSnapshotRow`. */
 export interface UsageSnapshotRow {
@@ -262,10 +263,16 @@ export function pausedSessions(
   a: Pick<AccountSummary, 'uuid' | 'sessions'>,
   limited: Readonly<Record<string, AccountLimitFact>> | undefined,
   now: number,
+  limitedModels?: AttentionFacts['limited_models'],
 ): SessionRow[] {
-  const limit = limited?.[a.uuid];
-  if (!limit || (limit.resets_at != null && limit.resets_at <= now)) return [];
-  return a.sessions.filter((s) => s.status !== 'ghost' && s.lost_at === null && s.claude_status !== 'working');
+  // Per session (review w10-5): a model's own weekly window holds only the
+  // sessions launched on that model.
+  const facts = { limited_accounts: limited, limited_models: limitedModels } as AttentionFacts;
+  return a.sessions.filter((s) => {
+    const limit = limitFor(facts, { account_uuid: a.uuid, launch_model: s.launch_model });
+    if (!limit || (limit.resets_at != null && limit.resets_at <= now)) return false;
+    return s.status !== 'ghost' && s.lost_at === null && s.claude_status !== 'working';
+  });
 }
 
 /** "7 sessions · 2 routines · $18.40 today": the card's count line. */

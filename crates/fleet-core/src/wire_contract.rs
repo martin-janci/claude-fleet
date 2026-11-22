@@ -325,6 +325,13 @@
 //!   bump: a session row's `prompt_suggestion` (additive, absent when
 //!   nothing is proposed). A hub without it never sends one, so a client
 //!   simply offers none; a client that predates it ignores the field.
+//!   A session row's `launch_model` (review w10-5, the column of migration
+//!   075, now on the wire) is new without a bump: additive, absent when the
+//!   session runs the host's default model. A client mirrors the hub's
+//!   "Paused · limit" with it: a model's own weekly window
+//!   (`seven_day_opus` / `seven_day_sonnet`) counts only for a row whose
+//!   `launch_model` names that model. A hub without it never sends one, so
+//!   no model window counts there; a client that predates it ignores it.
 //!   Routine seen items (migration 212) are new without a bump: a routine
 //!   row carries `track_seen` (read as on when absent), its input takes it,
 //!   and `routines` gains `seen` and `forget_seen`. The desktop sends the

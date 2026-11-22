@@ -96,6 +96,7 @@ fn findings_mark_what_could_not_be_checked() {
             account_uuid: "u".into(),
             used_pct: Some(97.0),
             signed_out: false,
+            conflicted: false,
         },
         email: None,
         over: true,
