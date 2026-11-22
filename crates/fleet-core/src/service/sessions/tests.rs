@@ -360,6 +360,25 @@ fn a_pane_that_lost_its_login_notes_the_rows_login() {
     let out = host(&s).signed_out_logins;
     assert_eq!(out.len(), 1, "one note per login, however many passes");
     assert_eq!(out[0].profile.as_deref(), Some("work"));
+
+    // w11-2: the person signs `work` in again; the pane still shows the old
+    // error until its next turn, which must not sign the login out again.
+    crate::service::login_health::record(
+        &s,
+        &[crate::service::login_health::Observation {
+            host_alias: "vps".into(),
+            profile: Some("work".into()),
+            signed_out: false,
+        }],
+        now_unix(),
+    )
+    .unwrap();
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    crate::service::login_health::drain_noted(&s, now_unix() + 1);
+    assert!(
+        host(&s).signed_out_logins.is_empty(),
+        "an error from before the sign-in says nothing"
+    );
 }
 
 /// Stamp every row as observed by a reconcile pass at `at`: the stale sweep

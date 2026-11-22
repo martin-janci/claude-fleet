@@ -502,6 +502,37 @@ impl Store {
     /// Write the host's signed-out logins (migration 197,
     /// `service::login_health`) and announce the row, only when they changed.
     /// Returns whether they did. An unknown host changes nothing.
+    /// Forget one login's refresh-token fingerprints (`profile` `None`: the
+    /// host's own), after a person signed it in again (review w02-2): its
+    /// history still holds the token it shared with the login it was copied
+    /// from, which would keep the copied mark until that old token fell out
+    /// of the kept few. The next health sample stores the new one alone.
+    pub fn forget_login_fingerprints(
+        &self,
+        alias: &str,
+        profile: Option<&str>,
+    ) -> Result<bool, rusqlite::Error> {
+        let Some(row) = fetch_host(&self.conn, alias)? else {
+            return Ok(false);
+        };
+        let kept: Vec<_> = row
+            .login_fingerprints
+            .iter()
+            .filter(|f| f.profile.as_deref() != profile)
+            .cloned()
+            .collect();
+        if kept.len() == row.login_fingerprints.len() {
+            return Ok(false);
+        }
+        let json = serde_json::to_string(&kept).unwrap_or_else(|_| "[]".into());
+        self.conn.execute(
+            "UPDATE hosts SET login_fingerprints = ?2 WHERE alias = ?1",
+            rusqlite::params![alias, json],
+        )?;
+        self.emit_host_and(alias, |bus, row| bus.host_probed(row), false)?;
+        Ok(true)
+    }
+
     pub fn set_host_signed_out_logins(
         &self,
         alias: &str,
