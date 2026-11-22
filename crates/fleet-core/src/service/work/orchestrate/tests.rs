@@ -991,6 +991,43 @@ fn the_hold_checks_the_host_a_start_rule_picks() {
     assert!(why.contains("mac's own login"), "{why}");
 }
 
+/// Review w09-5: a run whose login the project forbids waits with the
+/// reason (the start would refuse it on every pass), unless the start
+/// would step off it onto an allowed login on the host.
+#[test]
+fn the_hold_names_a_forbidden_login_the_start_would_keep() {
+    let fx = fixture();
+    let item = member(&fx, "a");
+    let s = lock(&fx.deps.store).unwrap();
+    let key = s.get_work_item(item).unwrap().unwrap().key.unwrap();
+    let pid = s.upsert_project("o", "r", "/repo").unwrap();
+    let now = 5_000;
+    s.insert_start_rule(None, None, &key, pid, Some("mac"), "active", 0, now)
+        .unwrap();
+    crate::service::account_limits::seed_usage(&s, "mac", None, "acc-mac", 10.0, now);
+    s.set_account_forbidden_projects("acc-mac", &[pid]).unwrap();
+    let run = Step {
+        kind: "run".into(),
+        item_id: Some(item),
+        role: Some("implement".into()),
+        reason: String::new(),
+        context: None,
+        auto: true,
+    };
+    let mut steps = vec![run.clone()];
+    hold_runs_over_limit(&s, &fx.m, None, &mut steps, now).unwrap();
+    assert!(steps.is_empty(), "held: {steps:?}");
+    let e = &s.mission_events(fx.m.id, None, 1).unwrap()[0];
+    assert_eq!(e.kind, "account_limit");
+    let why = e.payload.as_ref().unwrap()["why"].as_str().unwrap();
+    assert!(why.contains("forbidden"), "{why}");
+    // An allowed login on the host: the start steps onto it, the run goes.
+    crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "acc-work", 10.0, now);
+    let mut steps = vec![run.clone()];
+    hold_runs_over_limit(&s, &fx.m, None, &mut steps, now).unwrap();
+    assert_eq!(steps, vec![run]);
+}
+
 /// A mission with two repos and an item with no project of its own: the
 /// start carries the allow-list, so wherever the start picks a project
 /// (a start rule, the last same-prefix ticket) it stays inside it.
@@ -1271,7 +1308,7 @@ fn the_planner_never_takes_a_login_the_missions_project_forbids() {
     assert_eq!(limit::choose(&s, &m, None, now).unwrap(), Ok(own.clone()));
     assert_eq!(limit::draft_login(&s, &m, now).unwrap(), own);
     s.set_account_forbidden_projects("own", &[project]).unwrap();
-    assert_eq!(limit::mission_forbidden(&s, &m).unwrap(), vec!["own"]);
+    assert_eq!(limit::mission_forbidden(&s, &m, None).unwrap(), vec!["own"]);
     assert_eq!(limit::candidates(&s, &m, None).unwrap(), vec![work.clone()]);
     assert_eq!(limit::choose(&s, &m, None, now).unwrap(), Ok(work.clone()));
     assert_eq!(limit::draft_login(&s, &m, now).unwrap(), work);
@@ -1285,6 +1322,74 @@ fn the_planner_never_takes_a_login_the_missions_project_forbids() {
         codes::E_ACCOUNT_FORBIDDEN
     );
     assert!(!limit::waiting(&s, m.id).unwrap(), "no usage-limit wait");
+}
+
+/// Review w09-1: a block that comes through the org the planner's host is
+/// filed under (a host-qualified rule) holds for the planner and its
+/// drafts, as it does for a session start on that host.
+#[test]
+fn the_planner_never_takes_a_login_the_hosts_org_forbids() {
+    let fx = fixture();
+    let m = planned_on_mac(&fx);
+    let s = lock(&fx.deps.store).unwrap();
+    let now = now_unix();
+    crate::service::account_limits::seed_usage(&s, "mac", None, "own", 10.0, now);
+    crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 20.0, now);
+    let project = s.upsert_project("acme", "api", "/srv/acme/api").unwrap();
+    s.conn_ref()
+        .execute(
+            "UPDATE work_items SET project_id = ?1 WHERE id = ?2",
+            rusqlite::params![project, fx.root],
+        )
+        .unwrap();
+    let org = s.add_org("Client", None, false).unwrap().id;
+    s.add_org_rule(crate::store::OrgRuleRow {
+        id: 0,
+        org_id: org,
+        owner: None,
+        repo: None,
+        path_prefix: None,
+        host_alias: Some("mac".into()),
+    })
+    .unwrap();
+    s.set_account_blocks("own", None, Some(&[org])).unwrap();
+    let work = limit::Login {
+        host: "mac".into(),
+        profile: Some("work".into()),
+    };
+    assert!(limit::mission_forbidden(&s, &m, None).unwrap().is_empty());
+    assert_eq!(
+        limit::mission_forbidden(&s, &m, Some("mac")).unwrap(),
+        vec!["own"]
+    );
+    assert_eq!(limit::candidates(&s, &m, None).unwrap(), vec![work.clone()]);
+    assert_eq!(limit::choose(&s, &m, None, now).unwrap(), Ok(work.clone()));
+    assert_eq!(limit::draft_login(&s, &m, now).unwrap(), work);
+}
+
+/// Review w09-7: when every login is past the pause line a draft still
+/// runs "as a person asked for it now", but never on a login whose account
+/// spent its daily limit.
+#[test]
+fn a_draft_passes_over_a_login_whose_daily_limit_is_spent() {
+    let fx = fixture();
+    let m = planned_on_mac(&fx);
+    let s = lock(&fx.deps.store).unwrap();
+    let now = now_unix();
+    crate::service::account_limits::seed_usage(&s, "mac", None, "own", 10.0, now);
+    crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 97.0, now);
+    crate::service::account_limits::seed_daily_spend(&s, "own", 1.0, 2.0, now);
+    let work = limit::Login {
+        host: "mac".into(),
+        profile: Some("work".into()),
+    };
+    assert!(limit::choose(&s, &m, None, now).unwrap().is_err(), "a wait");
+    assert_eq!(limit::draft_login(&s, &m, now).unwrap(), work);
+    crate::service::account_limits::seed_daily_spend(&s, "work", 1.0, 2.0, now);
+    assert_eq!(
+        limit::draft_login(&s, &m, now).unwrap_err().code,
+        codes::E_ACCOUNT_LIMIT
+    );
 }
 
 /// The fixture's mission with its planner on `mac`.
