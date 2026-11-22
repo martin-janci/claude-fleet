@@ -106,3 +106,33 @@ async fn control_does_not_follow_a_sign_in() {
         .unwrap_err();
     assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
 }
+
+/// Review w11-7: removing a login is an `add_account` write like the
+/// others: an untrusted device and Control are refused before anything runs.
+#[tokio::test]
+async fn neither_an_untrusted_device_nor_control_removes_a_login() {
+    let mut control = device(true);
+    if let Some(c) = control.client.as_mut() {
+        c.name = crate::service::operator::OPERATOR_CLIENT_NAME.into();
+    }
+    for caller in [device(false), control] {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mercury").unwrap();
+        let t = super::tests::test_tools(s);
+        let e = t
+            .add_account(
+                Extension(caller),
+                Parameters(
+                    serde_json::from_value(serde_json::json!({
+                        "action": "remove",
+                        "host_alias": "mercury",
+                        "profile": "work",
+                    }))
+                    .unwrap(),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    }
+}

@@ -589,13 +589,25 @@ impl FleetTools {
     }
 
     #[tool(description = "Remove a host; its sessions are orphaned. Returns \
-        the removed row.")]
+        the removed row. delete_credentials: also delete fleet's token and \
+        key files from its login profiles first (best effort, reported as \
+        `credentials`).")]
     pub(super) async fn remove_host(
         &self,
-        Parameters(args): Parameters<hosts::HostAliasArgs>,
+        Parameters(args): Parameters<hosts::RemoveHostArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit("remove_host", &format!("alias={}", args.alias));
-        ok_json(&hosts::remove_host(args, &self.store, &self.tunnels).map_err(to_mcp_err)?)
+        audit(
+            "remove_host",
+            &format!(
+                "alias={} delete_credentials={}",
+                args.alias, args.delete_credentials
+            ),
+        );
+        ok_json(
+            &hosts::remove_host(args, &self.store, &self.tunnels, &self.ssh)
+                .await
+                .map_err(to_mcp_err)?,
+        )
     }
 
     #[tool(description = "Fold host `from` into `into` in one transaction: \

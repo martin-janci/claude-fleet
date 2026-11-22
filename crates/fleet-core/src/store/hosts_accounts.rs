@@ -649,6 +649,55 @@ impl Store {
         Ok(())
     }
 
+    /// Delete the accounts whose uuid starts with one of `prefixes` (the
+    /// ones fleet made up for an API key or a setup token) that nothing
+    /// names any more: no host's login profile, no host's own login, no
+    /// session row (`sessions.account_uuid` references the account). A
+    /// session row keeps its account until reconcile drops the row; a later
+    /// sweep takes the account then. Returns the uuids deleted, ascending.
+    /// No row event: the frontend drops them on the reply.
+    pub fn delete_unused_synthetic_accounts(
+        &self,
+        prefixes: &[&str],
+    ) -> Result<Vec<String>, rusqlite::Error> {
+        let candidates: Vec<String> = self
+            .list_accounts()?
+            .into_iter()
+            .map(|a| a.uuid)
+            .filter(|u| prefixes.iter().any(|p| !p.is_empty() && u.starts_with(p)))
+            .collect();
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut used = std::collections::HashSet::new();
+        for h in self.list_hosts()? {
+            used.extend(h.account_uuid);
+            used.extend(
+                h.claude_profiles
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|p| p.account_uuid),
+            );
+        }
+        let mut gone = Vec::new();
+        for uuid in candidates {
+            if used.contains(&uuid) {
+                continue;
+            }
+            let in_session: bool = self
+                .conn
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM sessions WHERE account_uuid = ?1)")?
+                .query_row([&uuid], |r| r.get(0))?;
+            if in_session {
+                continue;
+            }
+            self.conn
+                .execute("DELETE FROM accounts WHERE uuid = ?1", [&uuid])?;
+            gone.push(uuid);
+        }
+        Ok(gone)
+    }
+
     pub(crate) fn get_account_by_uuid(
         &self,
         uuid: &str,

@@ -1566,3 +1566,292 @@ fn the_own_login_pane_script_parses() {
         );
     }
 }
+
+/// Review w11-7 (a): a store with the API-key profile `api` on mercury
+/// and the same key on venus (one account), plus a setup token on mercury.
+fn store_with_removable_logins() -> Mutex<Store> {
+    let s = Store::open_in_memory().unwrap();
+    for h in ["mercury", "venus"] {
+        s.upsert_host(h).unwrap();
+    }
+    let acct = |uuid: &str| crate::store::AccountRow {
+        uuid: uuid.into(),
+        email: None,
+        display_name: Some(uuid.into()),
+        organization_name: None,
+        organization_uuid: None,
+        seat_tier: None,
+        last_seen_at: Some(NOW),
+        nickname: None,
+        has_extra_usage: false,
+        forbidden_project_ids: Vec::new(),
+        forbidden_org_ids: Vec::new(),
+    };
+    let key = api_key_account_uuid(KEY);
+    for u in [
+        key.as_str(),
+        "setuptoken-00112233aabbccdd",
+        "6f1c-real-login",
+    ] {
+        s.upsert_account(&acct(u)).unwrap();
+    }
+    let p = |name: &str, uuid: &str| crate::store::HostProfileRow {
+        name: name.into(),
+        account_uuid: Some(uuid.into()),
+        email: None,
+        credential: uuid
+            .starts_with("setuptoken-")
+            .then(|| SETUP_TOKEN_CREDENTIAL.into()),
+    };
+    s.set_host_profiles(
+        "mercury",
+        &[
+            p("api", &key),
+            p("ci", "setuptoken-00112233aabbccdd"),
+            p("work", "6f1c-real-login"),
+        ],
+    )
+    .unwrap();
+    s.set_host_profiles("venus", &[p("api", &key)]).unwrap();
+    set_daily_limit(&s, "setuptoken-00112233aabbccdd", Some(5.0)).unwrap();
+    s.set_host_signed_out_logins(
+        "mercury",
+        &[crate::store::SignedOutLogin {
+            profile: Some("ci".into()),
+            since: NOW - 100,
+            checked_at: NOW - 10,
+        }],
+    )
+    .unwrap();
+    Mutex::new(s)
+}
+
+fn profiles_of(store: &Mutex<Store>, host: &str) -> Vec<String> {
+    store
+        .lock()
+        .unwrap()
+        .get_host_row(host)
+        .unwrap()
+        .unwrap()
+        .claude_profiles
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| p.name)
+        .collect()
+}
+
+#[tokio::test]
+async fn removing_a_login_deletes_its_files_and_sweeps_accounts_no_login_uses() {
+    let store = store_with_removable_logins();
+    let ssh = Arc::new(FakeSsh::new());
+    ssh.on(
+        Match::script_contains(".claude-profiles"),
+        Reply::ok("__fleet_ok__\n"),
+    );
+    let http = FakeTransport::new();
+    let mut a = args("remove");
+    a.profile = "ci".into();
+    let out = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .unwrap();
+    assert_eq!(out["profile"], "ci");
+    assert_eq!(
+        out["accounts_removed"],
+        serde_json::json!(["setuptoken-00112233aabbccdd"])
+    );
+    let script = ssh.calls().last().unwrap().script().unwrap();
+    assert!(script.contains("kill-session"), "{script}");
+    assert!(script.contains("fleet-login--ci"), "{script}");
+    for f in FLEET_CREDENTIAL_FILES {
+        assert!(script.contains(f), "{script}");
+    }
+    assert!(script.contains("rm -rf"), "{script}");
+    assert!(
+        script.contains("claude-profiles/\"'\\''ci'\\''")
+            || script.contains("claude-profiles/\"'ci'"),
+        "the name is quoted: {script}"
+    );
+    assert!(
+        !script.contains("/.claude\""),
+        "never the host's own: {script}"
+    );
+    assert_eq!(profiles_of(&store, "mercury"), vec!["api", "work"]);
+    {
+        let s = store.lock().unwrap();
+        assert!(s
+            .get_account_by_uuid("setuptoken-00112233aabbccdd")
+            .unwrap()
+            .is_none());
+        assert_eq!(daily_limit_usd(&s, "setuptoken-00112233aabbccdd"), None);
+        let host = s.get_host_row("mercury").unwrap().unwrap();
+        assert!(host.signed_out_logins.is_empty(), "its note goes too");
+    }
+
+    // The same key still signs a profile in on venus: its account stays.
+    a.profile = "api".into();
+    let out = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .unwrap();
+    assert!(out.get("accounts_removed").is_none(), "{out}");
+    let key = api_key_account_uuid(KEY);
+    assert!(store
+        .lock()
+        .unwrap()
+        .get_account_by_uuid(&key)
+        .unwrap()
+        .is_some());
+    // A subscription login's account is never swept, even with no login.
+    a.profile = "work".into();
+    run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .unwrap();
+    assert!(profiles_of(&store, "mercury").is_empty());
+    assert!(store
+        .lock()
+        .unwrap()
+        .get_account_by_uuid("6f1c-real-login")
+        .unwrap()
+        .is_some());
+    assert!(http.requests().is_empty(), "nothing goes to Anthropic");
+}
+
+#[tokio::test]
+async fn a_login_a_live_session_uses_is_not_removed() {
+    let store = store_with_removable_logins();
+    {
+        let s = store.lock().unwrap();
+        let id = s
+            .upsert_session("build", "mercury", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_session_profile(id, Some("ci")).unwrap();
+        // A ghost row under the profile does not count.
+        let gone = s
+            .upsert_session("old", "mercury", None, None, 1, 1, "ghost", None)
+            .unwrap();
+        s.set_session_profile(gone, Some("work")).unwrap();
+    }
+    let ssh = Arc::new(FakeSsh::new());
+    ssh.on(
+        Match::script_contains(".claude-profiles"),
+        Reply::ok("__fleet_ok__\n"),
+    );
+    let http = FakeTransport::new();
+    let mut a = args("remove");
+    a.profile = "ci".into();
+    let e = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID_STATE);
+    assert!(e.message.contains("build"), "{}", e.message);
+    assert_eq!(e.details.unwrap()["sessions"], serde_json::json!(["build"]));
+    assert!(ssh.calls().is_empty(), "refused before anything ran");
+    assert_eq!(profiles_of(&store, "mercury"), vec!["api", "ci", "work"]);
+
+    a.profile = "work".into();
+    run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .unwrap();
+    assert_eq!(profiles_of(&store, "mercury"), vec!["api", "ci"]);
+}
+
+#[tokio::test]
+async fn remove_takes_a_profile_name_never_a_path_or_the_hosts_own_login() {
+    let store = store_with_removable_logins();
+    let ssh = Arc::new(FakeSsh::new());
+    let http = FakeTransport::new();
+    for bad in ["", "..", "../.claude", "a/b", ".claude", "-rf"] {
+        let mut a = args("remove");
+        a.profile = bad.into();
+        let e = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID, "{bad:?}");
+    }
+    // `again` (the host's own login) is for the login pane only.
+    let mut a = args("remove");
+    a.profile = String::new();
+    a.again = true;
+    let e = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    assert!(ssh.calls().is_empty());
+}
+
+/// The scripts parse, and against a stand-in home they do what they say:
+/// `remove` takes the profile dir and leaves `~/.claude` and what the
+/// profile links into alone; Remove host's clean-up takes only fleet's
+/// files. Their own tmux server (`TMUX_TMPDIR`), so nothing real is touched.
+#[cfg(unix)]
+#[test]
+fn the_remove_scripts_touch_only_fleets_files() {
+    for script in [
+        remove_login_script("work"),
+        delete_fleet_credentials_script(),
+    ] {
+        for sh in ["bash", "sh"] {
+            let out = std::process::Command::new(sh)
+                .args(["-n", "-c", &script])
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{sh}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let own = h.join(".claude");
+    std::fs::create_dir_all(&own).unwrap();
+    std::fs::write(own.join(".credentials.json"), "{}").unwrap();
+    std::fs::write(own.join("settings.json"), "{}").unwrap();
+    let profiles = h.join(".claude-profiles");
+    for p in ["work", "keep"] {
+        let d = profiles.join(p);
+        std::fs::create_dir_all(&d).unwrap();
+        for f in FLEET_CREDENTIAL_FILES {
+            std::fs::write(d.join(f), "secret").unwrap();
+        }
+        std::fs::write(d.join(".claude.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(own.join("settings.json"), d.join("settings.json")).unwrap();
+    }
+    // A profile that is a link to the host's own login.
+    std::os::unix::fs::symlink(&own, profiles.join("linked")).unwrap();
+    let run_sh = |script: &str| {
+        std::process::Command::new("bash")
+            .args(["-c", script])
+            .env("HOME", h)
+            .env("TMUX_TMPDIR", h)
+            .output()
+            .unwrap()
+    };
+    let out = run_sh(&remove_login_script("work"));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!profiles.join("work").exists());
+    assert!(profiles.join("keep/.fleet-api-key").exists());
+    assert!(own.join(".credentials.json").exists() && own.join("settings.json").exists());
+
+    let out = run_sh(&remove_login_script("linked"));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(std::fs::symlink_metadata(profiles.join("linked")).is_err());
+    assert!(own.join(".credentials.json").exists(), "only the link went");
+
+    let out = run_sh(&delete_fleet_credentials_script());
+    assert!(String::from_utf8_lossy(&out.stdout).contains(OK_MARK));
+    let keep = profiles.join("keep");
+    for f in FLEET_CREDENTIAL_FILES {
+        assert!(!keep.join(f).exists(), "{f}");
+    }
+    assert!(keep.join(".claude.json").exists(), "the profile stays");
+    assert!(own.join(".credentials.json").exists());
+}

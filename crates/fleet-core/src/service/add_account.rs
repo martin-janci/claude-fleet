@@ -121,7 +121,7 @@ pub fn credential_of(a: &crate::service::hosts::OauthAccount) -> Option<String> 
 #[schemars(crate = "rmcp::schemars", rename = "AddAccountParams")]
 pub struct AddAccountArgs {
     /// start_login, login_status, login_key, login_code, end_login, api_key,
-    /// setup_token, daily_limit.
+    /// setup_token, daily_limit, remove.
     pub action: String,
     /// Host.
     pub host_alias: String,
@@ -368,11 +368,12 @@ pub async fn run(
             set_daily_limit(&*lock(store)?, &uuid, limit)?;
             serde_json::json!({ "account_uuid": uuid, "daily_limit_usd": limit })
         }
+        "remove" => to_value(remove_login(args, store, tmux).await?),
         other => {
             return Err(IpcError::new(
                 codes::E_INVALID,
                 format!(
-                    "unknown action {:?}: start_login, login_status, login_key, login_code, end_login, api_key, setup_token or daily_limit",
+                    "unknown action {:?}: start_login, login_status, login_key, login_code, end_login, api_key, setup_token, daily_limit or remove",
                     other.escape_debug().to_string()
                 ),
             ))
@@ -654,6 +655,167 @@ async fn end_login(args: &AddAccountArgs, tmux: &dyn TmuxExec) -> Result<(), Ipc
     };
     run_tmux(tmux, &script, "close the login pane").await?;
     Ok(())
+}
+
+/// What `remove` did.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LoginRemoved {
+    pub host_alias: String,
+    pub profile: String,
+    /// The accounts fleet made up for a key or a token (`apikey-`,
+    /// `setuptoken-`) that no login uses any more, now deleted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts_removed: Vec<String>,
+}
+
+/// The files fleet itself writes into a profile directory: the secrets and
+/// the account they are listed as.
+pub const FLEET_CREDENTIAL_FILES: [&str; 3] = [SETUP_TOKEN_FILE, API_KEY_FILE, API_ACCOUNT_FILE];
+
+/// PURE: the script removing the login profile `profile` (a validated name:
+/// letters, digits, `_`, `-`, so never `/` or `..`) from a host. It closes
+/// the profile's login pane, deletes fleet's token and key files, then the
+/// profile directory `~/.claude-profiles/<name>`. A symlink there goes as a
+/// link only (`rm` of the link, never what it points at), so neither the
+/// host's own `~/.claude` nor anything a profile links into is touched;
+/// `rm -rf` of a directory removes the links inside it, not their targets.
+fn remove_login_script(profile: &str) -> String {
+    let exact = quote(&crate::tmux::exact_session(&login_session_name(profile)));
+    let files = FLEET_CREDENTIAL_FILES
+        .iter()
+        .map(|f| format!("\"$d/{f}\""))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "tmux kill-session -t {exact} 2>/dev/null; \
+         d=\"$HOME/.claude-profiles/\"{p}; \
+         if [ -L \"$d\" ]; then rm -f -- \"$d\" || exit 1; \
+         elif [ -d \"$d\" ]; then rm -f -- {files} && rm -rf -- \"$d\" || exit 1; fi; \
+         [ -e \"$d\" ] || [ -L \"$d\" ] && exit 1; echo {OK_MARK}",
+        p = quote(profile),
+    )
+}
+
+/// `remove`: take a login profile off a host. Refused while a live session
+/// runs under it (`E_INVALID_STATE`, naming them): they would lose their
+/// login mid-turn. Then the host side ([`remove_login_script`]), then the
+/// store: the host's profile list, the profile's signed-out note and its
+/// fingerprints, and the made-up accounts no login uses any more.
+async fn remove_login(
+    args: &AddAccountArgs,
+    store: &Mutex<Store>,
+    tmux: &dyn TmuxExec,
+) -> Result<LoginRemoved, IpcError> {
+    let live: Vec<String> = lock(store)?
+        .list_sessions_for_host(&args.host_alias)?
+        .into_iter()
+        .filter(|r| {
+            r.claude_profile.as_deref() == Some(args.profile.as_str())
+                && r.status != "ghost"
+                && r.lost_at.is_none()
+        })
+        .map(|r| r.friendly_name.unwrap_or(r.tmux_name))
+        .collect();
+    if !live.is_empty() {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!(
+                "profile {} on {} is in use by {}: end {} first",
+                args.profile,
+                args.host_alias,
+                live.join(", "),
+                if live.len() == 1 { "it" } else { "them" }
+            ),
+        )
+        .with_details(serde_json::json!({ "sessions": live })));
+    }
+    run_tmux(
+        tmux,
+        &remove_login_script(&args.profile),
+        "remove the login profile",
+    )
+    .await?;
+    let s = lock(store)?;
+    if let Some(host) = s.get_host_row(&args.host_alias)? {
+        let profiles = host.claude_profiles.clone().unwrap_or_default();
+        if profiles.iter().any(|p| p.name == args.profile) {
+            let kept: Vec<_> = profiles
+                .into_iter()
+                .filter(|p| p.name != args.profile)
+                .collect();
+            s.set_host_profiles(&args.host_alias, &kept)?;
+        }
+        let notes = host.signed_out_logins.clone();
+        if notes
+            .iter()
+            .any(|n| n.profile.as_deref() == Some(args.profile.as_str()))
+        {
+            let kept: Vec<_> = notes
+                .into_iter()
+                .filter(|n| n.profile.as_deref() != Some(args.profile.as_str()))
+                .collect();
+            s.set_host_signed_out_logins(&args.host_alias, &kept)?;
+        }
+    }
+    s.forget_login_fingerprints(&args.host_alias, Some(&args.profile))?;
+    let accounts_removed = sweep_unused_accounts(&s)?;
+    Ok(LoginRemoved {
+        host_alias: args.host_alias.clone(),
+        profile: args.profile.clone(),
+        accounts_removed,
+    })
+}
+
+/// Delete the accounts fleet made up for an API key or a setup token that
+/// no login lists any more (`Store::delete_unused_synthetic_accounts`), and
+/// their daily limits. Returns their uuids.
+pub fn sweep_unused_accounts(s: &Store) -> Result<Vec<String>, IpcError> {
+    let gone =
+        s.delete_unused_synthetic_accounts(&[API_KEY_ACCOUNT_PREFIX, SETUP_TOKEN_ACCOUNT_PREFIX])?;
+    for uuid in &gone {
+        if daily_limits(s).contains_key(uuid) {
+            set_daily_limit(s, uuid, None)?;
+        }
+    }
+    Ok(gone)
+}
+
+/// PURE: the script deleting fleet's token and key files from every login
+/// profile on a host (Remove host's "also delete fleet's tokens and keys
+/// there"), and closing fleet's login panes. A symlinked profile is left
+/// alone; the profile directories and the host's own `~/.claude` stay.
+pub fn delete_fleet_credentials_script() -> String {
+    let files = FLEET_CREDENTIAL_FILES
+        .iter()
+        .map(|f| format!("\"$d/{f}\""))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "tmux ls -F '#{{session_name}}' 2>/dev/null | grep '^{prefix}' | while IFS= read -r n; do \
+           tmux kill-session -t \"=$n\" 2>/dev/null; done; \
+         for d in \"$HOME\"/.claude-profiles/*; do \
+           [ -d \"$d\" ] && [ ! -L \"$d\" ] || continue; rm -f -- {files} || exit 1; \
+         done; echo {OK_MARK}",
+        prefix = crate::tmux::LOGIN_SESSION_PREFIX,
+    )
+}
+
+/// Run [`delete_fleet_credentials_script`] on the host `tmux` reaches.
+pub async fn delete_fleet_credentials(tmux: &dyn TmuxExec) -> Result<(), IpcError> {
+    let out = run_tmux(
+        tmux,
+        &delete_fleet_credentials_script(),
+        "delete fleet's tokens and keys",
+    )
+    .await?;
+    if out.contains(OK_MARK) {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            codes::E_HOST_WRITE,
+            "could not delete fleet's tokens and keys there",
+        ))
+    }
 }
 
 async fn login_status(
