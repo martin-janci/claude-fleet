@@ -17,6 +17,7 @@
 
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
+use crate::service::move_session::carry::OUT_MARKER;
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::{SessionRow, Store};
@@ -357,6 +358,10 @@ pub async fn safe_kill_session(
 /// fails (a corrupt index, a git too old for an option) exits non-zero
 /// rather than printing an empty dirty list: empty read as "clean", and a
 /// clean-and-pushed tree is offered the remove-without-asking shortcut.
+///
+/// The sections follow an [`OUT_MARKER`] line: the script runs under
+/// `bash -lc`, and whatever the login profile prints lands ahead of it.
+/// Taken whole, a banner line parsed as a dirty file (review w15-2).
 fn inspect_script(wt: &str) -> String {
     let wt_q = quote(wt);
     // Single bash invocation prints three NUL-terminated sections:
@@ -384,8 +389,43 @@ if [ -n "$upstream" ]; then
 else
   ahead=-1
 fi
-printf '%s\x1e%s\x1e%s\x1e%s' "$porcelain" "$branch" "$upstream" "$ahead"
-"#
+printf '\n%s\n%s\x1e%s\x1e%s\x1e%s' {marker} "$porcelain" "$branch" "$upstream" "$ahead"
+"#,
+        marker = quote(OUT_MARKER),
+    )
+}
+
+/// The `git status --porcelain` for the post-READY check, behind an
+/// [`OUT_MARKER`] line like [`inspect_script`]'s, so a login banner is not
+/// counted as an uncommitted entry (review w15-2). The exit status is git's.
+fn dirty_check_script(wt: &str) -> String {
+    format!(
+        "printf '\\n%s\\n' {} && git -C {} status --porcelain",
+        quote(OUT_MARKER),
+        quote(wt)
+    )
+}
+
+/// What a script printed after its [`OUT_MARKER`] line; a host that
+/// answered without one is taken whole.
+fn after_marker(stdout: &[u8]) -> std::borrow::Cow<'_, str> {
+    String::from_utf8_lossy(crate::service::move_session::carry::payload(stdout).unwrap_or(stdout))
+}
+
+/// The four sections of [`inspect_script`]'s output: porcelain, branch,
+/// upstream, ahead count.
+fn parse_inspect(stdout: &[u8]) -> (Vec<DirtyFile>, Option<String>, Option<String>, i32) {
+    let body = after_marker(stdout);
+    let mut parts = body.split('\x1e');
+    let porcelain = parts.next().unwrap_or("");
+    let branch_raw = parts.next().unwrap_or("").trim();
+    let upstream_raw = parts.next().unwrap_or("").trim();
+    let ahead_raw = parts.next().unwrap_or("-1").trim();
+    (
+        parse_porcelain(porcelain),
+        (!branch_raw.is_empty()).then(|| branch_raw.to_string()),
+        (!upstream_raw.is_empty()).then(|| upstream_raw.to_string()),
+        ahead_raw.parse::<i32>().unwrap_or(-1),
     )
 }
 
@@ -458,17 +498,7 @@ pub async fn inspect_safe_kill(
         });
     }
 
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut parts = stdout.split('\x1e');
-    let porcelain = parts.next().unwrap_or("");
-    let branch_raw = parts.next().unwrap_or("").trim();
-    let upstream_raw = parts.next().unwrap_or("").trim();
-    let ahead_raw = parts.next().unwrap_or("-1").trim();
-
-    let dirty_files = parse_porcelain(porcelain);
-    let branch = (!branch_raw.is_empty()).then(|| branch_raw.to_string());
-    let upstream = (!upstream_raw.is_empty()).then(|| upstream_raw.to_string());
-    let unpushed_commits = ahead_raw.parse::<i32>().unwrap_or(-1);
+    let (dirty_files, branch, upstream, unpushed_commits) = parse_inspect(&out.stdout);
 
     let safe_to_remove = dirty_files.is_empty() && upstream.is_some() && unpushed_commits == 0;
 
@@ -917,8 +947,7 @@ async fn finalize_safe_kill(
     // `git status --porcelain` on a non-existent path errors out, which we
     // treat as failure too.
     if let Some(ref wt) = worktree_path {
-        let dirty_cmd = format!("git -C {} status --porcelain", quote(wt));
-        let out = run_shell(ssh, host_alias, &dirty_cmd).await?;
+        let out = run_shell(ssh, host_alias, &dirty_check_script(wt)).await?;
         if !out.status.success() {
             let detail = format!(
                 "dirty check failed: {}",
@@ -927,7 +956,7 @@ async fn finalize_safe_kill(
             mark_failed(store, session_id, &detail);
             return Ok(());
         }
-        let porcelain = String::from_utf8_lossy(&out.stdout);
+        let porcelain = after_marker(&out.stdout);
         if !porcelain.trim().is_empty() {
             let detail = format!(
                 "worktree still dirty after READY: {} uncommitted entr{}",
@@ -1119,12 +1148,61 @@ mod tests {
         };
         let ok = run();
         assert!(ok.status.success(), "{ok:?}");
-        assert!(String::from_utf8_lossy(&ok.stdout).starts_with("A  f"));
+        assert!(after_marker(&ok.stdout).starts_with("A  f"));
 
         std::fs::write(wt.join(".git").join("index"), "garbage").unwrap();
         let broken = run();
         assert_eq!(broken.status.code(), Some(3), "{broken:?}");
         assert!(String::from_utf8_lossy(&broken.stderr).contains("git status failed"));
+    }
+
+    /// Review w15-2: a login profile that prints a banner ahead of the
+    /// scripts is not read as a dirty file, neither by the inspection nor
+    /// by the post-READY check.
+    #[cfg(unix)]
+    #[test]
+    fn a_login_banner_is_not_a_dirty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&wt)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init", "-q", "-b", "main"]).status.success());
+        let with_banner = |script: String| {
+            std::process::Command::new("bash")
+                .args([
+                    "-c",
+                    &format!("echo 'Welcome to box'\nprintf 'no newline'\n{script}"),
+                ])
+                .output()
+                .unwrap()
+        };
+        let out = with_banner(inspect_script(&wt.to_string_lossy()));
+        assert!(out.status.success(), "{out:?}");
+        let (dirty, _branch, upstream, ahead) = parse_inspect(&out.stdout);
+        assert!(dirty.is_empty(), "{dirty:?}");
+        assert_eq!((upstream, ahead), (None, -1));
+
+        let out = with_banner(dirty_check_script(&wt.to_string_lossy()));
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(after_marker(&out.stdout).trim(), "");
+
+        std::fs::write(wt.join("f"), "x").unwrap();
+        let out = with_banner(inspect_script(&wt.to_string_lossy()));
+        let (dirty, ..) = parse_inspect(&out.stdout);
+        assert_eq!(dirty.len(), 1, "{dirty:?}");
+        assert_eq!(
+            (dirty[0].status.as_str(), dirty[0].path.as_str()),
+            ("??", "f")
+        );
+        let out = with_banner(dirty_check_script(&wt.to_string_lossy()));
+        assert_eq!(after_marker(&out.stdout).trim(), "?? f");
     }
 
     #[test]

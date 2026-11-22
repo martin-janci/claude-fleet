@@ -1305,6 +1305,20 @@ pub async fn run_shell(
     .await
 }
 
+/// The LAST non-empty line of a script's stdout, trimmed. [`run_shell`]
+/// runs `bash -lc`, so whatever the login profile prints (a banner, an
+/// MOTD) lands ahead of the script's own output; a script that answers with
+/// one line (a path, a word) is read with this, never with the whole
+/// stdout (review w15-3). Empty when it printed nothing.
+pub fn last_line(stdout: &[u8]) -> String {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// [`run_shell`] with an explicit wall clock, for scripts that legitimately
 /// outlive a reasonable connect budget (see [`SshExec::run_bounded`]).
 pub async fn run_shell_bounded(
@@ -2062,6 +2076,13 @@ pub fn control_dir_is_private(dir: &std::path::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn last_line_skips_a_login_banner() {
+        assert_eq!(last_line(b"Welcome to box\n\n/home/u/wt\n\n"), "/home/u/wt");
+        assert_eq!(last_line(b"MERGED"), "MERGED");
+        assert_eq!(last_line(b"\n \n"), "");
+    }
 
     /// Review r18 M5: an upload lands whole or not at all. A read that fails
     /// part way (a directory as the "file") leaves the old target in place

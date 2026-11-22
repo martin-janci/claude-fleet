@@ -57,6 +57,15 @@ pub fn with_owed(due: Vec<String>, owed: &BTreeSet<String>, hosts: &[HostDue]) -
     out
 }
 
+/// Drop from `owed` every host that is no longer in the fleet or is hidden:
+/// only a successful scan removed one, and [`with_owed`] never scans those,
+/// so a deleted host stayed owed until the hub restarted — keeping the loop
+/// health red and the early-retry backoff at its cap (review w07-1). An
+/// unreachable host stays owed; it is tried once it is back.
+pub fn prune_owed(owed: &mut BTreeSet<String>, hosts: &[HostDue]) {
+    owed.retain(|a| hosts.iter().any(|h| h.alias == *a && !h.hidden));
+}
+
 /// Hosts something outside the tick has asked to be rescanned on its next
 /// pass (a harness choice changed, `harness_set::set_host_harnesses`). The
 /// tick moves them into its own `owed` set, so a failed rescan is retried
@@ -144,8 +153,9 @@ pub fn spawn_catalog_scan_tick(
                 _ = wait(early) => {}
             }
             early = None;
+            let before = owed.clone();
             if pass(&store, &ssh, period, &mut seen, &mut owed).await == Pass::Ran {
-                (early, backoff) = early_retry(!owed.is_empty(), backoff, period);
+                (early, backoff) = after_pass(&before, &owed, backoff, period);
             }
         }
     }))
@@ -171,6 +181,24 @@ fn early_retry(owed: bool, backoff: Duration, period: Duration) -> (Option<Durat
         return (None, backoff);
     }
     (Some(backoff), backoff.saturating_mul(2))
+}
+
+/// [`early_retry`] after a pass that left `owed` (it began with `before`).
+/// A host newly owed starts its own episode at [`OWED_RETRY`]: the backoff
+/// another host's long failure ran up does not deny it the early retry
+/// (review w07-1).
+fn after_pass(
+    before: &BTreeSet<String>,
+    owed: &BTreeSet<String>,
+    backoff: Duration,
+    period: Duration,
+) -> (Option<Duration>, Duration) {
+    let backoff = if owed.iter().any(|a| !before.contains(a)) {
+        OWED_RETRY
+    } else {
+        backoff
+    };
+    early_retry(!owed.is_empty(), backoff, period)
 }
 
 /// Sleep `d`, or forever without one.
@@ -249,6 +277,7 @@ async fn pass(
         changed,
     );
     owed.extend(take_requested());
+    prune_owed(owed, &hosts);
     let due = with_owed(due, owed, &hosts);
     for alias in due {
         match super::inventory::scan_hosts(store, ssh, Some(&alias)).await {
@@ -443,6 +472,46 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(with_owed(Vec::new(), &owed, &hosts), Vec::<String>::new());
+    }
+
+    /// Review w07-1: a deleted or hidden host leaves `owed`; an unreachable
+    /// one stays, to be tried once it is back.
+    #[test]
+    fn a_removed_or_hidden_owed_host_is_no_longer_owed() {
+        let mut hidden = h("hidden", true, None);
+        hidden.hidden = true;
+        let hosts = vec![hidden, h("down", false, None), h("ok", true, None)];
+        let mut owed: BTreeSet<String> = ["hidden", "down", "ok", "deleted"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        prune_owed(&mut owed, &hosts);
+        assert_eq!(
+            owed.into_iter().collect::<Vec<_>>(),
+            vec!["down".to_string(), "ok".to_string()]
+        );
+    }
+
+    /// Review w07-1: the backoff is per failure episode. One host owed for
+    /// days runs it up to the cap; a second host failing then still gets
+    /// the early retry, while the same set owed again does not.
+    #[test]
+    fn a_newly_owed_host_gets_the_early_retry_whatever_the_backoff() {
+        let period = Duration::from_secs(3600);
+        let set = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+        let capped = Duration::from_secs(64 * 60);
+        assert_eq!(
+            after_pass(&set(&["old"]), &set(&["old"]), capped, period),
+            (None, capped)
+        );
+        assert_eq!(
+            after_pass(&set(&["old"]), &set(&["old", "beta"]), capped, period),
+            (Some(OWED_RETRY), OWED_RETRY * 2)
+        );
+        assert_eq!(
+            after_pass(&set(&["old"]), &set(&[]), capped, period),
+            (None, OWED_RETRY)
+        );
     }
 
     #[test]

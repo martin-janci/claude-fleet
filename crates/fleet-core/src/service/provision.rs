@@ -1686,9 +1686,19 @@ fn read_payload(stdout: &[u8]) -> &[u8] {
     crate::service::move_session::carry::payload(stdout).unwrap_or(stdout)
 }
 
-/// Write a file to a host (creating parent dirs). `local` → fs; remote → a
-/// shell that `mkdir -p`s the parent and `printf '%s'`s the (shell-quoted)
-/// content to `path`. `dir` is the parent dir; `path` the file.
+/// Write a file to a host (creating parent dirs), whole or not at all.
+/// `dir` is the parent dir; `path` the file.
+///
+/// Review w15-5: the file was rewritten in place with the content in argv
+/// (`printf '%s' <content> > path`). A write cut off part way (a full disk,
+/// the wall clock killing ssh) had already truncated it, and the next
+/// provision merged its block into the empty file, so the user's own
+/// `~/.claude/CLAUDE.md` or `~/.tmux.conf` text was gone; and a file over
+/// ~100 KB failed every provision with E2BIG. Now the content goes to
+/// `<path>.fleet-tmp` (over stdin remotely, so never in an argv) and is
+/// renamed onto the target, which keeps its mode; a symlinked target under
+/// `$HOME` (a dotfiles repo) is written at the link's target, so the link
+/// survives ([`remote_write_script`], [`replace_local_file`]).
 pub async fn write_host_file(
     ssh: &dyn SshExec,
     host: &str,
@@ -1702,12 +1712,65 @@ pub async fn write_host_file(
         std::fs::create_dir_all(&edir)
             .map_err(|e| IpcError::new(codes::E_PROVISION, format!("mkdir {edir}: {e}")))?;
         let epath = expand_home_local(path)?;
-        std::fs::write(&epath, content)
-            .map_err(|e| IpcError::new(codes::E_PROVISION, format!("write {epath}: {e}")))?;
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        return replace_local_file(std::path::Path::new(&epath), content, home.as_deref())
+            .map_err(|e| IpcError::new(codes::E_PROVISION, format!("write {epath}: {e}")));
+    }
+    let script = quote(&remote_write_script(dir, path));
+    let out = ssh
+        .run_with_stdin(
+            host,
+            &["bash", "-lc", &script],
+            content.as_bytes().to_vec(),
+            PROVISION_TIMEOUT,
+            crate::ssh::SshClient::default_wall_clock(PROVISION_TIMEOUT),
+            WRITE_OUTPUT_CAP,
+        )
+        .await?;
+    if !out.status.success() {
+        return Err(IpcError::new(
+            codes::E_PROVISION,
+            format!(
+                "write {path} on {host}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// What [`write_host_file`] keeps of its script's output (only stderr is
+/// read, for the error).
+const WRITE_OUTPUT_CAP: usize = 64 * 1024;
+
+/// The local half of [`write_host_file`]: `content` to `<target>.fleet-tmp`,
+/// given the target's mode when it exists, then renamed onto `target` —
+/// [`private_write_target`] of `path`, so a symlink into `home` survives.
+/// A rename that fails (a bind-mounted target) falls back to writing in
+/// place; the tmp file is removed whenever the write does not land.
+fn replace_local_file(
+    path: &std::path::Path,
+    content: &str,
+    home: Option<&std::path::Path>,
+) -> std::io::Result<()> {
+    let target = private_write_target(path, home);
+    let mut tmp = target.as_os_str().to_owned();
+    tmp.push(".fleet-tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    let staged = std::fs::write(&tmp, content).and_then(|()| match std::fs::metadata(&target) {
+        Ok(m) => std::fs::set_permissions(&tmp, m.permissions()),
+        Err(_) => Ok(()),
+    });
+    if let Err(e) = staged {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if std::fs::rename(&tmp, &target).is_ok() {
         return Ok(());
     }
-    let script = quote(&remote_write_script(dir, path, content));
-    run_remote_write(ssh, host, path, &script).await
+    let placed = std::fs::write(&target, content);
+    let _ = std::fs::remove_file(&tmp);
+    placed
 }
 
 /// Like [`write_host_file`] for a file that carries a secret (the bearer
@@ -2097,13 +2160,33 @@ pub(crate) fn remote_read_script(path: &str) -> String {
     )
 }
 
-/// Remote `bash -lc` script body that creates `dir` then writes `content` to `path`.
-fn remote_write_script(dir: &str, path: &str, content: &str) -> String {
+/// Remote `bash -lc` script body for [`write_host_file`]: creates `dir`,
+/// then writes its stdin to `<path>.fleet-tmp` and renames that onto `path`
+/// — never truncating `path` first. The tmp file takes `path`'s mode when
+/// `path` exists (GNU `stat -c`, else BSD `stat -f`, following a link). A symlinked `path`
+/// whose target is a regular file under `$HOME` is written at that target,
+/// as [`remote_rename_script`] does. A rename that fails (a bind-mounted
+/// target, EBUSY) falls back to writing in place. Any failure removes the
+/// tmp file and exits 1.
+fn remote_write_script(dir: &str, path: &str) -> String {
     format!(
-        "mkdir -p {} && printf '%s' {} > {}",
-        remote_path(dir),
-        quote(content),
-        remote_path(path)
+        "d={d}; p={p}; mkdir -p \"$d\" || exit 1; \
+         if [ -L \"$p\" ]; then \
+         r=$(readlink -f -- \"$p\" 2>/dev/null) || r=; \
+         h=$(cd \"$HOME\" 2>/dev/null && pwd -P) || h=; \
+         case \"$r\" in \"$HOME\"/*|\"${{h:-$HOME}}\"/*) [ -f \"$r\" ] && p=$r;; esac; \
+         fi; \
+         t=\"$p.fleet-tmp\"; \
+         cat > \"$t\" || {{ rm -f \"$t\"; exit 1; }}; \
+         if [ -e \"$p\" ]; then \
+         m=$(stat -L -c %a -- \"$p\" 2>/dev/null || stat -L -f %Lp -- \"$p\" 2>/dev/null) \
+         && chmod \"$m\" \"$t\" 2>/dev/null; \
+         fi; \
+         mv -f \"$t\" \"$p\" 2>/dev/null \
+         || {{ cat \"$t\" > \"$p\" && rm -f \"$t\"; }} \
+         || {{ rm -f \"$t\"; exit 1; }}",
+        d = remote_path(dir),
+        p = remote_path(path),
     )
 }
 
@@ -2530,17 +2613,110 @@ mod tests {
 
     #[test]
     fn remote_write_script_mkdirs_and_writes_under_home() {
-        let s = remote_write_script("~/.claude", "~/.claude.json", "{\"a\":1}");
-        assert_eq!(
-            s,
-            "mkdir -p \"$HOME\"/'.claude' && printf '%s' '{\"a\":1}' > \"$HOME\"/'.claude.json'"
+        let s = remote_write_script("~/.claude", "~/.claude.json");
+        assert!(
+            s.starts_with("d=\"$HOME\"/'.claude'; p=\"$HOME\"/'.claude.json'; mkdir -p \"$d\""),
+            "{s}"
         );
+        // The content is not in the script: it arrives on stdin.
+        assert!(s.contains("cat > \"$t\""), "{s}");
         // The whole script survives the SSH boundary as one shell word once
         // wrapped — outer quote leaves the inner `"$HOME"` intact for the
         // remote bash to expand.
         let quoted = crate::shell::quote(&s);
         assert!(quoted.starts_with('\'') && quoted.ends_with('\''));
         assert!(quoted.contains("\"$HOME\""));
+    }
+
+    /// Review w15-5: the remote write lands whole through a tmp file and a
+    /// rename, keeps the target's mode, follows a symlink into `$HOME`,
+    /// carries content too large for one argv word, and a write that fails
+    /// part way leaves the old file as it was.
+    #[cfg(unix)]
+    #[test]
+    fn the_remote_write_replaces_the_file_whole_or_not_at_all() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let run = |dir: &str, path: &str, stdin: &[u8], fail_cat: bool| {
+            use std::io::Write;
+            let mut script = remote_write_script(dir, path);
+            if fail_cat {
+                // A `cat` that writes part of the content, then fails.
+                script = format!("cat() {{ command cat | head -c 3; return 1; }}; {script}");
+            }
+            let mut child = std::process::Command::new("bash")
+                .args(["-c", &script])
+                .env("HOME", home.path())
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(stdin).unwrap();
+            child.wait_with_output().unwrap()
+        };
+        let md = home.path().join(".claude/CLAUDE.md");
+        // A new file, in a directory that does not exist yet.
+        let out = run("~/.claude", "~/.claude/CLAUDE.md", b"mine\n", false);
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(std::fs::read_to_string(&md).unwrap(), "mine\n");
+        // A rewrite keeps the file's mode, and leaves no tmp file.
+        std::fs::set_permissions(&md, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let big = "x'".repeat(200_000);
+        let out = run("~/.claude", "~/.claude/CLAUDE.md", big.as_bytes(), false);
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(std::fs::read_to_string(&md).unwrap(), big);
+        assert_eq!(
+            std::fs::metadata(&md).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert!(!home.path().join(".claude/CLAUDE.md.fleet-tmp").exists());
+        // A write cut off part way leaves the old content, and no tmp file.
+        std::fs::write(&md, "mine\n").unwrap();
+        let out = run("~/.claude", "~/.claude/CLAUDE.md", b"new content", true);
+        assert!(!out.status.success(), "{out:?}");
+        assert_eq!(std::fs::read_to_string(&md).unwrap(), "mine\n");
+        assert!(!home.path().join(".claude/CLAUDE.md.fleet-tmp").exists());
+        // A symlink into $HOME (a dotfiles repo) is written at its target.
+        let real = home.path().join("dotfiles/tmux.conf");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "old\n").unwrap();
+        std::os::unix::fs::symlink(&real, home.path().join(".tmux.conf")).unwrap();
+        let out = run("~", "~/.tmux.conf", b"new\n", false);
+        assert!(out.status.success(), "{out:?}");
+        assert!(std::fs::symlink_metadata(home.path().join(".tmux.conf"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "new\n");
+    }
+
+    /// Review w15-5, the local half: a rename keeps the target's mode and a
+    /// symlink into home, and leaves no tmp file.
+    #[cfg(unix)]
+    #[test]
+    fn the_local_write_replaces_the_file_and_keeps_its_mode_and_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let f = home.path().join("CLAUDE.md");
+        replace_local_file(&f, "a", Some(home.path())).unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "a");
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        replace_local_file(&f, "b", Some(home.path())).unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "b");
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(!home.path().join("CLAUDE.md.fleet-tmp").exists());
+        let link = home.path().join(".tmux.conf");
+        std::os::unix::fs::symlink(&f, &link).unwrap();
+        replace_local_file(&link, "c", Some(home.path())).unwrap();
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "c");
     }
 
     #[test]
@@ -3125,13 +3301,23 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     enum Step {
         Script(String),
+        /// A script with its stdin: [`write_host_file`]'s content.
+        Write(String, String),
         Cmd(String),
         Upload(String, String),
     }
 
+    /// The step [`write_host_file`] issues to write `body` at `path`.
+    fn write_step(dir: &str, path: &str, body: &str) -> Step {
+        Step::Write(remote_write_script(dir, path), body.to_string())
+    }
+
     fn step_of(call: &Call) -> Step {
         if let Some(s) = call.script() {
-            return Step::Script(s);
+            return match call.stdin_str() {
+                Some(stdin) => Step::Write(s, stdin),
+                None => Step::Script(s),
+            };
         }
         match (call.args.as_slice(), call.stdin_str()) {
             ([cmd], Some(stdin)) if cmd.starts_with("cat > ") => {
@@ -3208,42 +3394,38 @@ mod tests {
             // 0. the git-tree preflight (task 6): nothing on a fresh host
             Script(git_tree_probe_script()),
             // 1. skills, each followed by its ownership marker
-            Script(remote_write_script(SKILL_DIR, SKILL_PATH, FLEET_SKILL)),
-            Script(remote_write_script(
+            write_step(SKILL_DIR, SKILL_PATH, FLEET_SKILL),
+            write_step(
                 SKILL_DIR,
                 &format!("{SKILL_DIR}/{MANAGED_MARKER}"),
                 &marker_content(),
-            )),
-            Script(remote_write_script(
+            ),
+            write_step(
                 FRIENDLY_NAME_SKILL_DIR,
                 FRIENDLY_NAME_SKILL_PATH,
                 FRIENDLY_NAME_SKILL,
-            )),
-            Script(remote_write_script(
+            ),
+            write_step(
                 FRIENDLY_NAME_SKILL_DIR,
                 &format!("{FRIENDLY_NAME_SKILL_DIR}/{MANAGED_MARKER}"),
                 &marker_content(),
-            )),
+            ),
         ];
         // 1a. the prompt-suggestion plugin, then its marker
         for (file, body) in SUGGEST_PLUGIN_FILES {
             let path = format!("{SUGGEST_PLUGIN_DIR}/{file}");
             let (dir, _) = path.rsplit_once('/').unwrap();
-            steps.push(Script(remote_write_script(dir, &path, body)));
+            steps.push(write_step(dir, &path, body));
         }
-        steps.push(Script(remote_write_script(
+        steps.push(write_step(
             SUGGEST_PLUGIN_DIR,
             &format!("{SUGGEST_PLUGIN_DIR}/{MANAGED_MARKER}"),
             &marker_content(),
-        )));
+        ));
         steps.extend([
             // 1b. managed CLAUDE.md block
             Script(remote_read_script(CLAUDE_MD_PATH)),
-            Script(remote_write_script(
-                CLAUDE_DIR,
-                CLAUDE_MD_PATH,
-                &expected_claude_md(),
-            )),
+            write_step(CLAUDE_DIR, CLAUDE_MD_PATH, &expected_claude_md()),
             // 2. MCP entry — no backup for an absent file; the token travels
             //    over stdin into a 0600 tmp file, never through argv, then
             //    an atomic rename lands it on the real path.
@@ -3259,7 +3441,7 @@ mod tests {
         steps.extend([
             // 3. tmux clipboard
             Script(remote_read_script(TMUX_CONF)),
-            Script(remote_write_script("~", TMUX_CONF, &expected_tmux_conf())),
+            write_step("~", TMUX_CONF, &expected_tmux_conf()),
             // 4. Stop / WorktreeCreate hooks ($HOME is cached now).
             Script(remote_read_script(SETTINGS_JSON)),
         ]);
@@ -3288,17 +3470,17 @@ mod tests {
     fn voice_steps() -> Vec<Step> {
         use Step::*;
         vec![
-            Script(remote_write_script(
+            write_step(
                 "~/.claude-fleet/voice/bin",
                 "~/.claude-fleet/voice/bin/arecord",
                 VOICE_ARECORD,
-            )),
+            ),
             Script("chmod 755 \"$HOME\"/'.claude-fleet/voice/bin/arecord'".into()),
-            Script(remote_write_script(
+            write_step(
                 "~/.claude-fleet/voice",
                 "~/.claude-fleet/voice/voice.env",
                 "FLEET_VOICE_URL='http://127.0.0.1:4180'\n",
-            )),
+            ),
         ]
     }
 
@@ -3576,13 +3758,13 @@ mod tests {
                 Some((d, _)) => format!("{AG_STAGE_DIR}/{d}"),
                 None => AG_STAGE_DIR.to_string(),
             };
-            steps.push(Step::Script(remote_write_script(&dir, &path, body)));
+            steps.push(write_step(&dir, &path, body));
         }
-        steps.push(Step::Script(remote_write_script(
+        steps.push(write_step(
             AG_STAGE_DIR,
             &format!("{AG_STAGE_DIR}/{MANAGED_MARKER}"),
             &marker_content(),
-        )));
+        ));
         steps.push(Step::Script(ag_install_script()));
         steps
     }
@@ -3874,11 +4056,7 @@ mod tests {
             None
         );
         let steps: Vec<Step> = fake.calls().iter().map(step_of).collect();
-        assert!(steps.contains(&Step::Script(remote_write_script(
-            SKILL_DIR,
-            SKILL_PATH,
-            FLEET_SKILL
-        ))));
+        assert!(steps.contains(&write_step(SKILL_DIR, SKILL_PATH, FLEET_SKILL)));
         assert!(steps.contains(&Step::Script(remote_read_script(SETTINGS_JSON))));
         for step in voice_steps() {
             assert!(
@@ -3914,11 +4092,7 @@ mod tests {
         for dir in [SKILL_DIR, FRIENDLY_NAME_SKILL_DIR, SUGGEST_PLUGIN_DIR] {
             let marker = format!("{dir}/{MANAGED_MARKER}");
             assert!(
-                steps.contains(&Step::Script(remote_write_script(
-                    dir,
-                    &marker,
-                    &marker_content()
-                ))),
+                steps.contains(&write_step(dir, &marker, &marker_content())),
                 "{marker} written"
             );
         }
@@ -4041,17 +4215,17 @@ mod tests {
         let base = HubBase::loopback(4180);
         let env = format!("FLEET_VOICE_URL={}\n", crate::shell::quote(&base.url));
         assert_eq!(env, "FLEET_VOICE_URL='http://127.0.0.1:4180'\n");
-        let bin_write = Step::Script(remote_write_script(
+        let bin_write = write_step(
             "~/.claude-fleet/voice/bin",
             "~/.claude-fleet/voice/bin/arecord",
             VOICE_ARECORD,
-        ));
+        );
         let chmod = Step::Script("chmod 755 \"$HOME\"/'.claude-fleet/voice/bin/arecord'".into());
-        let env_write = Step::Script(remote_write_script(
+        let env_write = write_step(
             "~/.claude-fleet/voice",
             "~/.claude-fleet/voice/voice.env",
             &env,
-        ));
+        );
         let pos = |want: &Step| {
             steps
                 .iter()
@@ -4257,11 +4431,10 @@ mod tests {
         let steps: Vec<Step> = calls.iter().map(step_of).collect();
 
         // Content-gated files are read but NOT rewritten.
-        let claude_md_write =
-            remote_write_script(CLAUDE_DIR, CLAUDE_MD_PATH, &expected_claude_md());
-        let tmux_write = remote_write_script("~", TMUX_CONF, &expected_tmux_conf());
-        assert!(!steps.contains(&Step::Script(claude_md_write)));
-        assert!(!steps.contains(&Step::Script(tmux_write)));
+        let claude_md_write = write_step(CLAUDE_DIR, CLAUDE_MD_PATH, &expected_claude_md());
+        let tmux_write = write_step("~", TMUX_CONF, &expected_tmux_conf());
+        assert!(!steps.contains(&claude_md_write));
+        assert!(!steps.contains(&tmux_write));
         assert!(steps.contains(&Step::Script(remote_read_script(CLAUDE_MD_PATH))));
         assert!(steps.contains(&Step::Script(remote_read_script(TMUX_CONF))));
 
@@ -4540,7 +4713,7 @@ mod tests {
     async fn a_failed_remote_write_is_e_provision_with_stderr() {
         let fake = fresh_host();
         fake.on(
-            Match::script_contains("mkdir -p \"$HOME\"/'.claude/skills/claude-fleet-control'"),
+            Match::script_contains("d=\"$HOME\"/'.claude/skills/claude-fleet-control'; "),
             Reply::fail(1, "mkdir: cannot create directory: Read-only file system"),
         );
         let err = provision_one(&fake, "h1", &base(), TOKEN)
