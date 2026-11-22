@@ -27,7 +27,6 @@ let pendingRepeats = 0;
  *  kill_session refused …" and "Recreate failed: … is forbidden for …" beside
  *  a real fault.) Keep it to codes that are a refusal whatever raised them. */
 const REFUSALS: ReadonlySet<string> = new Set([
-  'E_FORBIDDEN',
   'E_ACCOUNT_FORBIDDEN',
   'E_ACCOUNT_LIMIT',
   'E_CONFIRM_REQUIRED',
@@ -37,6 +36,19 @@ const REFUSALS: ReadonlySet<string> = new Set([
 /** Whether `code` is the backend refusing by rule rather than failing. */
 export function isRefusal(code: string | null | undefined): boolean {
   return code != null && REFUSALS.has(code);
+}
+
+/** Codes that are mostly a refusal but are also how some faults surface, so
+ *  they are reported at `warn`, not dropped (review w07-3): `E_FORBIDDEN` is
+ *  also a hub older than the app answering a routed tool it does not know,
+ *  an attached upload path the allow-list fails to match, and a proxy's 403
+ *  on one hub path. */
+const MOSTLY_REFUSALS: ReadonlySet<string> = new Set(['E_FORBIDDEN']);
+
+/** The report level for a toasted error: `warn` for a code that is mostly a
+ *  refusal, else `error`. */
+export function reportLevel(code: string | null | undefined): 'error' | 'warn' {
+  return code != null && MOSTLY_REFUSALS.has(code) ? 'warn' : 'error';
 }
 
 export function resetErrorReportingForTests(): void {
@@ -51,6 +63,7 @@ export function reportError(
   message: string,
   code: string | null = null,
   context: Record<string, unknown> = {},
+  level: 'error' | 'warn' = 'error',
 ): void {
   const now = Date.now();
   // Prune first: a stale entry must not keep deduping forever, and must not
@@ -81,7 +94,7 @@ export function reportError(
     pendingRepeats = 0;
   }
   void invokeCmd('report_client_error', {
-    args: { level: 'error', component, code, message: message.slice(0, 2048), context: ctx },
+    args: { level, component, code, message: message.slice(0, 2048), context: ctx },
   });
 }
 

@@ -31,6 +31,12 @@ describe('error copy', () => {
     expect(errorText({ code: 'E_AGENT_PROTOCOL', message: 'x' }, { read: true })).not.toContain('gone through');
   });
 
+  it('says a poisoned lock needs a restart, not the log text (review w19-1)', () => {
+    const e = { code: 'E_LOCK', message: 'store mutex poisoned' };
+    expect(errorText(e)).toBe('Orbit Fleet hit an internal error and must restart');
+    expect(errorDetail(e)).toBe('E_LOCK: store mutex poisoned');
+  });
+
   it("keeps a backend sentence as it is, minus a leading code", () => {
     expect(errorText({ code: 'E_INVALID', message: 'E_INVALID: the name is taken' })).toBe('the name is taken');
     expect(errorDetail({ code: 'E_INVALID', message: 'the name is taken' })).toBe('E_INVALID');

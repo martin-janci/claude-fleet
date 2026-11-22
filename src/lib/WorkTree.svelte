@@ -29,7 +29,8 @@
   import { get } from 'svelte/store';
   import { sessions } from './sessions';
   import { selectedSession, selectSessionExplicitly } from './selection';
-  import { openSettingsAt, workBoardOpen, workViewChordLabel } from './app_views';
+  import { openSettingsAt, settingsOpen, workBoardOpen, workViewChordLabel } from './app_views';
+  import { destination, isFleetPage } from './destination';
   import { detectMac } from './terminal_keys';
   import { isNewTaskChord, ownNewTaskChord } from './new_task';
   import { shortcutLabel } from './shortcuts';
@@ -665,9 +666,16 @@
   // ⌘N makes a task while Work is open (G2.1; the registry's `work`
   // scope): the quick switcher stands aside while this view owns it.
   let newTaskOpen = $state(false);
-  const releaseNewTask = ownNewTaskChord();
+  // Review w17-2: the tree stays mounted (only `visibility:hidden`) under a
+  // fleet page or Settings, which have no Work view: the chord is New
+  // session's there.
+  const coveredByPage = $derived(isFleetPage($destination) || $settingsOpen);
+  $effect(() => {
+    if (coveredByPage) return;
+    return ownNewTaskChord();
+  });
   function onNewTaskChord(e: KeyboardEvent) {
-    if (!isNewTaskChord(e, isMac)) return;
+    if (coveredByPage || !isNewTaskChord(e, isMac)) return;
     // Another dialog owns the keyboard while open.
     if ((e.target as Element | null)?.closest?.('dialog')) return;
     e.preventDefault();
@@ -683,7 +691,6 @@
   });
   onDestroy(() => {
     window.removeEventListener('keydown', onNewTaskChord, true);
-    releaseNewTask();
     offFilters();
     offLayout();
     offChanged();

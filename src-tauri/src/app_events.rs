@@ -69,3 +69,82 @@ impl crate::backend::events::RemoteEventSink for AppHandleEventBus {
         }
     }
 }
+
+/// The event that tells the window its store is poisoned (review w19-1);
+/// `StorePoisonBanner.svelte` listens for it.
+pub const STORE_POISONED_EVENT: &str = "app:store-poisoned";
+
+/// How often the poison watch looks at the store's lock.
+pub const STORE_POISON_CHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Watch the store's lock for poison, the desktop's half of the hub's
+/// `watch_store_poison` (review w19-1). A panic that held `lock(store)`
+/// poisons it, and from then on every command answers `E_LOCK` until the app
+/// restarts. The hub exits for its supervisor; a desktop has none, so this
+/// calls `on_poisoned` on every check once the lock is poisoned (the window
+/// may not be listening at the first one) and the window offers a restart.
+/// Logs once.
+pub fn watch_store_poison<T: Send + 'static>(
+    store: std::sync::Arc<std::sync::Mutex<T>>,
+    every: std::time::Duration,
+    on_poisoned: impl Fn() + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("store-poison-watch".into())
+        .spawn(move || {
+            let mut logged = false;
+            loop {
+                std::thread::sleep(every);
+                if store.is_poisoned() {
+                    if !logged {
+                        tracing::error!(
+                            "the store lock is poisoned (a panic held it); every command \
+                             fails until Orbit Fleet restarts"
+                        );
+                        logged = true;
+                    }
+                    on_poisoned();
+                }
+            }
+        })
+}
+
+#[cfg(test)]
+mod poison_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_poison_watch_says_so_only_once_the_lock_is_poisoned() {
+        let store = Arc::new(Mutex::new(0u8));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        watch_store_poison(Arc::clone(&store), Duration::from_millis(5), move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(40));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a healthy lock says nothing"
+        );
+        let poisoner = Arc::clone(&store);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("poison the lock");
+        })
+        .join();
+        assert!(store.is_poisoned());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while calls.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            calls.load(Ordering::SeqCst) >= 2,
+            "it keeps saying so for a late window"
+        );
+    }
+}

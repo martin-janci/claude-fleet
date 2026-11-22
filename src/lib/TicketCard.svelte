@@ -92,9 +92,12 @@
     } else if (r.error.code === 'E_EXISTS') finishError = errorText(r.error);
     else pushError(r.error, 'Asking for the result failed');
   }
-  // Another session, another request.
+  // Another session, another request. Keyed on primitives, not the row
+  // object, which every row event replaces (review w17-5).
+  const sid = $derived(session.id);
+  const turn = $derived(session.turn_seq);
   $effect(() => {
-    void session.id;
+    void sid;
     finishError = null;
     finishAsked = false;
   });
@@ -111,8 +114,8 @@
     outcome = r.ok && Array.isArray(r.value) ? handoverOutcome(r.value) : null;
   }
   $effect(() => {
-    const id = session.id;
-    void session.turn_seq;
+    const id = sid;
+    void turn;
     if (!key) return;
     void loadOutcome(id);
   });

@@ -7,7 +7,7 @@
   // host reports the login; Done and Cancel close the pane. "Run it there
   // instead" is the command for a terminal on the host, whatever the CLI's
   // flow becomes.
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import Modal from './Modal.svelte';
   import { copyAndSay } from './clipboard';
   import { openExternal } from './open_external';
@@ -106,9 +106,11 @@
     void poll();
   }
 
+  // Review w17-3: keyed on the boolean, not on `status` (each poll assigns a
+  // new object, which re-ran this effect and polled back to back).
   $effect(() => {
-    if (status?.logged_in) return;
-    void poll();
+    if (signedIn) return;
+    untrack(() => void poll());
     const t = setInterval(() => void poll(), pollMs);
     return () => clearInterval(t);
   });

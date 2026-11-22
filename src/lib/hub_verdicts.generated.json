@@ -448,6 +448,7 @@
     "pty_write",
     "report_client_error",
     "resolve_local_workspace_conflict",
+    "restart_app",
     "resume_local_workspace",
     "set_local_workspace_driver",
     "set_local_workspace_excludes",

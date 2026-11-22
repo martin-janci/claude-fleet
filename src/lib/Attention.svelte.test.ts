@@ -14,7 +14,7 @@ import { clearSelection, selectedSession } from './selection';
 import { notifyStuckOs, notifyStuckToast } from './notify';
 import { fleetSettings } from './fleet_settings';
 import { failing, type FailingRoutine } from './routines';
-import { PRIMARY, _resetFleetsForTest, _setFleetRowsForTest, _setFleetsForTest, emptyRows, type FleetInfo } from './fleets';
+import { PRIMARY, fleetSelection, _resetFleetsForTest, _setFleetRowsForTest, _setFleetsForTest, emptyRows, type FleetInfo } from './fleets';
 import { fleetInfo } from './fleets_fixture';
 
 let nextId = 1;
@@ -238,6 +238,20 @@ describe('Attention: the notifications matrix (11.9)', () => {
       _setFleetRowsForTest('again', rowsOf([{ ...b, claude_status: 'blocked' }]));
       await tick();
       expect(shown).toEqual(['pos needs you']);
+    });
+
+    it("w17-6: clicking a fleet's notification opens that fleet's session", async () => {
+      _setFleetsForTest([base, extra('company')]);
+      const a = row({ tmux_name: 'far', claude_status: 'working' });
+      made.length = 0;
+      render(Attention);
+      _setFleetRowsForTest('company', rowsOf([a]));
+      await tick();
+      _setFleetRowsForTest('company', rowsOf([{ ...a, claude_status: 'blocked' }]));
+      await tick();
+      expect(made).toHaveLength(1);
+      made[0].onclick?.(new Event('click'));
+      expect(get(fleetSelection)).toEqual({ fleet: 'company', id: a.id });
     });
 
     it("w01-13: an event before a fleet's first list is no baseline", async () => {

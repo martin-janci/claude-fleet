@@ -136,6 +136,15 @@ describe('+ Add account', () => {
     expect(calls).toContainEqual({ action: 'end_login', host_alias: 'mercury', profile: 'work' });
   });
 
+  it('polls the login once per interval, not back to back (review w17-3)', async () => {
+    render(AddAccountDialog, { props: { onclose: () => {}, host: 'mercury', pollMs: 60_000 } });
+    await fill('subscription', 'work');
+    await waitFor(() => expect(screen.getByTestId('add-account-open-link')).toBeTruthy());
+    // Each answer used to re-run the polling effect and start the next poll at once.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(calls.filter((c) => c.action === 'login_status').length).toBe(1);
+  });
+
   it('checks the answers before sending anything', async () => {
     render(AddAccountDialog, { props: { onclose: () => {}, host: 'mercury' } });
     await fill('api_key', 'bad name', 'nope');

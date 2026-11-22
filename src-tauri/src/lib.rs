@@ -267,6 +267,20 @@ pub fn run() {
                 }
             }
             app.manage(std::sync::Arc::clone(&store));
+            // Review w19-1: a poisoned store fails every command until a
+            // restart; the window says so and offers one.
+            {
+                let handle = app.handle().clone();
+                if let Err(e) = app_events::watch_store_poison(
+                    std::sync::Arc::clone(&store),
+                    app_events::STORE_POISON_CHECK,
+                    move || {
+                        let _ = tauri::Emitter::emit(&handle, app_events::STORE_POISONED_EVENT, ());
+                    },
+                ) {
+                    tracing::warn!("could not start the store poison watch: {e}");
+                }
+            }
             app.manage(std::sync::Arc::clone(&mirrors_for_setup));
             app.manage(Mutex::new(fleet_core::mcp::McpRuntime::default()));
             app.manage(std::sync::Arc::clone(&bus_for_usage));
@@ -419,6 +433,7 @@ pub fn run() {
             commands::health::health_check,
             commands::diagnostics::collect_diagnostics,
             commands::diagnostics::open_log_folder,
+            commands::diagnostics::restart_app,
             commands::tray::set_tray_state,
             commands::projects::list_projects,
             commands::projects::refresh_projects,

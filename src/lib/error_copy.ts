@@ -26,6 +26,10 @@ const PLAIN: Record<string, string> = {
   E_SERIALIZE: 'Something went wrong reading the answer',
   E_PARSE: 'Something went wrong reading the answer',
   E_INTERNAL: 'Something went wrong inside Orbit Fleet',
+  // Review w19-1: a poisoned lock (a panic held it) fails every call after
+  // it; only a restart clears it. The log text "store mutex poisoned" goes
+  // under Details.
+  E_LOCK: 'Orbit Fleet hit an internal error and must restart',
   E_RATE_LIMITED: 'Too many requests; try again in a moment',
   // (No `E_HUB_UNAVAILABLE` / `E_UNAUTHORIZED` row: one fixed sentence about
   // this app's own pairing was wrong for an extra fleet and for a standalone

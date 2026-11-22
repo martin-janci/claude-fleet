@@ -527,3 +527,17 @@ describe('confirm copy', () => {
     expect(m).toContain('until they are restarted');
   });
 });
+
+// Review w02-5: a copy that is still signed in has no Sign in again button,
+// so the advice names the command instead of pointing at one.
+describe('describeLoginConflict (copied)', () => {
+  it('names the sign-in command for the login, not a button', async () => {
+    const { describeLoginConflict } = await import('./hosts_view');
+    const text = describeLoginConflict('mac', { kind: 'copied', profile: 'work', copies: [{ host: 'htz', profile: 'work' }] });
+    expect(text).not.toContain('(Sign in again)');
+    expect(text).toContain('ssh mac, then run CLAUDE_CONFIG_DIR=~/.claude-profiles/work claude /login');
+    expect(describeLoginConflict('mac', { kind: 'copied', profile: null, copies: [{ host: 'htz', profile: null }] })).toContain(
+      'then run claude /login',
+    );
+  });
+});

@@ -242,6 +242,16 @@ pub async fn open_log_folder(app: tauri::AppHandle) -> Result<String, IpcError> 
     Ok(path)
 }
 
+/// Restart this app: the way out of a poisoned store (review w19-1), which
+/// fails every other command until the process starts again. Same in both
+/// modes: it is this process. Sync is fine: nothing here blocks, and
+/// `restart` does not return.
+#[tauri::command]
+pub fn restart_app(app: tauri::AppHandle) {
+    tracing::warn!("restart asked for from the window");
+    app.restart();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

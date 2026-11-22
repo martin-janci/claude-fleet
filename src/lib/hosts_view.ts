@@ -256,11 +256,14 @@ export function describeLoginConflict(alias: string, c: LoginConflict): string {
   if (c.kind === 'copied') {
     const self = c.profile === null ? 'the host login' : `profile ${c.profile}`;
     const others = c.copies.map((o) => (o.profile === null ? `the host login on ${o.host}` : `profile ${o.profile} on ${o.host}`));
+    // Review w02-5: a copy that is still signed in has no Sign in again
+    // button anywhere, so name the command that signs it in on its own.
+    const login = c.profile === null ? 'claude /login' : `CLAUDE_CONFIG_DIR=~/.claude-profiles/${c.profile} claude /login`;
     return (
       `${alias}: ${self} is a copy of one Claude login that is also ${others.join(' and ')}: they share one refresh ` +
       `token, so each refresh revokes the others' copy and they take turns hitting "Login expired". Sign each host in ` +
-      `on its own (Sign in again), and stop copying .credentials.json between hosts (a dotfiles or ~/.claude sync, a ` +
-      `copied profile dir).`
+      `on its own (ssh ${alias}, then run ${login}), and stop copying .credentials.json between hosts (a ` +
+      `dotfiles or ~/.claude sync, a copied profile dir).`
     );
   }
   const names = c.logins.map((l) => (l === null ? 'the host login' : `profile ${l}`));

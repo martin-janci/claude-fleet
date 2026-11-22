@@ -223,6 +223,25 @@ describe('Details runs each action', () => {
     accountUsage.set({});
   });
 
+  it('Switch account… offers no signed-out login, since the hub refuses a switch onto one (review w12-5)', async () => {
+    hosts.set([
+      host('mefistos', {
+        claude_profiles: [{ name: 'work', account_uuid: 'acc-2', email: 'w@example.com' }],
+        signed_out_logins: [{ profile: 'work', since: 1 }],
+      }),
+    ]);
+    answer({ check_account_headroom: null });
+    render(SessionDetails, { props: { session: sess } });
+    await fireEvent.click(screen.getByTestId('switch-account-from-details'));
+    await settle();
+    const work = screen
+      .getAllByTestId('switch-account-option')
+      .map((l) => l.querySelector('input') as HTMLInputElement)
+      .find((i) => i.value === 'work')!;
+    expect(work.disabled).toBe(true);
+    expect(screen.getAllByTestId('switch-account-headroom').map((e) => e.textContent)).toContain('signed out · sign in first');
+  });
+
   it('Change model… sends /model through the outbox', async () => {
     const enqueue = vi.spyOn(outbox, 'enqueue').mockReturnValue('m1');
     render(SessionDetails, { props: { session: sess } });

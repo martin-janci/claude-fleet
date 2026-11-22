@@ -119,6 +119,7 @@
   import { loadFleetSettings } from './lib/fleet_settings';
   import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
   import UpdateBanner from './lib/UpdateBanner.svelte';
+  import StorePoisonBanner from './lib/StorePoisonBanner.svelte';
   import { startUpdateChecks } from './lib/updates';
   import { derived, get } from 'svelte/store';
   import { destination, goTo, leave } from './lib/destination';
@@ -1245,6 +1246,7 @@
   <HubConnectionBanner hubUrl={$hubStatus.url} />
 {/if}
 <UpdateBanner />
+<StorePoisonBanner />
 {#if $hubStatus.unavailable}
   <HubUnavailableBanner
     reason={$hubStatus.unavailable}
@@ -1342,7 +1344,7 @@
         </div>
         {#if $destination === 'files' && $selectedSession}
           <div class="view-slot overlay">
-            <FilesPanel session={$selectedSession} />
+            <FilesPanel session={$selectedSession} visible={!fleetPageShown && !fleetSessionShown && !$settingsOpen} />
           </div>
         {/if}
         {#if conversationMode && $selectedSession}
