@@ -309,6 +309,42 @@ fn a_purged_session_is_no_transcript() {
     assert_eq!(e.code, codes::E_NO_TRANSCRIPT);
 }
 
+/// Review w09-3: the fork replays the whole conversation to an account, so
+/// it is held to the account rules: a past session in a project that now
+/// forbids the login's account is refused before anything runs.
+#[test]
+fn a_summary_on_a_forbidden_account_is_refused() {
+    let s = Store::open_in_memory().unwrap();
+    crate::service::account_limits::seed_usage(&s, "h", None, "acct-own", 10.0, 1);
+    let p = s.upsert_project("o", "r", "/srv/o/r").unwrap();
+    let id = s
+        .upsert_session("dev-o-r--abc-1", "h", Some(p), None, 1, 1, "running", None)
+        .unwrap();
+    s.rebind_conversation(id, CID, crate::store::StartSource::Startup, None, None)
+        .unwrap();
+    s.link_session_work(id, WorkTarget::Key("ABC-1"), "manual")
+        .unwrap();
+    s.delete_session(id).unwrap();
+    let link = s.ended_work_links_for_key("ABC-1").unwrap()[0].id;
+    let view = crate::service::view_scope::org_only_view(&OrgScope::All);
+    assert!(plan(&s, "ABC-1", link, &view).is_ok());
+    s.set_account_forbidden_projects("acct-own", &[p]).unwrap();
+    let e = plan(&s, "ABC-1", link, &view).unwrap_err();
+    assert_eq!(e.code, codes::E_ACCOUNT_FORBIDDEN, "{e:?}");
+}
+
+#[test]
+fn the_run_takes_the_past_sessions_login() {
+    let own = summary_script(None, CID, "haiku").unwrap();
+    assert!(!own.contains("CLAUDE_CONFIG_DIR"), "{own}");
+    let work = summary_script_as(None, CID, "haiku", Some("work")).unwrap();
+    assert!(
+        work.contains("CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"'work'"),
+        "{work}"
+    );
+    assert!(summary_script_as(None, CID, "haiku", Some("../x")).is_err());
+}
+
 #[test]
 fn the_model_is_the_setting() {
     let (st, link) = past_session("h");

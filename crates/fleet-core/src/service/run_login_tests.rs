@@ -152,10 +152,12 @@ fn body<'a>(src: &'a str, file: &str, signature: &str) -> &'a str {
     panic!("{file}: `{signature}` never closes")
 }
 
-/// The source files under `crates/fleet-core/src` that build a Claude
-/// launch (a headless job, an agent's print run, the planner's script, a
-/// background agent, a session pane), test files aside.
+/// The source files under `crates/fleet-core/src` and `src-tauri/src` that
+/// build a Claude launch (a headless job, an agent's print run, the
+/// planner's script, a background agent, a session pane, a writing-help
+/// run), test files aside.
 const MARKERS: &[&str] = &[
+    "ClaudeOnHost {",
     "HeadlessJob {",
     "PrintRun {",
     "planner_script_as(",
@@ -165,7 +167,9 @@ const MARKERS: &[&str] = &[
 ];
 
 /// Files that build a launch and how each is held to the account rules:
-/// either a guarded site in [`SITES`], or a reason it needs none.
+/// either a guarded site in [`SITES`], or a reason it needs none. A path is
+/// under `crates/fleet-core/src`, or the repo's own when it starts with
+/// `src-tauri/`.
 const EXEMPT: &[(&str, &str)] = &[
     (
         "claude_cli.rs",
@@ -194,10 +198,6 @@ const EXEMPT: &[(&str, &str)] = &[
     (
         "service/watch_summary.rs",
         "runs under the session's own stored login: the account its work already runs on",
-    ),
-    (
-        "service/work/summary.rs",
-        "a fork of a past session's own conversation, on its own host",
     ),
     (
         "service/decide/haiku.rs",
@@ -269,6 +269,32 @@ const SITES: &[Site] = &[
         guards: &["run_login::choose("],
     },
     Site {
+        file: "service/work/summary.rs",
+        signature: "fn plan(",
+        guards: &["past_session_login(", "run_login::refuse("],
+    },
+    Site {
+        file: "service/work/summary.rs",
+        signature: "pub async fn summarize(",
+        guards: &["summary_script_as("],
+    },
+    Site {
+        file: "service/prompt_tune.rs",
+        signature: "pub async fn tune_for_routine(",
+        guards: &["run_login::refuse("],
+    },
+    Site {
+        file: "service/prompt_tune.rs",
+        signature: "pub async fn tune_for_session(",
+        // The session's own stored login: the account its work runs on.
+        guards: &["session_launch("],
+    },
+    Site {
+        file: "src-tauri/src/commands/context_help.rs",
+        signature: "pub async fn context_help(",
+        guards: &["run_login::refuse("],
+    },
+    Site {
         file: "service/work/brief_draft.rs",
         signature: "pub async fn draft_into(",
         guards: &["run_login::choose("],
@@ -277,7 +303,10 @@ const SITES: &[Site] = &[
         file: "service/work/title_draft.rs",
         signature: "pub async fn draft_title(",
         // No project yet, so no account is forbidden: the host's own login.
-        guards: &["draft_script(&model, &title_prompt(notes), None)"],
+        guards: &[
+            "run_login::refuse(",
+            "draft_script(&model, &title_prompt(notes), None)",
+        ],
     },
     Site {
         file: "service/work/orchestrate/limit.rs",
@@ -326,7 +355,14 @@ const SITES: &[Site] = &[
 /// says why it needs none. A new launch path fails here until it is listed.
 #[test]
 fn every_claude_launch_path_holds_to_the_account_rules() {
-    let read = |file: &str| crate::repo_files::read(&format!("crates/fleet-core/src/{file}"));
+    let at = |file: &str| {
+        if file.starts_with("src-tauri/") {
+            file.to_string()
+        } else {
+            format!("crates/fleet-core/src/{file}")
+        }
+    };
+    let read = |file: &str| crate::repo_files::read(&at(file));
     for site in SITES {
         let src = read(site.file);
         let text = body(&src, site.file, site.signature);
@@ -340,44 +376,53 @@ fn every_claude_launch_path_holds_to_the_account_rules() {
             );
         }
     }
-    // Every file that builds a launch is a site or exempt.
-    let root = crate::repo_files::path("crates/fleet-core/src");
-    let mut stack = vec![root.clone()];
+    // Every file that builds a launch is a site or exempt: fleet-core's,
+    // and the desktop's own commands (review w09-6: the shell strip's
+    // context help ran there unseen).
     let mut unlisted = Vec::new();
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                if path.file_name().is_some_and(|n| n == "tests") {
+    for (root_rel, prefix) in [
+        ("crates/fleet-core/src", ""),
+        ("src-tauri/src", "src-tauri/src/"),
+    ] {
+        let root = crate::repo_files::path(root_rel);
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|n| n == "tests") {
+                        continue;
+                    }
+                    stack.push(path);
                     continue;
                 }
-                stack.push(path);
-                continue;
-            }
-            let rel = path
-                .strip_prefix(&root)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/");
-            let name = path.file_name().unwrap().to_string_lossy().to_string();
-            if !rel.ends_with(".rs")
-                || name == "tests.rs"
-                || name.ends_with("_tests.rs")
-                || name == "testing.rs"
-                || name == "testkit.rs"
-            {
-                continue;
-            }
-            let src = std::fs::read_to_string(&path).unwrap();
-            // Only the code before a file's own `mod tests`.
-            let code = src.split("#[cfg(test)]\nmod tests").next().unwrap_or("");
-            if !MARKERS.iter().any(|m| code.contains(m)) {
-                continue;
-            }
-            let listed =
-                SITES.iter().any(|s| s.file == rel) || EXEMPT.iter().any(|(f, _)| *f == rel);
-            if !listed {
-                unlisted.push(rel);
+                let rel = format!(
+                    "{prefix}{}",
+                    path.strip_prefix(&root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                );
+                let name = path.file_name().unwrap().to_string_lossy().to_string();
+                if !rel.ends_with(".rs")
+                    || name == "tests.rs"
+                    || name.ends_with("_tests.rs")
+                    || name == "testing.rs"
+                    || name == "testkit.rs"
+                {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&path).unwrap();
+                // Only the code before a file's own `mod tests`.
+                let code = src.split("#[cfg(test)]\nmod tests").next().unwrap_or("");
+                if !MARKERS.iter().any(|m| code.contains(m)) {
+                    continue;
+                }
+                let listed =
+                    SITES.iter().any(|s| s.file == rel) || EXEMPT.iter().any(|(f, _)| *f == rel);
+                if !listed {
+                    unlisted.push(rel);
+                }
             }
         }
     }
@@ -389,7 +434,7 @@ fn every_claude_launch_path_holds_to_the_account_rules() {
     );
     for (file, _) in EXEMPT {
         assert!(
-            crate::repo_files::path(&format!("crates/fleet-core/src/{file}")).exists(),
+            crate::repo_files::path(&at(file)).exists(),
             "{file} is gone: drop it from EXEMPT"
         );
     }

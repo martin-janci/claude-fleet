@@ -174,6 +174,12 @@ pub const DEFER_JEV: &str = "jev_defer";
 /// daily limit, which refuses its relaunch until 00:00 UTC
 /// (`run_login::refuse_relaunch`): it waits, spending no attempt.
 pub const DEFER_DAILY_LIMIT: &str = "daily_limit";
+/// [`EVENT_DEFERRED`] detail: the session's project now forbids its
+/// login's account, which refuses its relaunch
+/// (`project_accounts::refuse_forbidden_relaunch`) until a person lifts the
+/// block or moves it: it waits, spending no attempt and raising no failure
+/// (review w09-4).
+pub const DEFER_FORBIDDEN: &str = "account_forbidden";
 
 /// The `recovery.*` settings in force.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -241,6 +247,9 @@ pub struct Candidate {
     /// Its login's account spent its daily limit, so a relaunch is refused
     /// (`run_login::refuse_relaunch`) until it resets.
     pub daily_limit: bool,
+    /// Its project forbids its login's account, so a relaunch is refused
+    /// until a person lifts the block.
+    pub forbidden: bool,
     /// What Jev would be asked (its `baseline` set by the planner).
     pub question: RestoreQuestion,
 }
@@ -306,6 +315,10 @@ pub fn plan(cands: &[Candidate], cfg: &AutoRestoreConfig, now: i64) -> Vec<Plann
                 continue;
             }
             (Action::Skip(SKIP_BUDGET), false)
+        } else if c.forbidden {
+            // Not Jev's to weigh: a relaunch is refused until a person
+            // lifts the block; no attempt spent, no failure raised.
+            (Action::Defer(DEFER_FORBIDDEN.to_string()), false)
         } else if c.daily_limit {
             // Not Jev's to weigh: a relaunch is refused until the reset.
             (Action::Defer(DEFER_DAILY_LIMIT.to_string()), false)
@@ -771,6 +784,7 @@ fn candidates(s: &Store, cfg: &AutoRestoreConfig, now: i64) -> Option<Vec<Candid
                     .unwrap_or(u32::MAX)
                     .saturating_sub(u32::from(refund));
                 let load = host.and_then(|h| host_load(h, cfg, starting_on(&h.alias), now));
+                let held = crate::service::run_login::relaunch_refusal(s, r.id, now);
                 // A move may name only a healthy, reachable, active host in
                 // the same org as the one the session ran on.
                 let move_to = host
@@ -834,7 +848,12 @@ fn candidates(s: &Store, cfg: &AutoRestoreConfig, now: i64) -> Option<Vec<Candid
                     floor: host.is_some_and(|h| {
                         memory_floor(h, cfg, starting_on(&h.alias), now).is_some()
                     }),
-                    daily_limit: crate::service::run_login::relaunch_held(s, r.id, now).is_some(),
+                    daily_limit: held
+                        .as_ref()
+                        .is_some_and(|e| e.code == codes::E_ACCOUNT_LIMIT),
+                    forbidden: held
+                        .as_ref()
+                        .is_some_and(|e| e.code == codes::E_ACCOUNT_FORBIDDEN),
                     question,
                 }
             })
@@ -1151,6 +1170,7 @@ mod tests {
             load: None,
             floor: false,
             daily_limit: false,
+            forbidden: false,
             question: question(id),
         }
     }
@@ -1297,6 +1317,41 @@ mod tests {
         crate::service::account_limits::seed_daily_spend(&s, "acct-api", 5.0, 6.0, now);
         let why = crate::service::run_login::relaunch_held(&s, id, now).expect("held");
         assert!(why.contains("daily limit"), "{why}");
+    }
+
+    /// Review w09-4: a session whose project now forbids its login's
+    /// account waits for a person: deferred with the reason, spending no
+    /// attempt, never a failure; the candidate reads it off the stored login.
+    #[test]
+    fn a_forbidden_account_defers_without_spending_an_attempt() {
+        let mut c = cand(1, "process_died", 0);
+        c.forbidden = true;
+        let p = plan(&[c], &CFG, 1_000);
+        assert_eq!(
+            actions(&p),
+            vec![(1, Action::Defer(DEFER_FORBIDDEN.into()))]
+        );
+        assert!(!p[0].ask);
+
+        let s = Store::open_in_memory().unwrap();
+        let now = 2_000_000;
+        crate::service::account_limits::seed_usage(&s, "h", None, "acct-api", 10.0, now);
+        let pid = s.upsert_project("acme", "api", "/srv/acme/api").unwrap();
+        let id = s
+            .upsert_session("w", "h", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE sessions SET account_uuid = 'acct-api', lost_at = 5 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        assert!(crate::service::run_login::relaunch_refusal(&s, id, now).is_none());
+        s.set_account_forbidden_projects("acct-api", &[pid])
+            .unwrap();
+        let e = crate::service::run_login::relaunch_refusal(&s, id, now).expect("held");
+        assert_eq!(e.code, codes::E_ACCOUNT_FORBIDDEN);
+        assert!(crate::service::run_login::relaunch_held(&s, id, now).is_some());
     }
 
     #[test]

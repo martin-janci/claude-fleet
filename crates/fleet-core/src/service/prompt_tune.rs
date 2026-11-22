@@ -468,6 +468,15 @@ pub async fn tune_for_routine(
                 format!("no host {alias} to tune the prompt on"),
             ));
         }
+        // The account rules (review w09-6): the draft and the project's
+        // name go to the routine's login, held like the run itself.
+        crate::service::run_login::refuse(
+            &s,
+            Some(input.project_id).filter(|id| *id > 0),
+            alias,
+            input.profile.as_deref(),
+            crate::store::now_unix(),
+        )?;
         (
             settings::get_string_for(&s, settings::WORK_HELP_MODEL, org),
             org,

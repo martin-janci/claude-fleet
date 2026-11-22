@@ -991,7 +991,7 @@ pub(crate) fn resume_profile(
 /// The login of the session link `link_id` ran in, when that row is still
 /// in the store and on `host`: `Some(None)` for the host's own login,
 /// `Some(Some(profile))` for a profile; `None` when it cannot be told.
-fn past_session_login(
+pub(crate) fn past_session_login(
     s: &Store,
     link_id: i64,
     host: &str,

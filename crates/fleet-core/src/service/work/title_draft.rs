@@ -190,6 +190,9 @@ pub async fn draft_title(
             hosts.push((h, org));
         }
         let host = pick_host(&hosts, scope, wanted_host)?;
+        // The host's own login: no project forbids it, but a spent daily
+        // limit or a known sign-out stops it (review w09-7).
+        crate::service::run_login::refuse(&s, None, &host, None, crate::store::now_unix())?;
         let org = s.host_org(&host)?;
         (
             host,

@@ -65,6 +65,22 @@ pub async fn context_help(
     if backend.hub().is_none() {
         let s = fleet_core::ipc_error::lock(&store)?;
         settings::require_writing_help(&s, settings::WORK_CONTEXT_HELP)?;
+        // The account rules (review w09-6): the run sends the terminal's
+        // scrollback to the login's account, so a project that forbids it
+        // (or a spent daily limit, a known sign-out) refuses, as any other
+        // Claude run in that project would be.
+        let project = s
+            .find_sessions_by_tmux_name(&args.session_name, Some(&args.host_alias))?
+            .into_iter()
+            .next()
+            .and_then(|r| r.project_id);
+        fleet_core::service::run_login::refuse(
+            &s,
+            project,
+            &args.host_alias,
+            args.profile.as_deref(),
+            fleet_core::store::now_unix(),
+        )?;
     }
     let exec: &dyn fleet_core::ssh::SshExec = ssh.inner().as_ref();
     let scrollback = match (args.surface, args.terminal) {

@@ -107,8 +107,15 @@ pub fn candidates(
 /// The accounts no login of the planner may be on for mission `m`
 /// (`service::project_accounts`): those its repositories' projects and its
 /// root item's project forbid (each with its org's blocks), and, for a
-/// mission with no repository, those forbidden for its org.
-pub fn mission_forbidden(s: &Store, m: &MissionRow) -> Result<Vec<String>, IpcError> {
+/// mission with no repository, those forbidden for its org. With `host`,
+/// a project's blocks are counted for work on that host
+/// (`Store::project_forbidden_accounts_on`): the org the host is filed
+/// under forbids too, as every session start counts it (review w09-1).
+pub fn mission_forbidden(
+    s: &Store,
+    m: &MissionRow,
+    host: Option<&str>,
+) -> Result<Vec<String>, IpcError> {
     let mut projects: Vec<i64> = m.repos.iter().map(|r| r.project_id).collect();
     if let Some(p) = m
         .root_item_id
@@ -119,7 +126,10 @@ pub fn mission_forbidden(s: &Store, m: &MissionRow) -> Result<Vec<String>, IpcEr
     }
     let mut out: Vec<String> = Vec::new();
     for p in projects {
-        out.extend(s.project_forbidden_accounts(p)?);
+        out.extend(match host {
+            Some(h) => s.project_forbidden_accounts_on(p, h)?,
+            None => s.project_forbidden_accounts(p)?,
+        });
     }
     if m.repos.is_empty() {
         if let Some(org) = m.org_id {
@@ -149,7 +159,6 @@ struct Found {
 /// [`candidates`], and the logins left out of them.
 fn logins(s: &Store, m: &MissionRow, grant: Option<&GrantRow>) -> Result<Found, IpcError> {
     let preferred = grant.and_then(|g| g.profile.clone());
-    let banned = mission_forbidden(s, m)?;
     let now = crate::store::now_unix();
     let mut found = Found {
         usable: Vec::new(),
@@ -169,6 +178,8 @@ fn logins(s: &Store, m: &MissionRow, grant: Option<&GrantRow>) -> Result<Found, 
         }
     };
     for host in planner_hosts(s, m, grant)? {
+        // Per host: an org the host is filed under forbids too (w09-1).
+        let banned = mission_forbidden(s, m, Some(host.as_str()))?;
         let accounts = if banned.is_empty() {
             Vec::new()
         } else {
@@ -382,14 +393,19 @@ pub fn choose_in(
 /// The login a draft about mission `m` (its release note, its triage
 /// card) runs under: [`choose_in`]'s first, with no planner wait read and
 /// no grant; when every login it may use is past the pause line, the first
-/// of them anyway, as a person asked for it now. Never a signed-out login
-/// or one on an account the mission's projects forbid: those refuse.
+/// of them anyway, as a person asked for it now, unless its account spent
+/// its daily limit (a hard cap no caller passes, review w09-7). Never a
+/// signed-out login or one on an account the mission's projects forbid:
+/// those refuse.
 pub fn draft_login(s: &Store, m: &MissionRow, now: i64) -> Result<Login, IpcError> {
     match choose_in(s, m, None, now, &Words(Vec::new()), &[])? {
         Ok(l) => Ok(l),
         Err(wait) => candidates(s, m, None)?
             .into_iter()
-            .next()
+            .find(|l| {
+                account_limits::refuse_over_daily_limit(s, &l.host, l.profile.as_deref(), now)
+                    .is_ok()
+            })
             .ok_or_else(|| IpcError::new(crate::ipc_error::codes::E_ACCOUNT_LIMIT, wait.why)),
     }
 }
