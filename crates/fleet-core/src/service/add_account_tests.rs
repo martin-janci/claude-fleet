@@ -223,6 +223,45 @@ async fn an_api_key_goes_to_the_host_on_stdin_and_becomes_an_account() {
     assert!(dump.iter().all(|v| !v.contains(KEY)));
 }
 
+/// w10-1: a revoked key left its profile signed out; adding a good key to
+/// it again signs it back in.
+#[tokio::test]
+async fn adding_a_key_again_clears_its_profiles_signed_out_note() {
+    let store = store_with_host();
+    store
+        .lock()
+        .unwrap()
+        .set_host_signed_out_logins(
+            "mercury",
+            &[crate::store::SignedOutLogin {
+                profile: Some("api".into()),
+                since: NOW - 100,
+                checked_at: NOW - 10,
+            }],
+        )
+        .unwrap();
+    let ssh = Arc::new(FakeSsh::new());
+    ssh.on(
+        Match::script_contains(".fleet-api-key"),
+        Reply::ok("__fleet_ok__\n"),
+    );
+    let mut a = args("api_key");
+    a.api_key = Some(KEY.into());
+    run(&a, &store, ssh.as_ref(), &tmux(&ssh), &anthropic_ok(), NOW)
+        .await
+        .unwrap();
+    let host = store
+        .lock()
+        .unwrap()
+        .get_host_row("mercury")
+        .unwrap()
+        .unwrap();
+    assert!(!crate::service::login_health::is_signed_out(
+        &host,
+        Some("api")
+    ));
+}
+
 /// Review R5: the same key is the same account wherever it is added, so
 /// adding it again with the limit field left empty keeps the limit its
 /// owner set; only an explicit 0 removes it.
@@ -1058,6 +1097,39 @@ async fn a_setup_token_is_listed_as_the_account_it_belongs_to() {
     .unwrap();
     assert_eq!(out["account_uuid"], "6f1c-real-login");
 
+    // w11-6: a token replacing a token keeps nothing of the old one's
+    // account; it is listed as the new token's own.
+    let store = store_with_host();
+    {
+        let s = store.lock().unwrap();
+        s.upsert_account(&real).unwrap();
+        s.set_host_profiles(
+            "mercury",
+            &[crate::store::HostProfileRow {
+                name: "tok".into(),
+                account_uuid: Some("6f1c-real-login".into()),
+                email: Some("ada@x.com".into()),
+                credential: Some(SETUP_TOKEN_CREDENTIAL.into()),
+            }],
+        )
+        .unwrap();
+    }
+    let ssh = ok();
+    let out = run(
+        &token_args(),
+        &store,
+        ssh.as_ref(),
+        &tmux(&ssh),
+        &anthropic_inference_only(),
+        NOW,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        out["account_uuid"],
+        setup_token_account_uuid(TOKEN).as_str()
+    );
+
     // An account fleet does not know, or an API key's, is refused before
     // anything is written.
     for named in ["nobody", "apikey-0123456789abcdef"] {
@@ -1324,6 +1396,11 @@ async fn sign_in_again_opens_the_login_pane_over_the_login_that_is_there() {
         script.contains("claude-profiles/\"'\\''work'\\''"),
         "{script}"
     );
+    // A pane left from an earlier sign-in still shows "Login successful":
+    // it is closed first, so only this sign-in's line can count (w11-3).
+    let kill = script.find("kill-session").expect(&script);
+    assert!(kill < script.find("has-session").unwrap(), "{script}");
+    assert!(script.contains("fleet-login--work"), "{script}");
 
     // The host's own login: no profile, no CLAUDE_CONFIG_DIR.
     a.profile = String::new();
@@ -1335,6 +1412,10 @@ async fn sign_in_again_opens_the_login_pane_over_the_login_that_is_there() {
     assert!(script.contains("claude /login"), "{script}");
     assert!(!script.contains("CLAUDE_CONFIG_DIR"), "{script}");
     assert!(!script.contains("mkdir"), "{script}");
+    assert!(
+        script.find("kill-session").unwrap() < script.find("has-session").unwrap(),
+        "{script}"
+    );
     assert!(crate::tmux::is_login_session_name("fleet-login--_own"));
     assert_eq!(login_command(None), "claude /login");
 }
@@ -1415,6 +1496,57 @@ async fn signed_in_again_once_the_pane_says_so_and_the_card_goes() {
     );
     assert!(signed_in_again("⎿  Login successful"));
     assert!(!signed_in_again("Login expired · Run /login"));
+}
+
+/// w02-6 / w02-2: Sign in again reports the account the host now holds, not
+/// the stored one, and the login's old fingerprints go with the sign-in.
+#[tokio::test]
+async fn signed_in_again_reads_the_account_live_and_forgets_old_fingerprints() {
+    let store = store_with_signed_out_logins();
+    {
+        let s = store.lock().unwrap();
+        let sample = crate::tmux::HostHealthSample {
+            login_fingerprints: Some(vec![
+                (None, "aaaaaaaaaaaa".into()),
+                (Some("work".into()), "bbbbbbbbbbbb".into()),
+            ]),
+            ..Default::default()
+        };
+        s.set_host_health("mercury", &sample, NOW - 30).unwrap();
+    }
+    let http = FakeTransport::new();
+    let mut a = args("login_status");
+    a.again = true;
+    a.profile = "work".into();
+    let ssh = Arc::new(FakeSsh::new());
+    ssh.on(
+        Match::contains("capture-pane"),
+        Reply::ok("Login successful. Press Enter to continue…\n"),
+    );
+    ssh.on(
+        Match::script_contains(".fleet-oauth-token"),
+        Reply::ok("@@P\twork\t{\"accountUuid\":\"u-other\",\"emailAddress\":\"b@x.com\"}\n"),
+    );
+    let out = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .unwrap();
+    assert_eq!(out["logged_in"], true);
+    assert_eq!(out["account_uuid"], "u-other");
+    assert_eq!(out["email"], "b@x.com");
+    let host = store
+        .lock()
+        .unwrap()
+        .get_host_row("mercury")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        host.login_fingerprints
+            .iter()
+            .map(|f| f.profile.clone())
+            .collect::<Vec<_>>(),
+        vec![None],
+        "work's fingerprints go; the host login's stay"
+    );
 }
 
 /// Like the login pane's: a Windows runner's `bash` is WSL's, not a shell

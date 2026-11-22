@@ -550,7 +550,8 @@ async fn start_login_again(
     tmux: &dyn TmuxExec,
 ) -> Result<(), IpcError> {
     let Some(profile) = args.login_dir() else {
-        run_tmux(tmux, &start_own_login_script(), "open the login pane").await?;
+        let script = fresh_pane(OWN_LOGIN, &start_own_login_script());
+        run_tmux(tmux, &script, "open the login pane").await?;
         return Ok(());
     };
     let row = profile_row(store, &args.host_alias, profile)?;
@@ -576,8 +577,22 @@ async fn start_login_again(
         return Err(IpcError::new(codes::E_INVALID, problem.clone())
             .with_details(problems("profile", &problem)));
     }
-    run_tmux(tmux, &start_login_script(profile), "open the login pane").await?;
+    let script = fresh_pane(profile, &start_login_script(profile));
+    run_tmux(tmux, &script, "open the login pane").await?;
     Ok(())
+}
+
+/// PURE: `start` behind a kill of the login pane `pane_id` names. A pane
+/// left from an earlier sign-in (its dialog never reached Done or Cancel)
+/// still shows "Login successful" for its hour, and [`start_pane_script`]
+/// would keep it: the first `login_status { again }` would then count that
+/// old line as this sign-in (review w11-3 / w02-1 / w15-6). Only the pane
+/// goes; the profile directory is the login being renewed.
+fn fresh_pane(pane_id: &str, start: &str) -> String {
+    format!(
+        "tmux kill-session -t {} 2>/dev/null; {start}",
+        quote(&crate::tmux::exact_session(&login_session_name(pane_id)))
+    )
 }
 
 /// The keys `login_key` presses: the CLI's numbered choices and the few
@@ -714,6 +729,14 @@ async fn login_status_again(
             command,
         });
     }
+    // The account the person signed in to now, read from the host as the
+    // first-time path does, not the one stored for the login: the browser
+    // may have picked another account (review w02-6). Read before the store
+    // is locked; an unreadable host keeps the stored one.
+    let live = match dir {
+        Some(_) => tmux.read_profiles().await,
+        None => None,
+    };
     let s = lock(store)?;
     crate::service::login_health::record(
         &s,
@@ -724,15 +747,18 @@ async fn login_status_again(
         }],
         now,
     )?;
-    let host = s.get_host_row(&args.host_alias)?;
+    // A fresh sign-in is a token of its own: forget the old ones, so a copy
+    // it was made from no longer matches it (w02-2).
+    s.forget_login_fingerprints(&args.host_alias, dir)?;
     let account_uuid = match dir {
-        None => host.and_then(|h| h.account_uuid),
-        Some(p) => host
-            .and_then(|h| h.claude_profiles)
-            .unwrap_or_default()
-            .into_iter()
-            .find(|x| x.name == p)
-            .and_then(|x| x.account_uuid),
+        None => s
+            .get_host_row(&args.host_alias)?
+            .and_then(|h| h.account_uuid),
+        Some(p) => {
+            crate::service::hosts::sync_host_profiles(&s, &args.host_alias, live.as_deref())?
+                .remove(p)
+                .flatten()
+        }
     };
     let email = match account_uuid.as_deref() {
         Some(u) => s.get_account_by_uuid(u)?.and_then(|a| a.email),
@@ -1148,6 +1174,10 @@ async fn add_api_key(
     });
     profiles.sort_by(|a, b| a.name.cmp(&b.name));
     s.set_host_profiles(&args.host_alias, &profiles)?;
+    // A good key signs the profile in again: a note that a revoked key left
+    // would otherwise stay for good, since no usage poll reads an API key
+    // and Sign in again refuses one (review w10-1).
+    signed_in_by_hand(&s, args, now)?;
     // Only a limit the request carries is written (0 clears it): the same
     // key added on another host is the same account, and leaving the field
     // empty there must not erase the limit its owner set.
@@ -1428,10 +1458,19 @@ async fn add_setup_token(
     if named.is_some_and(|a| a.len() > 128) {
         return Err(IpcError::new(codes::E_INVALID, "account is too long"));
     }
-    let existing = profile_account(store, &args.host_alias, &args.profile)?;
+    let current = profile_row(store, &args.host_alias, &args.profile)?;
+    let existing = current.as_ref().and_then(|p| p.account_uuid.clone());
     if existing.as_deref().is_some_and(is_api_key_account) {
         return Err(api_key_profile_taken(args));
     }
+    // The fallback to the profile's own account is for a `/login` under
+    // the token. A token replacing a token keeps nothing of the old one's
+    // account: a new token may be another subscription's (review w11-6).
+    let existing = existing.filter(|_| {
+        current
+            .as_ref()
+            .is_none_or(|p| p.credential.as_deref() != Some(SETUP_TOKEN_CREDENTIAL))
+    });
     let verified = verify_setup_token(http, token).await?;
     let label = nickname
         .map(str::to_string)
@@ -1492,10 +1531,9 @@ async fn add_setup_token(
     if nickname.is_some() && !real {
         s.set_account_nickname(&uuid, nickname)?;
     }
-    let host = s.get_host_row(&args.host_alias)?;
-    let mut profiles = host
-        .as_ref()
-        .and_then(|h| h.claude_profiles.clone())
+    let mut profiles = s
+        .get_host_row(&args.host_alias)?
+        .and_then(|h| h.claude_profiles)
         .unwrap_or_default();
     profiles.retain(|p| p.name != args.profile);
     profiles.push(crate::store::HostProfileRow {
@@ -1508,17 +1546,7 @@ async fn add_setup_token(
     s.set_host_profiles(&args.host_alias, &profiles)?;
     // The token signs the profile in: a login health note that it was
     // signed out no longer holds.
-    if let Some(h) = host {
-        let before = h.signed_out_logins.len();
-        let kept: Vec<_> = h
-            .signed_out_logins
-            .into_iter()
-            .filter(|l| l.profile.as_deref() != Some(args.profile.as_str()))
-            .collect();
-        if kept.len() != before {
-            s.set_host_signed_out_logins(&args.host_alias, &kept)?;
-        }
-    }
+    signed_in_by_hand(&s, args, now)?;
     Ok(SetupTokenAdded {
         host_alias: args.host_alias.clone(),
         profile: args.profile.clone(),
@@ -1526,6 +1554,22 @@ async fn add_setup_token(
         email: account.email,
         replaced,
     })
+}
+
+/// A person put a working credential on `args.profile` (a key, a token):
+/// its signed-out note goes, through `login_health::record`, which also
+/// keeps panes that still show the old error from bringing it back.
+fn signed_in_by_hand(s: &Store, args: &AddAccountArgs, now: i64) -> Result<(), IpcError> {
+    crate::service::login_health::record(
+        s,
+        &[crate::service::login_health::Observation {
+            host_alias: args.host_alias.clone(),
+            profile: Some(args.profile.clone()),
+            signed_out: false,
+        }],
+        now,
+    )?;
+    Ok(())
 }
 
 fn login_profile_taken(args: &AddAccountArgs) -> IpcError {

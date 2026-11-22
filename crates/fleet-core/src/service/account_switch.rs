@@ -301,13 +301,38 @@ pub fn plan(
     };
     let is_limited = |uuid: &str| used(uuid).is_some_and(|u| u >= 100.0);
     let sessions = s.list_all_sessions()?;
+    let all_hosts: Vec<HostRow> = s.list_hosts()?;
+    let signed_out_at = |host: &str, profile: Option<&str>| {
+        all_hosts
+            .iter()
+            .find(|h| h.alias == host)
+            .is_some_and(|h| crate::service::login_health::is_signed_out(h, profile))
+    };
     // Accounts some live session in the fleet runs on: their use moves, so
-    // an old reading of theirs may be hours behind.
+    // an old reading of theirs may be hours behind. A session on a
+    // signed-out login spends nothing (review w10-2).
     let in_use: BTreeSet<&str> = sessions
         .iter()
         .filter(|r| r.status != "ghost" && r.lost_at.is_none())
+        .filter(|r| !signed_out_at(&r.host_alias, r.claude_profile.as_deref()))
         .filter_map(|r| r.account_uuid.as_deref())
         .collect();
+    // An account no usage read can reach: every login on it is a setup
+    // token (never a usage source) or signed out. Its newest reading is
+    // from before the sign-out and no newer one comes, so neither the age
+    // limit nor the one-per-new-reading wave can hold for it (w10-2 /
+    // w11-4).
+    let unreadable = |uuid: &str| {
+        use crate::service::login_health::{is_setup_token, is_signed_out};
+        !all_hosts.iter().filter(|h| !h.hidden).any(|h| {
+            let own = h.account_uuid.as_deref() == Some(uuid) && !is_signed_out(h, None);
+            own || h.claude_profiles.iter().flatten().any(|p| {
+                p.account_uuid.as_deref() == Some(uuid)
+                    && !is_setup_token(h, Some(&p.name))
+                    && !is_signed_out(h, Some(&p.name))
+            })
+        })
+    };
     // A target's reading must be recent ([`STALE_TARGET_SECS`], or
     // [`IDLE_TARGET_SECS`] for an account nothing runs on), and newer than
     // the last session sent there. (An old "at the limit" reading is still
@@ -339,7 +364,7 @@ pub fn plan(
     };
     let due = |uuid: &str| used(uuid).is_some_and(|u| u >= line);
     let hosts: Vec<HostRow> =
-        crate::service::hosts::active_hosts(s.list_hosts()?, local_host_enabled)
+        crate::service::hosts::active_hosts(all_hosts.clone(), local_host_enabled)
             .into_iter()
             .filter(|h| h.reachable || h.alias == "local")
             .collect();
@@ -400,7 +425,15 @@ pub fn plan(
             // A signed-out login keeps its last good reading, but a session
             // resumed there lands on `/login`.
             .filter(|l| !crate::service::login_health::is_signed_out(host, l.profile.as_deref()))
-            .filter(|l| fresh_target(&l.account_uuid) && !taken.contains(&l.account_uuid))
+            .filter(|l| {
+                // Off a signed-out login, another login of its own account
+                // (a setup token beside the expired `/login`) needs no new
+                // reading when no read can reach that account: its last one
+                // still says how much is left (docs/accounts.md).
+                let own_way_out =
+                    reason == Reason::SignedOut && l.account_uuid == from && unreadable(&from);
+                (own_way_out || fresh_target(&l.account_uuid)) && !taken.contains(&l.account_uuid)
+            })
             .map(|mut l| {
                 l.used_pct = target_used(&l.account_uuid);
                 l
@@ -440,6 +473,11 @@ pub fn plan(
 
 /// The timeline detail of one attempt: logins by profile, accounts by uuid.
 pub fn detail(p: &Planned, error_code: Option<&str>, jev: Option<&str>) -> String {
+    detail_value(p, error_code, jev).to_string()
+}
+
+/// [`detail`] as JSON, for a failed try to add its backoff to.
+fn detail_value(p: &Planned, error_code: Option<&str>, jev: Option<&str>) -> serde_json::Value {
     serde_json::json!({
         "reason": p.reason,
         "continue": p.continue_after && error_code.is_none(),
@@ -450,7 +488,6 @@ pub fn detail(p: &Planned, error_code: Option<&str>, jev: Option<&str>) -> Strin
         "jev": jev,
         "error": error_code,
     })
-    .to_string()
 }
 
 /// The side effect, injected for tests: resume the session under `profile`
@@ -515,6 +552,9 @@ pub struct Recent {
     /// fetched after that moment arrives, the account's number does not
     /// count the sessions just sent there, so it takes no more.
     pub targets: HashMap<String, i64>,
+    /// `sessions` and `failures` were read back from the timeline
+    /// ([`Recent::seed`]), which happens once per process.
+    pub seeded: bool,
 }
 
 impl Recent {
@@ -529,7 +569,75 @@ impl Recent {
             .min(16);
         (RETRY_AFTER_SECS << doublings).min(MAX_RETRY_AFTER_SECS)
     }
+
+    /// Read the backoff back from the timeline, once per process (review
+    /// w06-4): the map lives in memory, so a hub restart (an update, a
+    /// crash) would otherwise retry every backed-off session at once. Per
+    /// session: its newest switch event is its last try, and the failed
+    /// ones in a row since its last switch that went through are its
+    /// count. What this process already knows is kept.
+    pub fn seed(&mut self, s: &Store, now: i64) -> Result<(), IpcError> {
+        if self.seeded {
+            return Ok(());
+        }
+        self.seeded = true;
+        let events = s.session_events_of_kinds_since(
+            &[EVENT_SWITCHED, EVENT_SWITCH_FAILED],
+            now - MAX_RETRY_AFTER_SECS,
+        )?;
+        let mut i = 0;
+        while i < events.len() {
+            let id = events[i].session_id;
+            let mine: Vec<_> = events[i..]
+                .iter()
+                .take_while(|e| e.session_id == id)
+                .collect();
+            i += mine.len();
+            if self.sessions.contains_key(&id) {
+                continue;
+            }
+            self.sessions.insert(id, mine[0].at);
+            let failed = mine
+                .iter()
+                .take_while(|e| e.kind == EVENT_SWITCH_FAILED)
+                .count() as u32;
+            if failed > 0 {
+                self.failures.insert(id, failed);
+            }
+        }
+        Ok(())
+    }
+
+    /// Forget the backoff of each session a person fixed since its last try
+    /// (review w06-3): a repaired workspace, a recreated session, an
+    /// automatic restore. Its next run plans it at once and its count of
+    /// failures starts over.
+    fn forget_fixed(&mut self, s: &Store) -> Result<(), IpcError> {
+        let tried: Vec<(i64, i64)> = self
+            .failures
+            .keys()
+            .filter_map(|id| self.sessions.get(id).map(|at| (*id, *at)))
+            .collect();
+        for (id, at) in tried {
+            let fixed = s
+                .newest_session_event_of(id, FIXED_KINDS)?
+                .is_some_and(|e| e.at > at);
+            if fixed {
+                self.failures.remove(&id);
+                self.sessions.remove(&id);
+            }
+        }
+        Ok(())
+    }
 }
+
+/// Timeline events that say a person (or the auto-restore) dealt with what
+/// kept a session's switch failing ([`Recent::forget_fixed`]).
+const FIXED_KINDS: &[&str] = &[
+    crate::service::repair::EVENT_REPAIRED,
+    "recreated",
+    crate::service::auto_restore::EVENT_RESTORED,
+];
 
 static RECENT: std::sync::LazyLock<Mutex<Recent>> =
     std::sync::LazyLock::new(|| Mutex::new(Recent::default()));
@@ -545,8 +653,13 @@ pub async fn run_with(
     now: i64,
 ) -> Result<RunReport, IpcError> {
     let planned = {
-        let seen = recent.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let s = lock(store)?;
+        let seen = {
+            let mut r = recent.lock().unwrap_or_else(|e| e.into_inner());
+            r.seed(&s, now)?;
+            r.forget_fixed(&s)?;
+            r.clone()
+        };
         plan(&s, local_host_enabled, &seen, now)?
     };
     let mut report = RunReport::default();
@@ -592,16 +705,23 @@ pub async fn run_with(
                 (EVENT_SWITCH_FAILED, Some(e.code.as_str()))
             }
         };
+        let mut d = detail_value(&p, code, jev_pick.as_deref());
         {
             let mut r = recent.lock().unwrap_or_else(|e| e.into_inner());
             match &result {
                 Ok(()) => {
                     r.failures.remove(&p.session_id);
                 }
-                Err(_) => *r.failures.entry(p.session_id).or_default() += 1,
+                Err(_) => {
+                    *r.failures.entry(p.session_id).or_default() += 1;
+                    // Which try this was and when the next one comes, so the
+                    // timeline can say a session is being backed off (w06-5).
+                    d["failures"] = r.failures[&p.session_id].into();
+                    d["next_try_at"] = (now + r.retry_after(p.session_id)).into();
+                }
             }
         }
-        let d = detail(&p, code, jev_pick.as_deref());
+        let d = d.to_string();
         if let Ok(s) = store.lock() {
             if let Err(e) = s.insert_session_event(p.session_id, kind, Some(&d)) {
                 tracing::warn!(
@@ -620,6 +740,7 @@ pub async fn run_with(
             sessions,
             failures,
             targets,
+            seeded: _,
         } = &mut *r;
         sessions.retain(|id, at| {
             let keep = if failures.contains_key(id) {

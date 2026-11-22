@@ -1063,10 +1063,13 @@ fn write_reachable_host(
         // raises its card, marks its sessions `no_credentials` and leaves it
         // out of placement until a usage read sees it signed in again. A
         // first sighting has no stored profile to tell which login it is.
+        // The line stays until the next turn, so a turn that ended before
+        // the login was signed in again is not noted (review w11-2).
         if let Some(row) = prior_row.filter(|_| pane.is_some_and(|p| p.signed_out)) {
-            crate::service::login_health::note_signed_out(
+            crate::service::login_health::note_signed_out_from_pane(
                 &host.alias,
                 row.claude_profile.as_deref(),
+                row.last_stop_at.unwrap_or(sess.last_activity),
             );
         }
         // PR probe result for this pass (PROD-5). `pr_observed`

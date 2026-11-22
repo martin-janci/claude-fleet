@@ -3140,10 +3140,19 @@ const REDACT_KEYS: &[&str] = &[
 /// tracker credential, for the same reason. `code` is `link_peer`'s one-time
 /// pairing code, still valid when the link fails (review r04 S3), and
 /// `add_account`'s sign-in code. `api_key` is `add_account`'s Anthropic key
-/// (M15 G2.9), which fleet never stores. `value` is also `env_vars`'s, and
-/// `ref` its credential reference (a path or variable name on the hub).
-pub(crate) const SKIP_KEYS: &[&str] =
-    &["confirm_nonce", "value", "secret", "code", "api_key", "ref"];
+/// (M15 G2.9), which fleet never stores, and `setup_token` its long-lived
+/// subscription token (a year-long credential, review w11-1). `value` is
+/// also `env_vars`'s, and `ref` its credential reference (a path or variable
+/// name on the hub).
+pub(crate) const SKIP_KEYS: &[&str] = &[
+    "confirm_nonce",
+    "value",
+    "secret",
+    "code",
+    "api_key",
+    "setup_token",
+    "ref",
+];
 /// Argument keys whose value is an object of person-typed answers (`ask`'s
 /// `values` may carry a form's secret fields): only the field count is kept,
 /// as `<N fields>`, never a name or a value. `args` is a nested payload
@@ -4145,6 +4154,22 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("host_alias=mercury"), "{out}");
+    }
+
+    #[test]
+    fn redact_args_never_keeps_a_setup_token() {
+        let args = serde_json::json!({
+            "action": "setup_token",
+            "setup_token": "sk-ant-oat01-secretsecretsecret",
+            "host_alias": "mercury",
+            "profile": "work",
+        });
+        let out = redact_args(args.as_object());
+        assert!(
+            !out.contains("sk-ant") && !out.contains("setup_token="),
+            "{out}"
+        );
+        assert!(out.contains("profile=work"), "{out}");
     }
 
     #[test]

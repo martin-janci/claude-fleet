@@ -779,14 +779,24 @@ r#"printf 'loginfp=%s\n' "$(for f in "$HOME/.claude/.credentials.json" "$HOME"/.
 /// Keychain locked and falls back to `.credentials.json`. Fleet's local
 /// tmux server is started from the login session, so its sessions read the
 /// Keychain like the desktop app does, and a `.credentials.json` left over
-/// next to it is a copy nothing of fleet's refreshes. For the same reason
-/// the host's own login drops out of `login_fingerprints`: that file is not
-/// the login fleet's local sessions use, so a host it was copied to is not
-/// fighting them over a refresh token. Profiles stay.
-fn local_health(mut sample: HostHealthSample) -> HostHealthSample {
+/// next to it is a copy nothing of fleet's refreshes. For the same reason,
+/// on macOS, the host's own login drops out of `login_fingerprints`: that
+/// file is not the login fleet's local sessions use, so a host it was
+/// copied to is not fighting them over a refresh token. Linux has no
+/// Keychain: there `~/.claude/.credentials.json` IS the own login, and a
+/// copy of it elsewhere races it (review w02-4). Profiles always stay.
+fn local_health(sample: HostHealthSample) -> HostHealthSample {
+    local_health_on(sample, cfg!(target_os = "macos"))
+}
+
+/// PURE: [`local_health`], `keychain` = the process's OS keeps the own
+/// login in a Keychain (macOS).
+fn local_health_on(mut sample: HostHealthSample, keychain: bool) -> HostHealthSample {
     sample.login_split = None;
-    if let Some(fps) = sample.login_fingerprints.as_mut() {
-        fps.retain(|(p, _)| p.is_some());
+    if keychain {
+        if let Some(fps) = sample.login_fingerprints.as_mut() {
+            fps.retain(|(p, _)| p.is_some());
+        }
     }
     sample
 }
@@ -3616,14 +3626,17 @@ mod tests {
             Some(vec![])
         );
         assert_eq!(parse_host_health("uptime=5\n").login_fingerprints, None);
-        // `local`: its own login's file is not what its sessions use.
-        let l = local_health(parse_host_health(
-            "loginfp=_own:0123456789ab p:111111111111\n",
-        ));
+        // `local` on macOS: its own login's file is not what its sessions
+        // use. On Linux it is, so it stays (w02-4).
+        let sample = || parse_host_health("loginfp=_own:0123456789ab p:111111111111\n");
+        let l = local_health_on(sample(), true);
         assert_eq!(
             l.login_fingerprints,
             Some(vec![(Some("p".to_string()), "111111111111".to_string())])
         );
+        let l = local_health_on(sample(), false);
+        assert_eq!(l.login_fingerprints, sample().login_fingerprints);
+        assert_eq!(l.login_split, None);
     }
 
     /// The `loginfp=` line against a fake `$HOME`: one line per login file,

@@ -137,19 +137,38 @@ fn same_token(a: &LoginFingerprint, b: &LoginFingerprint) -> bool {
 /// PURE: the fleet's copied logins, each group two or more logins holding
 /// one refresh token, in host order. A login counts once, in the first
 /// group it matches.
+///
+/// A hidden host takes no part (review w02-3): its fingerprints are frozen
+/// at its last sample, and nobody can sign in a host they hid. Nor does a
+/// profile that signs in with a setup token (w11-5): the probe still hashes
+/// the `.credentials.json` the token sits in front of, a login that profile
+/// no longer uses, and Sign in again is refused for it.
 pub fn copied(hosts: &[HostRow]) -> Vec<Vec<LoginAt>> {
+    let token_profile = |h: &HostRow, f: &LoginFingerprint| {
+        f.profile.as_deref().is_some_and(|name| {
+            h.claude_profiles.iter().flatten().any(|p| {
+                p.name == name
+                    && p.credential.as_deref()
+                        == Some(crate::service::add_account::SETUP_TOKEN_CREDENTIAL)
+            })
+        })
+    };
     let logins: Vec<(LoginAt, &LoginFingerprint)> = hosts
         .iter()
+        .filter(|h| !h.hidden)
         .flat_map(|h| {
-            h.login_fingerprints.iter().map(move |f| {
-                (
-                    LoginAt {
-                        host: h.alias.clone(),
-                        profile: f.profile.clone(),
-                    },
-                    f,
-                )
-            })
+            h.login_fingerprints
+                .iter()
+                .filter(move |f| !token_profile(h, f))
+                .map(move |f| {
+                    (
+                        LoginAt {
+                            host: h.alias.clone(),
+                            profile: f.profile.clone(),
+                        },
+                        f,
+                    )
+                })
         })
         .collect();
     let mut taken = vec![false; logins.len()];
@@ -435,6 +454,29 @@ mod tests {
             s.starts_with("trn: the host login is a copy of one Claude login that is also profile spare on trn"),
             "{s}"
         );
+    }
+
+    #[test]
+    fn a_hidden_host_takes_no_part_in_copied_logins() {
+        let mut old = host_with("old-laptop", &[(None, &["aaaaaaaaaaaa"])]);
+        let new = host_with("new-box", &[(None, &["aaaaaaaaaaaa"])]);
+        assert_eq!(copied(&[old.clone(), new.clone()]).len(), 1);
+        old.hidden = true;
+        assert!(copied(&[old, new]).is_empty());
+    }
+
+    #[test]
+    fn a_setup_token_over_a_copied_login_is_not_a_copied_login() {
+        // work on a was copied to b; a's `work` now signs in with a setup
+        // token, so its `.credentials.json` fingerprint is a dead login.
+        let mut a = host_with("a", &[(Some("work"), &["aaaaaaaaaaaa"])]);
+        let b = host_with("b", &[(Some("work"), &["aaaaaaaaaaaa"])]);
+        assert_eq!(copied(&[a.clone(), b.clone()]).len(), 1);
+        a.claude_profiles = Some(vec![HostProfileRow {
+            credential: Some("setup_token".into()),
+            ..profile("work", Some("setuptoken-x"), None)
+        }]);
+        assert!(copied(&[a, b]).is_empty());
     }
 
     #[test]
