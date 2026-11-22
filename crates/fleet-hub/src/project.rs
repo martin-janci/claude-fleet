@@ -45,6 +45,12 @@ pub async fn run(
                 v["worktrees_folded"],
                 v["other_rows_moved"]
             ));
+            if let Some(prefix) = v["ticket_space_left"].as_str() {
+                out::line(&format!(
+                    "the ticket space {prefix} stayed with the old project ({} has its own); its keys still resolve",
+                    v["into_name"].as_str().unwrap_or("?")
+                ));
+            }
             Ok(ExitCode::SUCCESS)
         }
     }

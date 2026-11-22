@@ -36,6 +36,17 @@ pub(crate) const PROJECT_ID_COLUMNS: &[(&str, &str, ProjectRef)] = &[
     ("worktrees", "project_id", ProjectRef::Worktrees),
 ];
 
+/// Project references the column scan of
+/// `a_project_merge_covers_every_project_column` cannot see, because the
+/// column is not named for a project: `routine_memory.owner_id` under
+/// `scope = 'project'` (a project notebook, migration 204) and
+/// `ticket_spaces.scope` = `project:<id>` (migration 169). The merge
+/// re-homes both by hand, and the test holds this list to the schema; a new
+/// reference of this kind belongs here and in `merge_project`.
+#[cfg(test)]
+pub(crate) const PROJECT_REFS_BY_OTHER_NAME: &[(&str, &str)] =
+    &[("routine_memory", "owner_id"), ("ticket_spaces", "scope")];
+
 /// Every `<table>.<column>` that points at a worktree row: what a merge
 /// re-points at `into`'s row when it folds a twin worktree. Held to the
 /// schema by the same test.
@@ -905,9 +916,17 @@ impl Store {
     /// `into`'s; the rest move
     /// ([`PROJECT_ID_COLUMNS`]). Rows that name the repository in words
     /// (`org_rules`, `project_picks`, the review tables) are left as they
-    /// are. Emits `session:updated` per moved or re-pointed session,
-    /// `worktree:updated` / `worktree:removed` per worktree row, and
-    /// `project:updated` for `into`.
+    /// are. The project notebooks of `from`'s routines and its ticket space
+    /// (`PROJECT_REFS_BY_OTHER_NAME`) become `into`'s unless it has its
+    /// own. Emits `session:updated` per moved or re-pointed session,
+    /// `worktree:updated` per moved local worktree row, `worktree:removed`
+    /// per folded one, `account:upserted` per account whose forbidden
+    /// projects changed, and `project:updated` for `into`.
+    ///
+    /// Refused (`E_INVALID`) when the two rows are not one checkout: their
+    /// base paths differ, or a twin worktree has another path; and
+    /// (`E_INVALID_STATE`) while `from` has a live session, as
+    /// `forget_project` is.
     pub fn merge_project(
         &self,
         from: i64,
@@ -921,6 +940,7 @@ impl Store {
             ));
         }
         let mut names = Vec::with_capacity(2);
+        let mut bases = Vec::with_capacity(2);
         for id in [from, into] {
             let Some(p) = fetch_project(&self.conn, id)? else {
                 return Err(IpcError::new(
@@ -935,9 +955,60 @@ impl Store {
                 ));
             }
             names.push(format!("{}/{}", p.owner, p.repo));
+            bases.push(p.base_path.trim_end_matches('/').to_string());
         }
         let into_name = names.pop().unwrap_or_default();
         let from_name = names.pop().unwrap_or_default();
+        // The merge is for two rows over ONE checkout (docs/hub.md). Two
+        // directories (the github layout keeps `owner/repo` in the path)
+        // would come apart again on the next scan, which re-registers the
+        // old one from its path, and a session on a folded twin would carry
+        // the other directory's worktree row (review w05-4).
+        if bases[0] != bases[1] {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "{from_name} ({}) and {into_name} ({}) are two checkouts, not one; remove or rename the old checkout first, then merge",
+                    bases[0], bases[1]
+                ),
+            ));
+        }
+        let crossed_twin: Option<(String, String, String, String)> = self
+            .conn
+            .query_row(
+                "SELECT w1.host_alias, w1.name, w1.path, w2.path FROM worktrees w1
+                   JOIN worktrees w2 ON w2.project_id = ?2 AND w2.host_alias = w1.host_alias
+                    AND w2.name = w1.name
+                  WHERE w1.project_id = ?1 AND w1.path IS NOT w2.path
+                  ORDER BY w1.id LIMIT 1",
+                rusqlite::params![from, into],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        if let Some((host, name, a, b)) = crossed_twin {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "worktree {name} on {host} is {a} under {from_name} but {b} under {into_name}: two checkouts, not one; remove or rename the old checkout first, then merge"
+                ),
+            ));
+        }
+        // A live session of `from` is refused, as `forget_project` refuses
+        // one: a reconcile pass that read the project list before the merge
+        // writes `from`'s id after it, and the foreign key fails that host's
+        // whole write (review w05-7).
+        let live = self.project_live_session_count(from)?;
+        if live > 0 {
+            return Err(IpcError::new(
+                codes::E_INVALID_STATE,
+                format!(
+                    "{from_name} has {live} live session(s); kill or move them first, then merge"
+                ),
+            ));
+        }
+        // Its forbidden accounts change rows: announced after the commit, so
+        // no client keeps `from`'s dead id on them (review w05-3 / w20-2).
+        let reblocked = self.accounts_blocked_for_project(from)?;
         let ids = |conn: &Connection, sql: &str, params: &[i64]| -> rusqlite::Result<Vec<i64>> {
             let mut stmt = conn.prepare(sql)?;
             let rows =
@@ -1024,17 +1095,52 @@ impl Store {
             "DELETE FROM env_vars WHERE scope = 'project' AND scope_key = ?1",
             [&from_name],
         )?;
+        // Project notebooks of its routines (migration 204), which now read
+        // `into`'s: into's own wins per circle, as with the variables above.
+        // Left behind, the next project to reuse `from`'s rowid would read
+        // them (review w05-1).
+        tx.execute(
+            "UPDATE OR IGNORE routine_memory SET owner_id = ?2 \
+              WHERE scope = 'project' AND owner_id = ?1",
+            rusqlite::params![from, into],
+        )?;
+        tx.execute(
+            "DELETE FROM routine_memory WHERE scope = 'project' AND owner_id = ?1",
+            [from],
+        )?;
+        // Its ticket space, whose prefix the moved items' keys carry: it
+        // becomes `into`'s unless `into` has one already, so `into` does not
+        // take a second prefix beside it (review w05-2). A space left behind
+        // still resolves its keys, and the report names it.
+        tx.execute(
+            "UPDATE OR IGNORE ticket_spaces SET scope = 'project:' || ?2 \
+              WHERE scope = 'project:' || ?1",
+            rusqlite::params![from, into],
+        )?;
+        let ticket_space_left: Option<String> = tx
+            .query_row(
+                "SELECT prefix FROM ticket_spaces WHERE scope = 'project:' || ?1",
+                [from],
+                |r| r.get(0),
+            )
+            .optional()?;
         tx.execute("DELETE FROM projects WHERE id = ?1", [from])?;
         tx.commit()?;
         for id in &wt_folded {
             self.bus.worktree_removed(*id);
         }
+        // Local rows only, as `upsert_worktree_on` emits: the project tree
+        // lists local rows, and a remote row event would add a row the next
+        // list does not have (review w05-3).
         for id in &wt_moved {
             if let Some(row) = self.get_worktree_row(*id)? {
-                self.bus.worktree_updated(&row);
+                if row.host_alias == crate::service::projects::LOCAL_HOST {
+                    self.bus.worktree_updated(&row);
+                }
             }
         }
         self.emit_sessions_updated(&touched);
+        self.announce_accounts(&reblocked);
         if let Some(row) = fetch_project(&self.conn, into)? {
             self.bus.project_updated(&row);
         }
@@ -1047,6 +1153,7 @@ impl Store {
             worktrees_moved: wt_moved.len(),
             worktrees_folded: wt_folded.len(),
             other_rows_moved,
+            ticket_space_left,
         })
     }
 
@@ -1355,6 +1462,28 @@ mod tests {
             found, listed,
             "PROJECT_ID_COLUMNS must name every project-id column, and only those"
         );
+        // The references by another name the scan above cannot see: each
+        // must still exist, or the merge's hand-written re-homing of it is
+        // stale (review w05-1 / w20-1).
+        for (t, c) in PROJECT_REFS_BY_OTHER_NAME {
+            assert!(
+                col(&format!("PRAGMA table_info(\"{t}\")"), 1).contains(&c.to_string()),
+                "{t}.{c} is listed in PROJECT_REFS_BY_OTHER_NAME but not in the schema"
+            );
+        }
+        // A notebook is keyed by `(scope, owner_id)`: a new scope that names
+        // a project must be re-homed by the merge too.
+        let scope_check: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'routine_memory'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            scope_check.contains("scope IN ('routine', 'project')"),
+            "routine_memory's scopes changed; tell merge_project: {scope_check}"
+        );
         // The same for what points at a worktree row, which a folded twin
         // must hand over.
         let mut found: BTreeSet<(String, String)> = BTreeSet::new();
@@ -1396,24 +1525,48 @@ mod tests {
     /// survivor's row too.
     #[test]
     fn a_merge_folds_one_project_into_the_other() {
-        let s = Store::open_in_memory().unwrap();
+        let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
         s.upsert_host("mac").unwrap();
-        let old = s.upsert_project("frantisek", "app", "/p/old").unwrap();
-        let new = s.upsert_project("sales-twins", "app", "/p/new").unwrap();
+        s.upsert_host(crate::service::projects::LOCAL_HOST).unwrap();
+        // One checkout, registered under both names (the flat layout).
+        let old = s.upsert_project("frantisek", "app", "/p/app").unwrap();
+        let new = s.upsert_project("sales-twins", "app", "/p/app/").unwrap();
         let wt = |pid, name: &str| {
             s.upsert_worktree_on("mac", pid, name, &format!("/co/.worktrees/{name}"), None)
                 .unwrap()
         };
         let (old_feat, old_only, new_feat) =
             (wt(old, "feat"), wt(old, "only-old"), wt(new, "feat"));
-        let sess = |name: &str, pid, wid| {
-            s.upsert_session(name, "mac", Some(pid), Some(wid), 1, 1, "running", None)
+        let local_only = s
+            .upsert_worktree_on(
+                crate::service::projects::LOCAL_HOST,
+                old,
+                "local-only",
+                "/p/app/.worktrees/local-only",
+                None,
+            )
+            .unwrap();
+        // The old project's sessions are gone (ghost rows): a live one is
+        // refused, `a_merge_refuses_a_live_session_of_the_old_project`.
+        let sess = |name: &str, pid, wid, status| {
+            s.upsert_session(name, "mac", Some(pid), Some(wid), 1, 1, status, None)
                 .unwrap()
         };
-        let on_twin = sess("on-twin", old, old_feat);
-        let on_own = sess("on-own", old, old_only);
-        let already_new = sess("already-new", new, new_feat);
-        let crossed = sess("crossed", new, old_feat);
+        let on_twin = sess("on-twin", old, old_feat, "ghost");
+        let on_own = sess("on-own", old, old_only, "ghost");
+        let already_new = sess("already-new", new, new_feat, "running");
+        let crossed = sess("crossed", new, old_feat, "ghost");
+        // Project notebooks of its routines: the survivor's wins in a circle
+        // both have, the old one's moves in a circle only it has.
+        for (pid, circle, body) in [(old, 0, "old"), (new, 0, "new"), (old, 5, "old-5")] {
+            s.set_routine_memory("project", (pid, circle), body, "person", None, 1)
+                .unwrap();
+        }
+        // The old project's ticket space; the survivor has none yet.
+        let space = s.project_ticket_space(old).unwrap();
+        account_row(&s, "acct-a");
+        account_row(&s, "acct-b");
         // A start rule both have (the survivor's is kept) and one only the
         // old project has (it moves); the same for a project-scope variable.
         for (pid, pattern) in [(old, "APP-"), (new, "APP-"), (old, "OLD-")] {
@@ -1439,6 +1592,7 @@ mod tests {
                 .unwrap();
         }
 
+        bus.take();
         let rep = s.merge_project(old, new).unwrap();
         assert_eq!(
             rep,
@@ -1448,11 +1602,51 @@ mod tests {
                 from_name: "frantisek/app".into(),
                 into_name: "sales-twins/app".into(),
                 sessions_moved: 2,
-                worktrees_moved: 1,
+                worktrees_moved: 2,
                 worktrees_folded: 1,
                 // The start rule and the forbidden account only the old had.
                 other_rows_moved: 2,
+                ticket_space_left: None,
             }
+        );
+        let events = bus.take();
+        for uuid in ["acct-a", "acct-b"] {
+            assert!(
+                events.contains(&format!("account:upserted:{uuid}")),
+                "{uuid} is announced: {events:?}"
+            );
+        }
+        assert!(
+            events.contains(&format!("worktree:updated:{local_only}")),
+            "{events:?}"
+        );
+        assert!(
+            !events.contains(&format!("worktree:updated:{old_only}")),
+            "no event for a moved remote row: {events:?}"
+        );
+        assert_eq!(
+            s.get_account_by_uuid("acct-b")
+                .unwrap()
+                .unwrap()
+                .forbidden_project_ids,
+            vec![new]
+        );
+        let notebook = |pid, circle| {
+            s.get_routine_memory("project", pid, circle)
+                .unwrap()
+                .map(|m| m.body)
+        };
+        assert_eq!(
+            notebook(new, 0).as_deref(),
+            Some("new"),
+            "the survivor's wins"
+        );
+        assert_eq!(notebook(new, 5).as_deref(), Some("old-5"), "the rest moves");
+        assert_eq!((notebook(old, 0), notebook(old, 5)), (None, None));
+        assert_eq!(
+            s.project_ticket_space(new).unwrap().id,
+            space.id,
+            "the survivor takes the old space and its prefix"
         );
         assert!(
             s.get_project(old).unwrap().is_none(),
@@ -1541,6 +1735,77 @@ mod tests {
             ],
             "all under the survivor's name; its own value wins"
         );
+    }
+
+    fn account_row(s: &Store, uuid: &str) {
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: uuid.into(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    /// Review w05-2: when the survivor already has a ticket space, the old
+    /// one is left (its keys still resolve) and the report names it.
+    #[test]
+    fn a_merge_into_a_project_with_its_own_ticket_space_names_the_one_left() {
+        let s = Store::open_in_memory().unwrap();
+        let old = s.upsert_project("frantisek", "app", "/p/app").unwrap();
+        let new = s.upsert_project("sales-twins", "app", "/p/app").unwrap();
+        let left = s.project_ticket_space(old).unwrap();
+        let own = s.project_ticket_space(new).unwrap();
+        let rep = s.merge_project(old, new).unwrap();
+        assert_eq!(rep.ticket_space_left, Some(left.prefix.clone()));
+        assert_eq!(s.project_ticket_space(new).unwrap().id, own.id);
+        assert!(s.ticket_space(left.id).unwrap().is_some());
+    }
+
+    /// Review w05-4: two rows over two checkouts are no merge: the next
+    /// scan would split them again from the paths.
+    #[test]
+    fn a_merge_refuses_two_checkouts() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mac").unwrap();
+        let old = s
+            .upsert_project("frantisek", "app", "/proj/github.com/frantisek/app")
+            .unwrap();
+        let new = s
+            .upsert_project("sales-twins", "app", "/proj/github.com/sales-twins/app")
+            .unwrap();
+        let e = s.merge_project(old, new).unwrap_err();
+        assert_eq!(e.code, "E_INVALID", "{}", e.message);
+        assert!(e.message.contains("old checkout"), "{}", e.message);
+        // One base path, but a twin worktree in another directory.
+        let new2 = s
+            .upsert_project("acme", "app", "/proj/github.com/frantisek/app")
+            .unwrap();
+        s.upsert_worktree_on("mac", old, "feat", "/a/.worktrees/feat", None)
+            .unwrap();
+        s.upsert_worktree_on("mac", new2, "feat", "/b/.worktrees/feat", None)
+            .unwrap();
+        let e = s.merge_project(old, new2).unwrap_err();
+        assert_eq!(e.code, "E_INVALID", "{}", e.message);
+        assert!(e.message.contains("worktree feat"), "{}", e.message);
+        assert!(s.get_project(old).unwrap().is_some());
+    }
+
+    /// Review w05-7: a live session of the project that would go refuses
+    /// the merge, as `forget_project` refuses it.
+    #[test]
+    fn a_merge_refuses_a_live_session_of_the_old_project() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mac").unwrap();
+        let old = s.upsert_project("frantisek", "app", "/p/app").unwrap();
+        let new = s.upsert_project("sales-twins", "app", "/p/app").unwrap();
+        let sid = s
+            .upsert_session("live", "mac", Some(old), None, 1, 1, "running", None)
+            .unwrap();
+        let e = s.merge_project(old, new).unwrap_err();
+        assert_eq!(e.code, "E_INVALID_STATE", "{}", e.message);
+        s.conn_for_test()
+            .execute("UPDATE sessions SET status = 'ghost' WHERE id = ?1", [sid])
+            .unwrap();
+        s.merge_project(old, new).unwrap();
     }
 
     #[test]

@@ -3681,6 +3681,13 @@ moved from one to the other by whichever worktree row is newer. Fold the old
 row into the new one in one transaction:
 
 1. Back up first, as above.
+   The merge refuses two rows that are not one checkout (`E_INVALID`):
+   different base paths, or a worktree of one name on one host at two
+   paths. With the github layout the old name is its own directory
+   (`…/github.com/<old-owner>/<repo>`); remove or rename the old checkout
+   first, then merge, or the next scan registers it again. It also refuses
+   while the `from` row has a live session (`E_INVALID_STATE`), as
+   `forget_project` does: kill or move those sessions first.
 2. Find the two ids with `list_projects`, then, with the hub running:
    `fleet-hub project merge <from> <into>` (or the
    `merge_project {from, into}` tool with the master token). `from` is the
@@ -3694,7 +3701,10 @@ What moves: sessions, `pull_requests`, `work_items` and `work_links`,
 worktrees `into` lacks. What keeps `into`'s own: a worktree with the same
 host and name (the sessions and mission lanes on `from`'s row point at
 `into`'s), a start rule, a PR-shepherd rule, a mission repo, a forbidden
-account, and a project-scope environment variable. Forbidden accounts add
+account, a project-scope environment variable, a routine's project
+notebook (per circle) and the ticket space (a `from` space left beside
+`into`'s own is named in the reply as `ticket_space_left`; its keys still
+resolve). Forbidden accounts add
 up: after the merge the project forbids every account either row did. What is
 left alone: rows that name the repository in words (`org_rules`,
 `project_picks`, the review tables), and the checkouts on the hosts. What is

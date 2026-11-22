@@ -1561,6 +1561,11 @@ pub struct ProjectMergeReport {
     /// Rows moved in the other tables: pull requests, work items and links,
     /// routines, rules.
     pub other_rows_moved: usize,
+    /// The prefix of `from`'s ticket space when `into` already had one of
+    /// its own, so it was left as it is (its keys still resolve); `None`
+    /// when it became `into`'s or there was none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket_space_left: Option<String>,
 }
 
 /// The only values `hosts.transport` may hold (migration 034). The single
