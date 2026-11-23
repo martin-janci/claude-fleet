@@ -37,6 +37,12 @@ describe('storageAttentionItems', () => {
     expect(backup.detail).toContain('the newest backup is 3 days old');
     expect(storageAttentionItems({ backup_stale: true }, NOW)[0].detail).toContain('the hub has no backup');
   });
+
+  it('says when the disk reading has hung', () => {
+    const [disk] = storageAttentionItems({ disk_unreadable: true, read_at: NOW - 600 }, NOW);
+    expect(disk.label).toBe('Hub disk not answering');
+    expect(disk.detail).toContain('last read 10 min ago');
+  });
 });
 
 describe('TrackerAttention with the storage items', () => {

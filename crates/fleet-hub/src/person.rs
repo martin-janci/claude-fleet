@@ -249,8 +249,15 @@ pub fn run(
     opts: &HubOptions,
     env: &HashMap<String, String>,
 ) -> Result<ExitCode, String> {
-    crate::serve::existing_db(&crate::config::resolve_data_dir(opts, env))?;
-    let store = crate::serve::open_store(opts, env)?;
+    // `list` reads only: never the migrating open (review w11-6).
+    let store = if matches!(cmd, PersonCmd::List { .. }) {
+        crate::dbarg::open_read_only(&crate::serve::existing_db(
+            &crate::config::resolve_data_dir(opts, env),
+        )?)?
+    } else {
+        crate::serve::existing_db(&crate::config::resolve_data_dir(opts, env))?;
+        crate::serve::open_store(opts, env)?
+    };
     match cmd {
         PersonCmd::List { json } => {
             let people = store.list_people().map_err(|e| e.message)?;

@@ -298,9 +298,24 @@ export function dashboardQueries(d: Dashboard): Map<string, StatsAsk> {
 }
 
 /** Where a summary widget keeps the text it was written last, per device:
- *  the dashboard and the widget's title. */
+ *  the dashboard and the widget's slot (`widgetSlots`: its title, made
+ *  unique when two widgets share one). */
 export function summaryKey(dashId: string, title: string): string {
   return `ui.dashboards.summary.${dashId}|${title}`;
+}
+
+/** Each widget's title, with " #2", " #3", … after a title an earlier
+ *  widget already has. Nothing refuses two widgets of one title, and what is
+ *  kept or compared per widget by title alone mixed them up: two summaries
+ *  overwrote each other's text (review w14-4). The first keeps its plain
+ *  title, so what is already kept under it still reads. */
+export function widgetSlots(widgets: readonly Pick<Widget, 'title'>[]): string[] {
+  const seen = new Map<string, number>();
+  return widgets.map((w) => {
+    const n = (seen.get(w.title) ?? 0) + 1;
+    seen.set(w.title, n);
+    return n === 1 ? w.title : `${w.title} #${n}`;
+  });
 }
 
 /** A burn-up's start for `days` days ending today, as `work_stats` takes
@@ -649,8 +664,9 @@ export function workspaceDashboard(builtin: Dashboard, pinned: readonly PinnedDa
 /** In words, what a replacement changes: widgets added, removed and
  *  changed, by title. Empty when only the title or intro moved. */
 export function dashboardChanges(from: Dashboard, to: Dashboard): string[] {
-  const before = new Map(from.widgets.map((w) => [w.title, JSON.stringify(w)]));
-  const after = new Map(to.widgets.map((w) => [w.title, JSON.stringify(w)]));
+  const slots = (d: Dashboard) => widgetSlots(d.widgets);
+  const before = new Map(slots(from).map((t, i) => [t, JSON.stringify(from.widgets[i])]));
+  const after = new Map(slots(to).map((t, i) => [t, JSON.stringify(to.widgets[i])]));
   const out: string[] = [];
   for (const [t, w] of after) {
     if (!before.has(t)) out.push(`adds “${t}”`);

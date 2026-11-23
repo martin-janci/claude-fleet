@@ -893,6 +893,27 @@ pub(crate) fn normalize_launch(args: &mut NewSessionArgs) -> Result<(), IpcError
     }
     if let Some(e) = args.effort.as_deref() {
         crate::validate::effort_level(e)?;
+        effort_taken_by(args.agent.as_deref())?;
+    }
+    Ok(())
+}
+
+/// `E_INVALID` when the agent `agent` (`None` = Claude Code) takes no effort
+/// at launch (its adapter lists no effort levels, as Hermes'): stored, the
+/// effort would show in the launch summary and be kept by every relaunch
+/// without ever reaching the agent (review w20-4).
+pub(crate) fn effort_taken_by(agent: Option<&str>) -> Result<(), IpcError> {
+    let Some(a) = agent.and_then(crate::agent_adapter::by_id) else {
+        return Ok(());
+    };
+    if a.effort_levels().is_empty() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{} takes no effort at launch; set it in the session instead",
+                a.label()
+            ),
+        ));
     }
     Ok(())
 }

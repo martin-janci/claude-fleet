@@ -1625,6 +1625,22 @@ pub struct ReviewExecutor {
 }
 
 impl ReviewExecutor {
+    /// The rule `action`'s job came from; `None` once it was revoked.
+    fn rule_of(
+        &self,
+        action: &crate::store::AgentActionRow,
+    ) -> Result<Option<crate::store::AgentRuleRow>, String> {
+        let s = self.store.lock().map_err(|_| "store lock".to_string())?;
+        let job = s
+            .agent_job(action.job_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("the job is gone")?;
+        match job.rule_id {
+            None => Ok(None),
+            Some(id) => s.agent_rule(id).map_err(|e| e.to_string()),
+        }
+    }
+
     /// A debate reply: while the pull request is open, whatever its head;
     /// a concession is kept as the location's exemption and its thread
     /// resolved.
@@ -1683,6 +1699,16 @@ impl super::AgentExecutor for ReviewExecutor {
         use super::ActionResult;
         fn parse<T: serde::de::DeserializeOwned>(payload: &str) -> Result<T, ActionResult> {
             serde_json::from_str(payload).map_err(|e| ActionResult::Failed(format!("payload: {e}")))
+        }
+        // w15-2: a revoked rule, or one set back to watch, sends nothing, as
+        // the other executors do.
+        match self.rule_of(action) {
+            Ok(Some(rule)) if rule.level == "watch" => {
+                return ActionResult::Expired("the rule is at watch now".into())
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => return ActionResult::Expired("the rule was revoked".into()),
+            Err(e) => return ActionResult::Failed(e),
         }
         if action.kind == debate::DEBATE_REPLY {
             return self.post_debate_reply(action).await;

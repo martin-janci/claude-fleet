@@ -274,6 +274,29 @@ pub fn missions(store: &Mutex<Store>, scope: &ViewScope) -> Result<Vec<MissionRo
     Ok(out)
 }
 
+/// `work { action: missions, waiting: true }`: only the missions that wait
+/// on a person, which is all the phone's always-on watcher reads (review
+/// w19-2: it fetched every mission ever made, with spend, each minute).
+/// Only an active mission can wait, so the others are never read; the
+/// caller passes the read pool.
+pub fn waiting_missions(
+    store: &Mutex<Store>,
+    scope: &ViewScope,
+) -> Result<Vec<MissionRow>, IpcError> {
+    let s = lock(store)?;
+    let now = crate::store::now_unix();
+    let mut out = Vec::new();
+    for mut m in s.list_active_missions()? {
+        if sees_mission(&s, scope, &m)? || reads_as_worker(&s, scope, &m)? {
+            super::orchestrate::fill_spend(&s, &mut m, now)?;
+            if m.waiting_on.is_some() {
+                out.push(m);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// `work { action: mission, mission_id, before_event? }`.
 pub fn mission(
     store: &Mutex<Store>,

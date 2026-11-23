@@ -120,8 +120,38 @@ pub fn merge_project(
     args: MergeProjectArgs,
     store: &Mutex<Store>,
 ) -> Result<crate::store::ProjectMergeReport, IpcError> {
+    // `from`'s local paths that are no longer a checkout of their own:
+    // read under the lock, stat'ed without it (review w01-2).
+    let (paths, into_base) = {
+        let s = lock(store)?;
+        let base = |id: i64| -> Result<Option<String>, IpcError> {
+            Ok(s.get_project(id)?
+                .map(|p| p.base_path.trim_end_matches('/').to_string()))
+        };
+        let mut paths: Vec<String> = base(args.from)?.into_iter().collect();
+        paths.extend(
+            s.list_worktrees_for_project(args.from)?
+                .into_iter()
+                .map(|w| w.path),
+        );
+        (paths, base(args.into)?)
+    };
+    let gone = if crate::service::hub::local_host_enabled() {
+        let into_canon = into_base.as_deref().map(canonical_str);
+        paths
+            .into_iter()
+            // Only an absolute path can be looked at here.
+            .filter(|p| std::path::Path::new(p).is_absolute())
+            .filter(|p| {
+                !std::path::Path::new(p).exists()
+                    || into_canon.as_deref() == Some(&canonical_str(p))
+            })
+            .collect()
+    } else {
+        HashSet::new()
+    };
     let s = lock(store)?;
-    s.merge_project_with(args.from, args.into, args.dry_run)
+    s.merge_project_checked(args.from, args.into, args.dry_run, &gone)
 }
 
 /// The configured `projects.layout`.
@@ -481,6 +511,39 @@ mod tests {
     use super::*;
 
     const HOME: &str = "/home/u";
+
+    /// Review w01-2: a github-layout rename leaves the old row on its old
+    /// base path for good. Once that checkout is gone from disk the merge
+    /// goes through; while it still exists it is refused.
+    #[test]
+    fn a_merge_goes_through_once_the_old_checkout_is_gone() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let old_dir = tmp.path().join("frantisek/app");
+        let new_dir = tmp.path().join("sales-twins/app");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::create_dir_all(&new_dir).unwrap();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let (old, new) = {
+            let s = store.lock().unwrap();
+            (
+                s.upsert_project("frantisek", "app", old_dir.to_str().unwrap())
+                    .unwrap(),
+                s.upsert_project("sales-twins", "app", new_dir.to_str().unwrap())
+                    .unwrap(),
+            )
+        };
+        let args = |dry_run| MergeProjectArgs {
+            from: old,
+            into: new,
+            confirm_nonce: None,
+            dry_run,
+        };
+        let e = merge_project(args(true), &store).unwrap_err();
+        assert_eq!(e.code, "E_INVALID", "{}", e.message);
+        std::fs::remove_dir_all(&old_dir).unwrap();
+        merge_project(args(false), &store).unwrap();
+        assert!(store.lock().unwrap().get_project(old).unwrap().is_none());
+    }
 
     fn local_root(setting: Option<&str>, env: Option<&str>, layout: Layout) -> String {
         expand_home(&resolve_base(setting, env, layout, true), HOME)

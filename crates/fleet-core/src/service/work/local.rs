@@ -839,6 +839,7 @@ fn comment_post(
             ),
         ));
     }
+    trackers::write_back::refuse_unsendable(s, &t)?;
     let Some(item_key) = crate::service::work::tracker_comments::outbox_key(&item) else {
         return Err(IpcError::new(
             codes::E_UNSUPPORTED,

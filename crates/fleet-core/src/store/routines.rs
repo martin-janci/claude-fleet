@@ -795,13 +795,66 @@ impl Store {
         )?)
     }
 
+    /// The sessions of finished routine runs the scheduler closes (w06-8):
+    /// `(session id, host, tmux name)`, oldest run first, at most `limit`.
+    /// A session qualifies when its run closed `done` with an outcome other
+    /// than `needs_person`, no run of it is open, it is still running on a
+    /// reachable host that is not hidden, Claude has been idle in it and its
+    /// pane quiet since `idle_before`, and it is not among the `keep` newest
+    /// live sessions of its routine. A session a person touched is never
+    /// one: pinned, prompted or attached after its run started
+    /// (`last_touch_at`, which fleet's own prompts do not stamp), or opened
+    /// (`last_viewed_at` after the run started; a `nothing` run is stamped
+    /// viewed when it is read as such, so for it only a look over an hour
+    /// after it closed counts). Nor is one a safe-kill is under way for.
+    pub fn routine_sessions_to_close(
+        &self,
+        idle_before: i64,
+        keep: i64,
+        limit: i64,
+    ) -> Result<Vec<(i64, String, String)>, IpcError> {
+        let mut stmt = self.conn.prepare(
+            "WITH live AS ( \
+               SELECT rr.id AS run_id, rr.state, rr.outcome, rr.started_at AS run_started, \
+                      rr.finished_at, s.id AS sid, s.host_alias, s.tmux_name, s.idle_since, \
+                      s.last_activity_at, s.claude_status, s.pinned_at, s.safe_kill_state, \
+                      s.kind, s.last_touch_at, s.last_viewed_at, \
+                      ROW_NUMBER() OVER (PARTITION BY rr.routine_id \
+                                         ORDER BY rr.started_at DESC, rr.id DESC) AS newest \
+                 FROM routine_runs rr JOIN sessions s ON s.id = rr.session_id \
+                WHERE s.status = 'running') \
+             SELECT l.sid, l.host_alias, l.tmux_name FROM live l \
+               JOIN hosts h ON h.alias = l.host_alias AND h.reachable = 1 AND h.hidden = 0 \
+              WHERE l.newest > ?2 \
+                AND l.state = 'done' AND COALESCE(l.outcome, '') <> 'needs_person' \
+                AND l.finished_at IS NOT NULL \
+                AND l.idle_since IS NOT NULL AND l.idle_since <= ?1 \
+                AND l.last_activity_at <= ?1 \
+                AND COALESCE(l.claude_status, '') <> 'working' \
+                AND l.pinned_at IS NULL AND l.safe_kill_state IS NULL AND l.kind <> 'external' \
+                AND COALESCE(l.last_touch_at, 0) <= l.run_started \
+                AND (l.last_viewed_at IS NULL OR l.last_viewed_at <= l.run_started \
+                     OR (l.outcome = 'nothing' AND l.last_viewed_at <= l.finished_at + 3600)) \
+                AND NOT EXISTS (SELECT 1 FROM routine_runs o \
+                                 WHERE o.session_id = l.sid AND o.state = 'running') \
+              ORDER BY l.finished_at ASC, l.run_id ASC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![idle_before, keep, limit], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// The failed runs to start again (`retry_once`, M15 G3.8): each is
-    /// its routine's newest run, started at or after `since` (or
+    /// its routine's newest run, failed (its `finished_at`, else its start;
+    /// w06-1) at or after `since` (or
     /// `rate_limited_since` for a run that ended at a rate limit, whose
     /// retry waits for the limit to lift, which can take days), not itself
     /// a retry (`trigger_ref` `retry:<id>`), of a routine that is on and
     /// asks for it. A retry that is skipped or fails is newer than the run
-    /// it retried, so a run is retried at most once. Oldest first.
+    /// it retried, so a run is retried at most once. A failure a second run
+    /// cannot fix is not retried (w06-2): the time cap or budget it hit, a
+    /// signed-out login, an account the project forbids. Oldest first.
     pub fn routine_runs_to_retry(
         &self,
         since: i64,
@@ -810,8 +863,9 @@ impl Store {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {RUN_COLS_RR} FROM routine_runs rr JOIN routines r ON r.id = rr.routine_id \
              WHERE rr.state = 'failed' \
-               AND (rr.started_at >= ?1 \
-                    OR (rr.error_code = ?3 AND rr.started_at >= ?2)) \
+               AND (COALESCE(rr.finished_at, rr.started_at) >= ?1 \
+                    OR (rr.error_code = ?3 AND COALESCE(rr.finished_at, rr.started_at) >= ?2)) \
+               AND COALESCE(rr.error_code, '') NOT IN (?4, ?5, ?6, ?7) \
                AND r.enabled = 1 AND r.retry_once = 1 \
                AND (rr.trigger_ref IS NULL OR rr.trigger_ref NOT LIKE 'retry:%') \
                AND NOT EXISTS (SELECT 1 FROM routine_runs n \
@@ -822,7 +876,11 @@ impl Store {
             rusqlite::params![
                 since,
                 rate_limited_since,
-                crate::service::routines::fix::E_TURN_RATE_LIMIT
+                crate::service::routines::fix::E_TURN_RATE_LIMIT,
+                crate::service::routines::fix::E_RUN_TIME_CAP,
+                crate::service::routines::fix::E_RUN_BUDGET,
+                crate::service::routines::fix::E_TURN_AUTH,
+                crate::ipc_error::codes::E_ACCOUNT_FORBIDDEN,
             ],
             run,
         )?;

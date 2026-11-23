@@ -87,8 +87,11 @@ pub async fn handle_capture(
             )
                 .into_response()
         }
+        // Not 409: the host's stand-in cannot read a body (stdout is the PCM
+        // pipe), so the status alone tells "busy" from "no claim" (review
+        // w20-5).
         Err(CaptureRefusal::Busy) => {
-            return (StatusCode::CONFLICT, "this session is already recording\n").into_response()
+            return (StatusCode::LOCKED, "this session is already recording\n").into_response()
         }
         Err(CaptureRefusal::SourceFailed(e)) => {
             tracing::warn!(session_id, error = %e, "[voice] source failed to start");

@@ -1623,6 +1623,9 @@ pub struct SessionShareParams {
     /// watch (read it), answer (also answer its dialogs) or drive (also
     /// prompt it). Nothing else — "own" is not a grantable level.
     pub level: String,
+    /// The operator's approved confirmation (sec-access-5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -1645,6 +1648,9 @@ pub struct ReviewRequestParams {
     /// list: also done ones; done: false reopens
     #[serde(default)]
     pub done: Option<bool>,
+    /// The operator's approved confirmation (sec-access-5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -1657,6 +1663,9 @@ pub struct SessionGrantParams {
     /// Or an org.
     #[serde(default)]
     pub org: Option<String>,
+    /// The operator's approved confirmation (sec-access-5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -1686,6 +1695,9 @@ pub struct AccessRequestsParams {
     /// grant / decline: the ask's id.
     #[serde(default)]
     pub id: Option<i64>,
+    /// The operator's approved confirmation (sec-access-5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

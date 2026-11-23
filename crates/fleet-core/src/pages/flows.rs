@@ -224,10 +224,12 @@ pub async fn submit(
         touched: Instant::now(),
     };
     let rendered = render(store, flow_id, &state, error)?;
-    registry()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(flow_id.to_string(), state);
+    // Only while the flow is still open: a Cancel, or another submit that
+    // finished it, while this one's test was out must not bring it back
+    // (review w14-7).
+    let mut map = registry().lock().unwrap_or_else(|p| p.into_inner());
+    let open = map.get_mut(flow_id).ok_or_else(|| unknown(flow_id))?;
+    *open = state;
     Ok(Outcome::Step(rendered))
 }
 
@@ -1064,6 +1066,50 @@ mod tests {
         );
         assert_eq!(again.step, "url");
         assert!(again.error.is_some());
+    }
+
+    /// Cancels `flow` while the test is out, then fails it as a tracker
+    /// would.
+    struct CancelMidTest {
+        flow: String,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::net::https::HttpTransport for CancelMidTest {
+        async fn send(
+            &self,
+            _req: crate::net::https::Request,
+        ) -> Result<Response, crate::net::https::TransportError> {
+            cancel(&self.flow);
+            Ok(Response::new(401, ""))
+        }
+    }
+
+    /// Review w14-7: a Cancel while the submit's test is out stays a cancel.
+    #[tokio::test]
+    async fn a_flow_cancelled_while_its_test_runs_does_not_come_back() {
+        let st = Mutex::new(Store::open_in_memory().unwrap());
+        let s = start(
+            &st,
+            "tracker.connect",
+            &vals(&[("url", "https://acme.atlassian.net/browse/ABC-1")]),
+        )
+        .unwrap();
+        step(
+            submit(&st, &failing_net(), &s.flow_id, &BTreeMap::new())
+                .await
+                .unwrap(),
+        );
+        let net = TrackerNet::fake(Arc::new(CancelMidTest {
+            flow: s.flow_id.clone(),
+        }));
+        let creds = vals(&[("email", "dev@example.com"), ("token", "ATATT-not-real")]);
+        let e = submit(&st, &net, &s.flow_id, &creds)
+            .await
+            .expect_err("the flow was cancelled");
+        assert_eq!(e.code, codes::E_NOTFOUND);
+        assert!(registry().lock().unwrap().get(&s.flow_id).is_none());
+        assert!(back(&st, &s.flow_id).is_err());
     }
 
     #[tokio::test]

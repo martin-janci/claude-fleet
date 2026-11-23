@@ -153,6 +153,29 @@ export function feedBy(f: DashboardFeed): string {
   return 'you';
 }
 
+/** The bytes of JSON a summary's feeds may take together: the hub refuses a
+ *  context over 24 KiB (`SUMMARY_CONTEXT_MAX_BYTES`), and the other sources,
+ *  keys and stamps keep the rest. */
+export const SUMMARY_FEEDS_MAX_BYTES = 20 * 1024;
+
+const utf8 = new TextEncoder();
+const jsonBytes = (v: string) => utf8.encode(JSON.stringify(v)).length;
+
+/** `value`, cut at a character so that it is at most `max` bytes as a JSON
+ *  string, its end marked with "…". */
+export function cutToJsonBytes(value: string, max: number): string {
+  if (jsonBytes(value) <= max) return value;
+  const chars = Array.from(value);
+  let lo = 0;
+  let hi = chars.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (jsonBytes(chars.slice(0, mid).join('') + '…') <= max) lo = mid;
+    else hi = mid - 1;
+  }
+  return chars.slice(0, lo).join('') + '…';
+}
+
 /** What a summary widget sends besides its request (`context`): the facts
  *  of each source but work, which the hub counts itself. Empty: none.
  *  `feedKeys`: the feeds its dashboard's `feed` widgets name, the only ones
@@ -169,7 +192,13 @@ export function summaryContext(
     if (s === 'work') continue;
     if (s === 'feeds') {
       const named = [...new Set(feedKeys)].flatMap((k) => (feeds[k] ? [feeds[k]] : []));
-      out.feeds = Object.fromEntries(named.map((f) => [f.key, { value: f.value, by: feedBy(f), at: f.updated_at }]));
+      // Each feed gets its share of the hub's cap, or a few long values
+      // (non-ASCII, escaped newlines) put the whole context over it and the
+      // hub refuses the summary for good (review w14-2).
+      const share = Math.floor(SUMMARY_FEEDS_MAX_BYTES / Math.max(1, named.length));
+      out.feeds = Object.fromEntries(
+        named.map((f) => [f.key, { value: cutToJsonBytes(f.value, share), by: feedBy(f), at: f.updated_at }]),
+      );
       continue;
     }
     const f = fleetFacts(s, d, now);

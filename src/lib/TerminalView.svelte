@@ -992,8 +992,31 @@
       }
 
       // A shell terminal is (re)made before the attach: `open` is a no-op
-      // for one that is up, and brings back one a host reboot took.
-      if (shellN != null) {
+      // for one that is up, and brings back one a host reboot took. Not on
+      // a self-heal: the attach usually ended because someone closed the
+      // terminal (the strip's ×, another device, MCP), and `open` would
+      // bring it back (review w12-1). A self-heal only re-attaches one that
+      // is still listed; a click still recreates one.
+      if (shellN != null && isAutoReconnect) {
+        const now = await shellTerminals(sess.id, 'list');
+        if (standDown()) return;
+        if (!now.ok) {
+          scheduleAutoReconnect(target.tmux_name, target.host_alias);
+          return;
+        }
+        if (now.value && !now.value.terminals.some((t) => t.n === shellN)) {
+          if (isRoot) {
+            // The strip drops the tab; the pane goes back to the agent.
+            takeTerminals(now.value);
+          } else {
+            openError =
+              popout === undefined
+                ? 'This terminal was closed.'
+                : 'This terminal was closed. Close this window.';
+          }
+          return;
+        }
+      } else if (shellN != null) {
         const made = await shellTerminals(sess.id, 'open', shellN);
         if (standDown()) return;
         if (!made.ok) {
@@ -1033,10 +1056,13 @@
       }
       if (standDown()) {
         // The attach landed after the pane let go of it. Nobody will drain it
-        // and the backend keeps one PTY per id, so close it — no newer open
-        // can have taken over, they are serialized by `opening`.
+        // and the backend keeps one PTY per id, so close it. By its
+        // generation: `opening` serializes this pane's opens, not another
+        // pane's under the same id, whose attach must survive (review w12-3).
         try {
-          await invoke('pty_close', { args: { id: PTY_ID } });
+          await invoke('pty_close', {
+            args: typeof opened === 'number' ? { id: PTY_ID, generation: opened } : { id: PTY_ID },
+          });
         } catch {
           /* nothing to undo */
         }
@@ -1184,10 +1210,11 @@
     // region — so the Screen can't be repaired from the stream. Drop it and
     // re-attach: a fresh attach re-sends all of that and redraws.
     if (result.overflowed) {
-      // Re-attach as a self-heal, not as a fresh user-initiated open: the
-      // budget must keep counting, or a session that overflows repeatedly
-      // would reconnect for ever and never raise the banner.
-      void openTerm(true);
+      // Re-attach as a self-heal, not as a fresh user-initiated open: through
+      // the budget and its back-off, or a session that overflows on every
+      // attach (`yes` over a slow link) would reconnect at once, for ever,
+      // and never raise the banner (review w12-4).
+      scheduleAutoReconnect();
       return false;
     }
     if (result.bytes > 0) {

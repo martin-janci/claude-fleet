@@ -40,6 +40,8 @@ struct FakeSpawn {
     typed: Mutex<Vec<(i64, String)>>,
     /// Typing a prompt fails, saying this.
     untypable: Mutex<Option<String>>,
+    /// The finished runs' sessions closed: `(host, tmux name)`.
+    closed: Mutex<Vec<(String, String)>>,
 }
 
 #[async_trait::async_trait]
@@ -81,6 +83,13 @@ impl tick::Spawn for FakeSpawn {
     }
     async fn stop_turn(&self, host_alias: &str, tmux_name: &str) -> Result<(), IpcError> {
         self.stopped
+            .lock()
+            .unwrap()
+            .push((host_alias.to_string(), tmux_name.to_string()));
+        Ok(())
+    }
+    async fn close(&self, host_alias: &str, tmux_name: &str) -> Result<(), IpcError> {
+        self.closed
             .lock()
             .unwrap()
             .push((host_alias.to_string(), tmux_name.to_string()));
@@ -150,6 +159,7 @@ fn fx() -> Fx {
         stopped: Mutex::new(Vec::new()),
         typed: Mutex::new(Vec::new()),
         untypable: Mutex::new(None),
+        closed: Mutex::new(Vec::new()),
     });
     let deps = Deps {
         store: Arc::clone(&store),
@@ -679,6 +689,153 @@ async fn a_run_settles_on_its_sessions_turn() {
 }
 
 use super::tick::RUN_STALE_SECS;
+
+/// w06-3: a run past the stale window whose session still works stays open,
+/// so `overlap: skip` still holds the next fire off its checkout; once its
+/// session is no longer working it fails, and its turn is stopped.
+#[tokio::test]
+async fn a_stale_run_stays_open_while_its_session_works() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+    let sid = run.session_id.unwrap();
+    // Its prompt was typed: only the stale rule is under test here.
+    {
+        let s = lock(&f.store).unwrap();
+        let ids: Vec<i64> = s
+            .undelivered_handovers(sid)
+            .unwrap()
+            .iter()
+            .map(|h| h.id)
+            .collect();
+        s.mark_handovers_delivered(&ids, None).unwrap();
+    }
+    let status = |status: &str, idle: Option<i64>| {
+        lock(&f.store)
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = ?1, idle_since = ?2 WHERE id = ?3",
+                rusqlite::params![status, idle, sid],
+            )
+            .unwrap();
+    };
+    let state = || {
+        lock(&f.store)
+            .unwrap()
+            .get_routine_run(run.id)
+            .unwrap()
+            .unwrap()
+    };
+    status("working", None);
+    tick_once(&f.deps, OCT8 + RUN_STALE_SECS + 1).await;
+    assert_eq!(
+        state().state,
+        "running",
+        "its session is still at it: {:?}",
+        state()
+    );
+    assert!(f.fake.stopped.lock().unwrap().is_empty());
+    status("idle", Some(OCT8 + RUN_STALE_SECS));
+    tick_once(&f.deps, OCT8 + RUN_STALE_SECS + 30).await;
+    let failed = state();
+    assert_eq!(failed.state, "failed");
+    assert_eq!(failed.error_code.as_deref(), Some(fix::E_RUN_STALE));
+    assert_eq!(
+        f.fake.stopped.lock().unwrap().len(),
+        1,
+        "its turn is stopped"
+    );
+}
+
+/// w06-8: a finished run's session is closed after twelve hours idle, but
+/// never one of its routine's three newest, one a person touched or opened,
+/// one pinned, or one whose run needs a person.
+#[tokio::test]
+async fn a_finished_runs_idle_session_is_closed_unless_kept() {
+    use super::tick::{RUN_SESSIONS_KEPT, RUN_SESSION_IDLE_SECS};
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    let mut sids = Vec::new();
+    for n in 0..8 {
+        let at = OCT8 + n * 600;
+        let run = run_now(&f.deps, &ana, r.id, at).await.unwrap();
+        let sid = run.session_id.unwrap();
+        let s = lock(&f.store).unwrap();
+        let outcome = if n == 3 { "needs_person" } else { "did_work" };
+        s.conn_ref()
+            .execute(
+                "UPDATE routine_runs SET state = 'done', finished_at = ?1, outcome = ?2 \
+                 WHERE id = ?3",
+                rusqlite::params![at + 300, outcome, run.id],
+            )
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'idle', idle_since = ?1, \
+                 last_activity_at = ?1 WHERE id = ?2",
+                rusqlite::params![at + 300, sid],
+            )
+            .unwrap();
+        sids.push((sid, at));
+    }
+    {
+        let s = lock(&f.store).unwrap();
+        // Run 0: a person typed into it after it ran; run 1: one opened it;
+        // run 2: pinned; run 3 needs a person. Runs 5–7 are the newest.
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET last_touch_at = ?1 WHERE id = ?2",
+                rusqlite::params![sids[0].1 + 400, sids[0].0],
+            )
+            .unwrap();
+        s.touch_session_viewed(sids[1].0, sids[1].1 + 400).unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET pinned_at = ?1 WHERE id = ?2",
+                rusqlite::params![OCT8, sids[2].0],
+            )
+            .unwrap();
+    }
+    let name = |sid: i64| {
+        lock(&f.store)
+            .unwrap()
+            .get_session_by_id(sid)
+            .unwrap()
+            .unwrap()
+            .tmux_name
+    };
+    let later = OCT8 + 8 * 600 + RUN_SESSION_IDLE_SECS;
+    // Its host is not reachable: nothing to try.
+    tick_once(&f.deps, later).await;
+    assert!(f.fake.closed.lock().unwrap().is_empty());
+    lock(&f.store)
+        .unwrap()
+        .conn_ref()
+        .execute("UPDATE hosts SET reachable = 1 WHERE alias = 'mac'", [])
+        .unwrap();
+    // Not yet idle long enough.
+    tick_once(&f.deps, OCT8 + 300 + RUN_SESSION_IDLE_SECS - 60).await;
+    assert!(f.fake.closed.lock().unwrap().is_empty());
+    tick_once(&f.deps, later).await;
+    let closed: Vec<String> = f
+        .fake
+        .closed
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, t)| t.clone())
+        .collect();
+    assert_eq!(closed, vec![name(sids[4].0)], "only run 4's session goes");
+    assert_eq!(RUN_SESSIONS_KEPT, 3);
+    let events = lock(&f.store)
+        .unwrap()
+        .list_session_events(sids[4].0, 50)
+        .unwrap();
+    assert!(events.iter().any(|e| e.kind == "gc_killed"), "{events:?}");
+}
 
 #[tokio::test]
 async fn a_run_over_its_budget_fails_and_pauses_the_routine() {
@@ -1957,6 +2114,27 @@ fn preview_lists_the_next_runs_the_scheduler_uses_across_a_dst_change() {
     };
     let p = preview(&f.store, &ana, None, &after, fri_oct23_noon).unwrap();
     assert_eq!(p.next_runs[0], mon_oct26 + 7 * H + 30 * 60);
+    assert!(!p.zoned);
+    // w06-7: saved with its zone it stays on 08:30 local through the change,
+    // with nothing to save again.
+    let zoned = RoutineInput {
+        time_zone: Some("Europe/Bratislava".into()),
+        ..line.clone()
+    };
+    let p = preview(&f.store, &ana, None, &zoned, OCT8 + 15 * 86_400).unwrap();
+    assert!(p.zoned);
+    assert_eq!(
+        p.next_runs[0],
+        OCT8 + 15 * 86_400 + 6 * H + 30 * 60,
+        "Fri 08:30 CEST"
+    );
+    assert_eq!(p.next_runs[1], mon_oct26 + 7 * H + 30 * 60, "Mon 08:30 CET");
+    let saved = save(&f.store, &ana, None, &zoned).unwrap();
+    assert_eq!(saved.time_zone.as_deref(), Some("Europe/Bratislava"));
+    assert_eq!(
+        saved.next_run_at,
+        super::next_fire_of(&saved, crate::store::now_unix())
+    );
     // And it is the very fire save schedules.
     let saved = save(&f.store, &ana, None, &line).unwrap();
     let now = crate::store::now_unix();
@@ -2151,6 +2329,44 @@ async fn a_failed_run_is_retried_once_and_never_again() {
     run_now(&f.deps, &ana, late.id, OCT8).await.unwrap();
     tick_once(&f.deps, OCT8 + tick::RETRY_WITHIN_SECS + 60).await;
     assert_eq!(runs_of(&f, late.id).len(), 1);
+}
+
+/// w06-1: the retry window counts from when the run failed, not from its
+/// start, so a run that fails 70 minutes in is still retried. w06-2: a
+/// failure a second run cannot fix (its time cap, its login) is not.
+#[tokio::test]
+async fn a_run_that_fails_late_is_retried_and_a_capped_one_is_not() {
+    let f = fx();
+    let ana = person(&f.store, None, f.ana);
+    let fail_at = |run: i64, code: &str, at: i64| {
+        let s = lock(&f.store).unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE routine_runs SET state = 'failed', error_code = ?1, finished_at = ?2 \
+                 WHERE id = ?3",
+                rusqlite::params![code, at, run],
+            )
+            .unwrap();
+    };
+    let late = retrying_routine(&f);
+    let run = run_now(&f.deps, &ana, late.id, OCT8).await.unwrap();
+    fail_at(run.id, fix::E_TURN_FAILED, OCT8 + 70 * 60);
+    tick_once(&f.deps, OCT8 + 70 * 60 + 20).await;
+    let runs = runs_of(&f, late.id);
+    assert_eq!(runs.len(), 2, "retried: {runs:?}");
+    assert_retry_of(&runs[1], run.id);
+
+    for code in [
+        fix::E_RUN_TIME_CAP,
+        fix::E_TURN_AUTH,
+        codes::E_ACCOUNT_FORBIDDEN,
+    ] {
+        let r = retrying_routine(&f);
+        let run = run_now(&f.deps, &ana, r.id, OCT8 + 5000).await.unwrap();
+        fail_at(run.id, code, OCT8 + 5100);
+        tick_once(&f.deps, OCT8 + 5120).await;
+        assert_eq!(runs_of(&f, r.id).len(), 1, "{code} is not retried");
+    }
 }
 
 /// A run that ended at a rate limit waits for the limit to lift (F16); a

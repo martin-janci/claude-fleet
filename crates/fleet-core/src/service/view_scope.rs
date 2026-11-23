@@ -98,6 +98,17 @@ impl<'a> SessionFacts<'a> {
             owner_person_id: row.owner_person_id,
         }
     }
+
+    /// The facts as [`crate::store::Store::session_facts_by_id`] read them.
+    pub fn of_facts(row: &'a crate::store::SessionFactsRow) -> Self {
+        SessionFacts {
+            id: row.id,
+            host_alias: &row.host_alias,
+            org_id: row.org_id,
+            visibility: &row.visibility,
+            owner_person_id: row.owner_person_id,
+        }
+    }
 }
 
 /// The live grants TO one person, as session id → level

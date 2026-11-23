@@ -239,6 +239,16 @@ impl Url {
     }
 }
 
+/// Opens the TCP stream a [`Client`] speaks over, where a plain connect to
+/// the URL's host is not the way out: `fleet-agent`'s HTTP proxy (`CONNECT`
+/// tunnel). Review w10-2: without it an agent behind `--proxy` could never
+/// update itself.
+#[async_trait::async_trait]
+pub trait Dial: Send + Sync {
+    /// A stream to `host:port`, ready for TLS.
+    async fn dial(&self, host: &str, port: u16) -> Result<tokio::net::TcpStream, String>;
+}
+
 /// HTTP(S) over TCP, with the image's CA bundle for TLS.
 #[derive(Clone)]
 pub struct Client {
@@ -247,6 +257,8 @@ pub struct Client {
     /// Sent as `Host:` instead of the URL's authority (the hub's public name
     /// while connecting to it inside the compose network).
     host_header: Option<String>,
+    /// How the TCP stream is opened; `None` connects directly.
+    dial: Option<Arc<dyn Dial>>,
 }
 
 const CA_BUNDLES: [&str; 4] = [
@@ -273,11 +285,18 @@ impl Client {
             tls: if tls { Some(connector(ca_file)?) } else { None },
             timeout,
             host_header: None,
+            dial: None,
         })
     }
 
     pub fn with_host_header(mut self, host: Option<String>) -> Self {
         self.host_header = host;
+        self
+    }
+
+    /// Open every connection through `dial` (a proxy) instead of directly.
+    pub fn with_dial(mut self, dial: Option<Arc<dyn Dial>>) -> Self {
+        self.dial = dial;
         self
     }
 
@@ -311,9 +330,12 @@ impl Client {
     /// that speaks more than one request and one answer over it (the
     /// Kubernetes exec WebSocket). No timeout of its own.
     pub async fn connect(&self, u: &Url) -> Result<Box<dyn Io>, String> {
-        let tcp = tokio::net::TcpStream::connect((u.host.as_str(), u.port))
-            .await
-            .map_err(|e| format!("{}: {e}", u.authority()))?;
+        let tcp = match &self.dial {
+            Some(d) => d.dial(&u.host, u.port).await?,
+            None => tokio::net::TcpStream::connect((u.host.as_str(), u.port))
+                .await
+                .map_err(|e| format!("{}: {e}", u.authority()))?,
+        };
         if !u.tls {
             return Ok(Box::new(tcp));
         }

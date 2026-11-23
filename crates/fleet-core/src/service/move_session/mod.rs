@@ -6199,6 +6199,55 @@ mod tests {
         }
     }
 
+    /// Review w01-3: the kill landed but its reconcile failed. The source
+    /// row is removed by the move itself, so the mission still counts the
+    /// lead's spend once.
+    #[tokio::test]
+    async fn mission_spend_is_counted_once_when_the_kills_reconcile_fails() {
+        let f = fixture();
+        let m = {
+            let s = f.store.lock().unwrap();
+            let m = s
+                .create_mission(
+                    &crate::store::NewMission {
+                        name: "m",
+                        goal: "g",
+                        ..Default::default()
+                    },
+                    "fleet",
+                )
+                .unwrap()
+                .id;
+            let mut tasks = Vec::new();
+            for t in ["a", "b"] {
+                let item = s.create_local_work_item(None, t).unwrap().id;
+                s.set_mission_item(m, item, true, "fleet").unwrap();
+                let task = s.insert_task(None, Some(f.source_id), t, "n").unwrap();
+                s.set_task_run(task.id, item, 1, "implement").unwrap();
+                tasks.push(task.id);
+            }
+            s.conn_ref()
+                .execute(
+                    "UPDATE tasks SET state = 'done', finished_at = 100 WHERE id = ?1",
+                    [tasks[0]],
+                )
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET usage_cost_micros = 40000000 WHERE id = ?1",
+                    [f.source_id],
+                )
+                .unwrap();
+            m
+        };
+        let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.kill_then_reconcile_fails = true;
+        run(&f, &hooks, false).await.expect("move");
+        let s = f.store.lock().unwrap();
+        assert!(s.get_session_by_id(f.source_id).unwrap().is_none());
+        assert_eq!(s.mission_cost_micros(m).unwrap(), 40_000_000);
+    }
+
     /// A pinned session whose move stops at a failed source kill keeps its
     /// pin: both sessions live on, and `resolve_move`'s undo kills the
     /// target trusting the source still holds its own.

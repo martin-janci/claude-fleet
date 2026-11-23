@@ -59,7 +59,12 @@ fn token_minter(caller: &Caller) -> Result<Minter, IpcError> {
     if caller.is_master() {
         return Ok(Minter::Admin);
     }
+    // The owner's own device, not any fleet admin's: a named token always
+    // resolves as the hub's owner, so a second person mapped to fleet-admin
+    // would mint a token that reads the owner's private sessions, and that
+    // outlives `person disable` (review w11-1).
     if caller.is_fleet_admin_device()
+        && caller.is_personal_owner
         && caller.is_trusted_client()
         && caller.mode == TokenMode::Full
     {

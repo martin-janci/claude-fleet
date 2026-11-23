@@ -402,6 +402,21 @@ pub async fn accept_trust_on(
     host_alias: &str,
     tmux_name: &str,
 ) -> Result<PressEnterOutcome, IpcError> {
+    answer_trust(ssh, host_alias, tmux_name, false)
+        .await
+        .map(|o| o.unwrap_or(PressEnterOutcome::Sent))
+}
+
+/// [`accept_trust_on`]'s work. `by_person`: a person's own Enter (w02-1),
+/// which is typed whoever else has the terminal open (the desktop's view is
+/// a plain `tmux attach`), and which, when the pane no longer shows a trust
+/// dialog at all, answers `Ok(None)` so the caller presses its plain Enter.
+async fn answer_trust(
+    ssh: &dyn crate::ssh::SshExec,
+    host_alias: &str,
+    tmux_name: &str,
+    by_person: bool,
+) -> Result<Option<PressEnterOutcome>, IpcError> {
     use crate::tmux::NamedKey;
     crate::validate::host_alias(host_alias)?;
     crate::validate::tmux_name_addressable(tmux_name)?;
@@ -416,12 +431,26 @@ pub async fn accept_trust_on(
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     };
-    let attached =
-        crate::ssh::run_shell(ssh, host_alias, &attached_probe_script(tmux_name), timeout).await?;
-    if !attached.status.success() || pane_is_attached(&String::from_utf8_lossy(&attached.stdout)) {
-        return Ok(PressEnterOutcome::SkippedAttached);
+    if !by_person {
+        let attached =
+            crate::ssh::run_shell(ssh, host_alias, &attached_probe_script(tmux_name), timeout)
+                .await?;
+        if !attached.status.success()
+            || pane_is_attached(&String::from_utf8_lossy(&attached.stdout))
+        {
+            return Ok(Some(PressEnterOutcome::SkippedAttached));
+        }
     }
-    let arrow = match trust_yes_move(&run(capture_pane_script(tmux_name)).await?) {
+    let pane = run(capture_pane_script(tmux_name)).await?;
+    let arrow = match trust_yes_move(&pane) {
+        // Answered already (the row's `stuck_kind` is behind the pane): a
+        // person's Enter is theirs to press.
+        None if by_person
+            && crate::service::pane_intel::analyze(&pane).stuck
+                != Some(crate::service::pane_intel::StuckKind::TrustPrompt) =>
+        {
+            return Ok(None)
+        }
         None => {
             return Err(IpcError::new(
                 codes::E_INVALID,
@@ -446,7 +475,7 @@ pub async fn accept_trust_on(
         }
     }
     run(press_enter_script(tmux_name)).await?;
-    Ok(PressEnterOutcome::Sent)
+    Ok(Some(PressEnterOutcome::Sent))
 }
 
 /// A person's Enter into a session stopped at the folder-trust dialog,
@@ -458,10 +487,10 @@ pub async fn accept_trust_on(
 /// `No, exit`, so the bare key ended the session it was meant to free. Done
 /// here, on the hub, a phone that predates the fix is fixed too.
 ///
-/// `None` when the row is not at `stuck_kind: trust_prompt`: the caller
-/// presses its Enter as before. A pane someone is attached to gets no key
-/// (`E_INVALID_STATE`); a dialog fleet cannot read gets none either
-/// (`E_INVALID`, from [`accept_trust_on`]).
+/// `None` when the row is not at `stuck_kind: trust_prompt`, or the pane no
+/// longer shows the dialog: the caller presses its Enter as before. The key
+/// is the person's own, so it is typed whoever is attached (w02-1); a
+/// dialog fleet cannot read gets none (`E_INVALID`).
 pub async fn enter_answers_trust(
     store: &Mutex<Store>,
     ssh: &dyn crate::ssh::SshExec,
@@ -478,15 +507,16 @@ pub async fn enter_answers_trust(
     if !at_trust {
         return None;
     }
-    Some(match accept_trust_on(ssh, host_alias, tmux_name).await {
-        Ok(PressEnterOutcome::Sent) => Ok(()),
-        Ok(PressEnterOutcome::SkippedAttached) => Err(IpcError::new(
+    match answer_trust(ssh, host_alias, tmux_name, true).await {
+        Ok(None) => None,
+        Ok(Some(PressEnterOutcome::Sent)) => Some(Ok(())),
+        Ok(Some(PressEnterOutcome::SkippedAttached)) => Some(Err(IpcError::new(
             codes::E_INVALID_STATE,
             "someone is attached to that session's terminal, so fleet typed nothing into its \
              folder-trust dialog; answer it there",
-        )),
-        Err(e) => Err(e),
-    })
+        ))),
+        Err(e) => Some(Err(e)),
+    }
 }
 
 #[async_trait::async_trait]
@@ -1156,12 +1186,21 @@ mod tests {
             crate::ssh_fake::Match::script(&attached_probe_script("work-1")),
             crate::ssh_fake::Reply::ok("1\n"),
         );
-        let err = enter_answers_trust(&store, &attached, "h1", "work-1")
+        // w02-1: a person's Enter is typed though the desktop has the
+        // terminal open (a plain `tmux attach`).
+        enter_answers_trust(&store, &attached, "h1", "work-1")
             .await
             .expect("routed")
-            .unwrap_err();
-        assert_eq!(err.code, codes::E_INVALID_STATE, "{err:?}");
-        assert!(keys_sent(&attached).is_empty());
+            .unwrap();
+        assert_eq!(keys_sent(&attached), ["Down", "Enter"]);
+
+        // The dialog was answered in the terminal and the row is behind:
+        // the caller's own Enter goes, not an error.
+        let answered = trust_host("❯ \n", "❯ \n");
+        assert!(enter_answers_trust(&store, &answered, "h1", "work-1")
+            .await
+            .is_none());
+        assert!(keys_sent(&answered).is_empty());
     }
 
     #[test]

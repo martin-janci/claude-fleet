@@ -32,6 +32,43 @@
 use super::*;
 use crate::ipc_error::lock;
 
+/// Who a share names, for its card: the person, or `org <name>`.
+fn grantee(person: &str, org: Option<&str>) -> String {
+    match org {
+        Some(o) if person.trim().is_empty() => format!("org {o}"),
+        _ => person.to_string(),
+    }
+}
+
+impl FleetTools {
+    /// The owner gate (`reach`, always `Reach::Own` at the call sites, which
+    /// name it so the reach scanner in tests sees it) on `session_id`, then, for the
+    /// operator, a person's approval of `summary` (sec-access-5, D3=b): who
+    /// may read and drive the owner's session is the owner's to say, so
+    /// Control's share asks on a card. The store's lock is not held across
+    /// the confirm gate, which takes it itself.
+    #[allow(clippy::too_many_arguments)]
+    fn own_then_confirm(
+        &self,
+        caller: &Caller,
+        session_id: i64,
+        reach: Reach,
+        what: &str,
+        tool: &str,
+        nonce: Option<&str>,
+        summary: &str,
+    ) -> Result<(), McpError> {
+        {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            resolve_row_and_gate(&s, caller, Some(session_id), None, None, reach, what)?;
+        }
+        if caller.is_operator() {
+            self.confirm_gate(tool, nonce, summary, caller)?;
+        }
+        Ok(())
+    }
+}
+
 #[tool_router(router = sharing_router, vis = "pub(super)")]
 impl FleetTools {
     #[tool(description = "Share a session you OWN with a person, or an org \
@@ -50,19 +87,24 @@ impl FleetTools {
                 p.session_id, p.person, p.org, p.level
             ),
         );
-        let s = lock(&self.store).map_err(to_mcp_err)?;
         // `Reach::Own`: re-sharing is the `own` tier (spec §4.3 invariant 5),
         // which is where "a grantee cannot grant on" is enforced — a `drive`
         // grantee reaches `may_drive` and never `may_own`.
-        resolve_row_and_gate(
-            &s,
+        self.own_then_confirm(
             &caller,
-            Some(p.session_id),
-            None,
-            None,
+            p.session_id,
             Reach::Own,
             "the session to share",
+            "session_share",
+            p.confirm_nonce.as_deref(),
+            &format!(
+                "share session {} with {} at {}",
+                p.session_id,
+                grantee(&p.person, p.org.as_deref()),
+                p.level
+            ),
         )?;
+        let s = lock(&self.store).map_err(to_mcp_err)?;
         let granter = super::fleet::owner_for(&caller, &s);
         let to = sessions::ShareTo::from_fields(&p.person, p.org.as_deref()).map_err(to_mcp_err)?;
         let row = sessions::share_session_to(&s, p.session_id, to, &p.level, granter)
@@ -85,16 +127,20 @@ impl FleetTools {
                 p.session_id, p.person, p.org
             ),
         );
-        let s = lock(&self.store).map_err(to_mcp_err)?;
-        resolve_row_and_gate(
-            &s,
+        self.own_then_confirm(
             &caller,
-            Some(p.session_id),
-            None,
-            None,
+            p.session_id,
             Reach::Own,
             "the session to unshare",
+            "session_unshare",
+            p.confirm_nonce.as_deref(),
+            &format!(
+                "revoke {}'s grant on session {}",
+                grantee(&p.person, p.org.as_deref()),
+                p.session_id
+            ),
         )?;
+        let s = lock(&self.store).map_err(to_mcp_err)?;
         let granter = super::fleet::owner_for(&caller, &s);
         let to = sessions::ShareTo::from_fields(&p.person, p.org.as_deref()).map_err(to_mcp_err)?;
         let row =
@@ -117,16 +163,20 @@ impl FleetTools {
                 p.session_id, p.person, p.org
             ),
         );
-        let s = lock(&self.store).map_err(to_mcp_err)?;
-        resolve_row_and_gate(
-            &s,
+        self.own_then_confirm(
             &caller,
-            Some(p.session_id),
-            None,
-            None,
+            p.session_id,
             Reach::Own,
             "the session to narrow a grant on",
+            "session_narrow",
+            p.confirm_nonce.as_deref(),
+            &format!(
+                "lower {}'s grant on session {} to watch",
+                grantee(&p.person, p.org.as_deref()),
+                p.session_id
+            ),
         )?;
+        let s = lock(&self.store).map_err(to_mcp_err)?;
         let granter = super::fleet::owner_for(&caller, &s);
         let to = sessions::ShareTo::from_fields(&p.person, p.org.as_deref()).map_err(to_mcp_err)?;
         let row =
@@ -247,7 +297,6 @@ impl FleetTools {
                 p.session_id, p.person, p.id
             ),
         );
-        let s = lock(&self.store).map_err(to_mcp_err)?;
         if action == "ask" {
             // A readonly or answer-only device may list and finish the asks
             // to its person (`guard::PERSON_INBOX_TOOLS`), never ask: an ask
@@ -262,17 +311,21 @@ impl FleetTools {
             // `Reach::Own`: asking shares the session, which is the owner's.
             // A missing session_id is the shared function's refusal.
             if let Some(sid) = p.session_id {
-                resolve_row_and_gate(
-                    &s,
+                self.own_then_confirm(
                     &caller,
-                    Some(sid),
-                    None,
-                    None,
+                    sid,
                     Reach::Own,
                     "the session to ask a review of",
+                    "review_request",
+                    p.confirm_nonce.as_deref(),
+                    &format!(
+                        "ask {} to review session {sid} (shares it)",
+                        p.person.as_deref().unwrap_or("?")
+                    ),
                 )?;
             }
         }
+        let s = lock(&self.store).map_err(to_mcp_err)?;
         let me = super::fleet::owner_for(&caller, &s);
         let view = caller.view_scope(&s).map_err(to_mcp_err)?;
         let args = sessions::ReviewRequestArgs {
@@ -358,6 +411,20 @@ impl FleetTools {
                     "the session the ask is about",
                 )
                 .map_err(|_| not_found())?;
+                // sec-access-5: the operator's grant widens who drives the
+                // owner's session, so a person approves it on a card.
+                let s = if action == "grant" && caller.is_operator() {
+                    drop(s);
+                    self.confirm_gate(
+                        "access_requests",
+                        p.confirm_nonce.as_deref(),
+                        &format!("grant access request {id} on session {session_id}"),
+                        &caller,
+                    )?;
+                    lock(&self.store).map_err(to_mcp_err)?
+                } else {
+                    s
+                };
                 let view = sessions::resolve_access_request(&s, id, action == "grant", owner)
                     .map_err(to_mcp_err)?;
                 ok_json(&view)

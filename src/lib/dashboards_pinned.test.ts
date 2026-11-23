@@ -25,6 +25,7 @@ import {
   dashboardFeeds,
   dashboardBlock,
   dashboardChanges,
+  widgetSlots,
   followPinned,
   loadFeeds,
   loadPinned,
@@ -113,6 +114,18 @@ describe('pinned dashboards', () => {
     await unpinDashboard(release.id);
     expect(get(pinnedDashboards)).toEqual([]);
     expect(rows.size).toBe(0);
+  });
+
+  it('tells two widgets of one title apart (review w14-4)', () => {
+    const two = (b: string): Dashboard => ({
+      ...release,
+      widgets: [
+        { kind: 'summary', title: 'Status', query: {}, prompt: 'a' },
+        { kind: 'summary', title: 'Status', query: {}, prompt: b },
+      ],
+    });
+    expect(widgetSlots(two('b').widgets)).toEqual(['Status', 'Status #2']);
+    expect(dashboardChanges(two('b'), two('c'))).toEqual(['changes “Status #2”']);
   });
 
   it('says why the hub refused, and keeps the list as it was', async () => {

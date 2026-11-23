@@ -999,6 +999,10 @@ fn handle(
             let _ = out.send(Out::Frame(pong));
         }
         HubFrame::Cancel { id } => {
+            // A chunked upload the hub gave up on: its pieces so far are
+            // dropped, not kept for a final frame that will not come
+            // (review w10-4).
+            link.assembly.forget(&id);
             // Unknown or finished: nothing to do, as the hub expects.
             if let Some(cancel) = inflight
                 .lock()
@@ -1057,9 +1061,19 @@ fn handle(
                 // Resolves on a cancel, when the handle is dropped because
                 // the connection went, or when the agent is stopping.
                 let stopped = agent.stopped();
+                // The hub sent `cancel`: nobody waits for this answer any
+                // more, so its output is not shipped (review w10-3: a late
+                // multi-MiB answer arriving past the hub's grace cost the
+                // whole connection).
+                let hub_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let flag = Arc::clone(&hub_cancelled);
                 let cancelled = async move {
                     tokio::select! {
-                        _ = cancelled => {}
+                        r = cancelled => {
+                            if r.is_ok() {
+                                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+                        }
                         () = stopped => {}
                     }
                 };
@@ -1080,6 +1094,16 @@ fn handle(
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&id);
+                let outcome = if hub_cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                    exec::ExecOutcome {
+                        stdout: Vec::new(),
+                        stderr: b"cancelled".to_vec(),
+                        truncated: true,
+                        ..outcome
+                    }
+                } else {
+                    outcome
+                };
                 send_result(&out, id, outcome, cap_bytes, hub_proto);
             });
         }
@@ -1390,6 +1414,21 @@ fn now_utc() -> String {
     utc(secs)
 }
 
+/// Said beside a refusal that means the hub no longer takes this host as
+/// an agent.
+pub const FORGOTTEN_HINT: &str = "the hub does not take this host as an agent any more; if it was \
+     removed, remove the agent too: docs/hub.md, Removing the agent";
+
+/// Whether `e` says the hub no longer knows this host as an agent: its
+/// token is unknown (401), or the host is not an agent host (403).
+fn forgotten_by_hub(e: &DialError) -> bool {
+    match e {
+        DialError::Refused { status: 401, .. } => true,
+        DialError::Refused { status: 403, body } => body.contains("not an agent host"),
+        _ => false,
+    }
+}
+
 /// Dial, serve, and dial again, forever. `beats` makes each connection's beat
 /// source and `sleep` waits out a backoff delay — both injected so a test can
 /// drive reconnection without a clock.
@@ -1425,6 +1464,13 @@ where
                     backoff.reset();
                 }
                 (served.end.to_string(), version_refused)
+            }
+            // A removed host (or one moved back to SSH) is refused for good:
+            // say so where `status` and systemd show it, and how to remove
+            // the agent, instead of a bare 401 every minute (review w10-6).
+            Err(e) if forgotten_by_hub(&e) => {
+                backoff.force_max();
+                (format!("{e} ({FORGOTTEN_HINT})"), false)
             }
             Err(e) => (e.to_string(), false),
         };
@@ -2074,6 +2120,27 @@ mod tests {
         }
     }
 
+    /// Review w10-6: a refusal that means the host was removed is told
+    /// apart from one that may heal.
+    #[test]
+    fn a_removed_host_s_refusal_is_recognised() {
+        let refused = |status, body: &str| DialError::Refused {
+            status,
+            body: body.into(),
+        };
+        assert!(forgotten_by_hub(&refused(401, "")));
+        assert!(forgotten_by_hub(&refused(
+            403,
+            "this host is not an agent host: set its transport to agent"
+        )));
+        assert!(!forgotten_by_hub(&refused(
+            403,
+            "this host's token is readonly"
+        )));
+        assert!(!forgotten_by_hub(&refused(502, "")));
+        assert!(!forgotten_by_hub(&DialError::Failed("dns".into())));
+    }
+
     #[tokio::test]
     async fn a_refused_dial_neutralises_and_bounds_the_hub_s_body() {
         let fake = FakeHub::new().await;
@@ -2604,8 +2671,9 @@ mod tests {
             .await
         });
 
-        // Refused once: the backoff starts to grow.
-        fake.refuse(401, "unknown token").await;
+        // Refused once (a passing 503; a 401 means the hub forgot this host
+        // and jumps straight to the longest wait): the backoff starts to grow.
+        fake.refuse(503, "starting up").await;
         // Accepted, heard from (a ping), then dropped by the hub: that
         // connection was a success, so the backoff starts over.
         let (mut ws, _) = fake.accept().await;
@@ -2618,8 +2686,8 @@ mod tests {
         next_frame(&mut ws).await.expect("pong");
         drop(ws);
         // Refused twice: it grows again, from the bottom.
-        fake.refuse(401, "unknown token").await;
-        fake.refuse(401, "unknown token").await;
+        fake.refuse(503, "starting up").await;
+        fake.refuse(503, "starting up").await;
         // And accepted again.
         let (mut ws, _) = fake.accept().await;
         assert!(

@@ -1549,6 +1549,40 @@ async fn signed_in_again_reads_the_account_live_and_forgets_old_fingerprints() {
     );
 }
 
+/// w01-4: Sign in again on the host's own login reports the account the
+/// host now holds (its `~/.claude.json`), not the stored one.
+#[tokio::test]
+async fn signed_in_again_on_the_hosts_own_login_reads_its_account_live() {
+    // Nothing stored for the host's own login: the answer can only be live.
+    let store = store_with_signed_out_logins();
+    let http = FakeTransport::new();
+    let mut a = args("login_status");
+    a.again = true;
+    a.profile = String::new();
+    let ssh = Arc::new(FakeSsh::new());
+    ssh.on(
+        Match::contains("capture-pane"),
+        Reply::ok("Login successful. Press Enter to continue…\n"),
+    );
+    ssh.on(
+        Match::script_contains(".oauthAccount"),
+        Reply::ok("{\"accountUuid\":\"u-b\",\"emailAddress\":\"b@x.com\"}\n"),
+    );
+    let out = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .unwrap();
+    assert_eq!(out["logged_in"], true);
+    assert_eq!(out["account_uuid"], "u-b");
+    assert_eq!(out["email"], "b@x.com");
+    let host = store
+        .lock()
+        .unwrap()
+        .get_host_row("mercury")
+        .unwrap()
+        .unwrap();
+    assert_eq!(host.account_uuid.as_deref(), Some("u-b"));
+}
+
 /// Like the login pane's: a Windows runner's `bash` is WSL's, not a shell
 /// this script ever runs in.
 #[cfg(unix)]
@@ -1752,6 +1786,53 @@ async fn a_login_a_live_session_uses_is_not_removed() {
         .await
         .unwrap();
     assert_eq!(profiles_of(&store, "mercury"), vec!["api", "ci"]);
+}
+
+/// w03-4: a routine that names the profile on its host keeps it: its next
+/// run would recreate the folder empty and sit at /login.
+#[tokio::test]
+async fn a_login_a_routine_names_is_not_removed() {
+    let store = store_with_removable_logins();
+    {
+        let s = store.lock().unwrap();
+        let project = s.upsert_project("acme", "web", "/src").unwrap();
+        s.insert_routine(
+            None,
+            None,
+            &crate::store::RoutineFields {
+                name: "nightly".into(),
+                enabled: true,
+                trigger: "manual".into(),
+                host_alias: "mercury".into(),
+                project_id: project,
+                profile: Some("ci".into()),
+                prompt: "p".into(),
+                overlap: "skip".into(),
+                ..Default::default()
+            },
+            None,
+            0,
+        )
+        .unwrap();
+    }
+    let ssh = Arc::new(FakeSsh::new());
+    ssh.on(
+        Match::script_contains(".claude-profiles"),
+        Reply::ok("__fleet_ok__\n"),
+    );
+    let http = FakeTransport::new();
+    let mut a = args("remove");
+    a.profile = "ci".into();
+    let e = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID_STATE);
+    assert_eq!(
+        e.details.unwrap()["uses"],
+        serde_json::json!(["routine nightly"])
+    );
+    assert!(ssh.calls().is_empty(), "refused before anything ran");
+    assert_eq!(profiles_of(&store, "mercury"), vec!["api", "ci", "work"]);
 }
 
 #[tokio::test]

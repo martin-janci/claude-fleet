@@ -500,7 +500,8 @@ pub struct SettingPayload {
     pub action: String,
     pub key: String,
     pub value: String,
-    /// The value when it was proposed (shown; not checked).
+    /// The value when it was proposed: shown, and an approval of a value
+    /// that moved since is refused (w15-3).
     pub was: String,
     pub why: String,
     pub body: String,
@@ -1954,13 +1955,30 @@ impl FleetExecutor {
             }
             ActionKind::Setting => {
                 let p = payload!(SettingPayload);
+                // w15-3: a value that moved since the card was made is not
+                // overwritten.
+                if let Some(why) = self.moot(|s| super::fleet_ops::setting_moved(s, &p)) {
+                    return ActionResult::Expired(why);
+                }
                 self.fleet(FleetOp::Setting(p)).await
             }
             ActionKind::SessionRecover => {
                 let p = payload!(RecoverPayload);
+                // w15-4: a session that recovered, or works, since the card
+                // was made is not restarted under its turn.
+                let at = action.created_at;
+                if let Some(why) = self.moot(|s| super::fleet_ops::recover_moot(s, &p, at)) {
+                    return ActionResult::Expired(why);
+                }
                 self.fleet(FleetOp::Recover(p)).await
             }
         }
+    }
+
+    /// Why an approved fleet-own action no longer applies, read under the
+    /// store's lock; `None` when it does (or the store cannot be read).
+    fn moot(&self, why: impl FnOnce(&Store) -> Option<String>) -> Option<String> {
+        self.store.lock().ok().and_then(|s| why(&s))
     }
 
     async fn fleet(&self, op: FleetOp) -> ActionResult {

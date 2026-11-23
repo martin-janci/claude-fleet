@@ -784,9 +784,10 @@ jobs:
   # Lists the PUBLISHED release on its update tracks (stable → stable and
   # beta, -rc.N → beta), as signed channel documents on the orphan branch
   # `update-channels` (update-channel design §5; scripts/update-channels.sh).
-  # After `publish`, never before: a channel must never offer a draft. The
-  # concurrency group is shared with update-channels.yml, so a listing and a
-  # publisher's edit never race for the branch. A failure here leaves the
+  # After `publish`, never before: a channel must never offer a draft. No
+  # concurrency group: a shared one let a newer nightly cancel this job while
+  # it was pending (review w09-5); update-channels.sh retries a push that
+  # lost the race to another writer instead. A failure here leaves the
   # release published but not offered; re-run this job, or dispatch
   # update-channels.yml.
   channel:
@@ -795,9 +796,6 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-    concurrency:
-      group: update-channels
-      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:

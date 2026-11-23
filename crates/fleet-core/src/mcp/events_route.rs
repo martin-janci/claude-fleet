@@ -648,6 +648,17 @@ fn session_row(store: &Mutex<Store>, id: i64) -> Result<Option<crate::store::Ses
     s.get_session_by_id(id).map_err(|_| ())
 }
 
+/// [`session_row`]'s identity facts only, for a fence that needs nothing
+/// else: no correlated work-link subqueries per subscriber per frame (review
+/// w19-6). The same id caveat.
+fn session_facts(
+    store: &Mutex<Store>,
+    id: i64,
+) -> Result<Option<crate::store::SessionFactsRow>, ()> {
+    let s = store.lock().map_err(|_| ())?;
+    s.session_facts_by_id(id).map_err(|_| ())
+}
+
 /// The ORG redaction the work graph has always applied to a session frame:
 /// a row whose work belongs to a company this caller may not read keeps its
 /// identity and loses its work fields.
@@ -915,9 +926,9 @@ fn fence_session_frame(
     // test that asserts the leak, and the fix (carry the facts, as
     // `session:killed` does) — which is a wire change and the owner's.
     let sid = obj.get("session_id").and_then(serde_json::Value::as_i64)?;
-    let row = session_row(store, sid).ok().flatten()?;
+    let facts = session_facts(store, sid).ok().flatten()?;
     scope
-        .sees_session_row(&row)
+        .sees_session_facts(&crate::service::view_scope::SessionFacts::of_facts(&facts))
         .is_visible()
         .then(|| redact_work(scope, &msg.payload))
 }
@@ -982,9 +993,9 @@ fn fence_move_frame(
         .and_then(serde_json::Value::as_i64)?;
     // Live only: this frame names its session by id and nothing else, so
     // the id has to be the row the write just touched. See [`Delivery`].
-    let row = session_row(store, sid).ok().flatten()?;
+    let facts = session_facts(store, sid).ok().flatten()?;
     scope
-        .sees_session_row(&row)
+        .sees_session_facts(&crate::service::view_scope::SessionFacts::of_facts(&facts))
         .is_visible()
         .then(|| msg.payload.clone())
 }

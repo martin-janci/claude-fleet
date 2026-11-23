@@ -686,7 +686,8 @@ impl Store {
     }
 
     fn mission_repos(&self, id: i64) -> Result<Vec<MissionRepoRow>, IpcError> {
-        let mut stmt = self.conn.prepare(
+        // Cached: a missions list asks once per mission (review w19-2).
+        let mut stmt = self.conn.prepare_cached(
             "SELECT r.project_id, p.owner || '/' || p.repo, r.role, r.created_at \
              FROM orchestration_project_repos r JOIN projects p ON p.id = r.project_id \
              WHERE r.orchestration_project_id = ?1 ORDER BY r.created_at, r.project_id",
@@ -716,6 +717,21 @@ impl Store {
 
     /// Every mission: live ones (draft, active, paused) first, then by last
     /// change. The caller fences by org and owner.
+    /// The `active` missions only, newest first: the only ones that can
+    /// wait on a person (`fill_spend`), for `work { missions, waiting }`.
+    pub fn list_active_missions(&self) -> Result<Vec<MissionRow>, IpcError> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {MISSION_COLUMNS} FROM orchestration_projects m \
+             WHERE m.state = 'active' ORDER BY m.updated_at DESC, m.id DESC"
+        ))?;
+        let rows = stmt.query_map([], map_mission)?;
+        let mut out = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        for m in &mut out {
+            m.repos = self.mission_repos(m.id)?;
+        }
+        Ok(out)
+    }
+
     pub fn list_missions(&self) -> Result<Vec<MissionRow>, IpcError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {MISSION_COLUMNS} FROM orchestration_projects m \
@@ -913,14 +929,14 @@ impl Store {
              WHERE id = ?5",
             rusqlite::params![to, started_at, finished_at, now, id],
         )?;
-        // A grant until the mission completes ends with it (TASK-293): a
-        // finished mission reopened as paused starts without one.
+        // Every grant ends with the mission (TASK-293; w05-3: an hours grant
+        // too): a finished mission reopened as paused starts without one, so
+        // Resume runs nothing without a new signature.
         if finished_at.is_some() {
             tx.execute(
                 "UPDATE orchestration_grants SET revoked_at = ?1 \
-                 WHERE orchestration_project_id = ?2 AND revoked_at IS NULL \
-                   AND expires_at >= ?3",
-                rusqlite::params![now, id, super::GRANT_UNTIL_DONE_AT],
+                 WHERE orchestration_project_id = ?2 AND revoked_at IS NULL",
+                rusqlite::params![now, id],
             )?;
         }
         self.insert_mission_event(

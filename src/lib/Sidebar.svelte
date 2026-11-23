@@ -1,6 +1,7 @@
 <script lang="ts">
   import Icon from './kit/Icon.svelte';
   import { tick, untrack, type Snippet } from 'svelte';
+  import { windowHidden } from './window_hidden';
   import { get } from 'svelte/store';
   import { projects, refreshProjects, type ProjectTreeRow } from './projects';
   import {
@@ -312,8 +313,23 @@
     if (!mineOn) return;
     void $trackers.length;
     untrack(() => void loadMine());
-    const t = setInterval(() => void loadMine(), 120_000);
-    return () => clearInterval(t);
+    // Not while the window is hidden (review w19-4); once when it shows again.
+    let missed = false;
+    const t = setInterval(() => {
+      if (windowHidden()) missed = true;
+      else void loadMine();
+    }, 120_000);
+    const shown = () => {
+      if (missed && !windowHidden()) {
+        missed = false;
+        void loadMine();
+      }
+    };
+    document.addEventListener('visibilitychange', shown);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener('visibilitychange', shown);
+    };
   });
   /** A past link passes the work filters `wf` (host and scope are the
    *  caller's). The list passes its own; the archived count, the same with

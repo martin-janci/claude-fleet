@@ -15,6 +15,10 @@ export interface StorageHealth {
   low_disk?: boolean;
   last_backup_at?: number | null;
   backup_stale?: boolean;
+  /** When the disk was last read (unix seconds). */
+  read_at?: number | null;
+  /** A reading of the hub's disk has hung: its free space is unknown. */
+  disk_unreadable?: boolean;
 }
 
 /** The latest one the desktop has read (null: none). */
@@ -47,6 +51,16 @@ export function storageAttentionItems(
   nowSec: number = Math.floor(Date.now() / 1000),
 ): StorageAttentionItem[] {
   const out: StorageAttentionItem[] = [];
+  if (h?.disk_unreadable) {
+    const since =
+      typeof h.read_at === 'number' ? ` · last read ${ago(nowSec - h.read_at)} ago` : '';
+    out.push({
+      key: 'disk',
+      label: 'Hub disk not answering',
+      detail: `reading the disk under the hub's data folder has hung${since} · check its mount · Open Settings → Hub & sync`,
+      section: HUB_SECTION,
+    });
+  }
   if (h?.low_disk) {
     const free = typeof h.free_bytes === 'number' ? gb(h.free_bytes) : 'little';
     const of = typeof h.total_bytes === 'number' ? ` of ${gb(h.total_bytes)}` : '';

@@ -698,7 +698,8 @@ fn remove_login_script(profile: &str) -> String {
 
 /// `remove`: take a login profile off a host. Refused while a live session
 /// runs under it (`E_INVALID_STATE`, naming them): they would lose their
-/// login mid-turn. Then the host side ([`remove_login_script`]), then the
+/// login mid-turn; and while a routine, start rule or live mission grant
+/// names it (`details.uses`). Then the host side ([`remove_login_script`]), then the
 /// store: the host's profile list, the profile's signed-out note and its
 /// fingerprints, and the made-up accounts no login uses any more.
 async fn remove_login(
@@ -728,6 +729,27 @@ async fn remove_login(
             ),
         )
         .with_details(serde_json::json!({ "sessions": live })));
+    }
+    // What would start a session under it later by name: the next run
+    // would recreate the directory empty and sit at /login, and the host
+    // would list the profile again (review w03-4).
+    let uses = lock(store)?.login_profile_named_by(
+        &args.host_alias,
+        &args.profile,
+        crate::store::now_unix(),
+    )?;
+    if !uses.is_empty() {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!(
+                "profile {} on {} is named by {}: point {} at another login first",
+                args.profile,
+                args.host_alias,
+                uses.join(", "),
+                if uses.len() == 1 { "it" } else { "them" }
+            ),
+        )
+        .with_details(serde_json::json!({ "uses": uses })));
     }
     run_tmux(
         tmux,
@@ -798,6 +820,43 @@ pub fn delete_fleet_credentials_script() -> String {
          done; echo {OK_MARK}",
         prefix = crate::tmux::LOGIN_SESSION_PREFIX,
     )
+}
+
+/// Remove host's "also delete fleet's login profiles there": each of
+/// `profiles` goes as Remove login takes it ([`remove_login_script`]: a
+/// symlinked profile loses only its link, the host's own `~/.claude` is
+/// never touched), best effort. Returns the profiles removed and, when one
+/// was not, why (the first failure; the rest are still tried).
+pub async fn remove_login_profiles(
+    tmux: &dyn TmuxExec,
+    profiles: &[String],
+) -> (Vec<String>, Option<String>) {
+    let mut removed = Vec::new();
+    let mut error: Option<String> = None;
+    for p in profiles {
+        let outcome = match crate::validate::claude_profile(p) {
+            Ok(()) => run_tmux(tmux, &remove_login_script(p), "remove the login profile")
+                .await
+                .and_then(|out| {
+                    if out.contains(OK_MARK) {
+                        Ok(())
+                    } else {
+                        Err(IpcError::new(
+                            codes::E_HOST_WRITE,
+                            "the host did not confirm the removal",
+                        ))
+                    }
+                }),
+            Err(e) => Err(e),
+        };
+        match outcome {
+            Ok(()) => removed.push(p.clone()),
+            Err(e) => {
+                error.get_or_insert_with(|| format!("profile {p}: {}", e.message));
+            }
+        }
+    }
+    (removed, error)
 }
 
 /// Run [`delete_fleet_credentials_script`] on the host `tmux` reaches.
@@ -899,6 +958,24 @@ async fn login_status_again(
         Some(_) => tmux.read_profiles().await,
         None => None,
     };
+    // The host's own login: its `~/.claude.json` `oauthAccount`, as the
+    // probe reads it (review w01-4). `local` is read from this machine.
+    let live_own = match dir {
+        Some(_) => None,
+        None if args.host_alias == crate::service::projects::LOCAL_HOST => {
+            let dir = crate::service::hosts::local_claude_json_dir();
+            tokio::task::spawn_blocking(
+                move || match crate::service::hosts::probe_local_account_in(&dir) {
+                    crate::service::hosts::LocalAccountProbe::LoggedIn(a) => Some(a),
+                    _ => None,
+                },
+            )
+            .await
+            .ok()
+            .flatten()
+        }
+        None => tmux.read_oauth_account().await,
+    };
     let s = lock(store)?;
     crate::service::login_health::record(
         &s,
@@ -913,9 +990,8 @@ async fn login_status_again(
     // it was made from no longer matches it (w02-2).
     s.forget_login_fingerprints(&args.host_alias, dir)?;
     let account_uuid = match dir {
-        None => s
-            .get_host_row(&args.host_alias)?
-            .and_then(|h| h.account_uuid),
+        // An unreadable host keeps the stored one (`sync_host_account`).
+        None => crate::service::hosts::sync_host_account(&s, &args.host_alias, live_own.as_ref())?,
         Some(p) => {
             // Only a reading that lists this profile replaces the stored set:
             // an empty or partial read must not drop the host's other logins.

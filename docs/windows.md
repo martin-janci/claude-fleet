@@ -219,5 +219,8 @@ Manager → Windows Credentials**.
 - The terminal on ConPTY has had no long manual test yet: resizing, pasting
   large blocks and fast session switching are the places to watch. Please
   report what you see.
-- There is no auto-update on any platform yet; install a new release over
-  the old one.
+- Updates install from Settings → Updates or the update banner: on Windows
+  the desktop checks the installer against the release key, runs it and
+  restarts (see [updates.md](updates.md)). That signature is the release
+  key's, not Authenticode: the installer above is still unsigned for
+  Windows.

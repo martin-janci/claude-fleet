@@ -359,8 +359,9 @@ pub async fn settled_for(alias: &str) {
     }
 }
 
-/// [`settled_for`] for a caller already off the async runtime (the PTY
-/// attach runs on a blocking thread).
+/// [`settled_for`] for a caller on a plain thread, off the async runtime.
+/// Never on a runtime worker: it sleeps there for up to [`SETTLE_WAIT`]
+/// (`pty_open` awaits [`settled_for`] instead, review w12-2).
 pub fn settled_for_blocking(alias: &str) {
     if !needs_wait(alias) {
         return;

@@ -51,8 +51,11 @@ pub fn run(
     opts: &HubOptions,
     env: &HashMap<String, String>,
 ) -> Result<ExitCode, String> {
-    crate::serve::existing_db(&crate::config::resolve_data_dir(opts, env))?;
-    let store = crate::serve::open_store(opts, env)?;
+    // Read-only, never the migrating open: a read must not reshape the
+    // schema under a running older daemon (review w11-6).
+    let store = crate::dbarg::open_read_only(&crate::serve::existing_db(
+        &crate::config::resolve_data_dir(opts, env),
+    )?)?;
     run_on(&Mutex::new(store), cmd, fleet_core::store::now_unix())
 }
 

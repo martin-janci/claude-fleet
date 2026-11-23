@@ -6403,6 +6403,60 @@ async fn a_changed_boot_id_marks_every_session_lost_as_a_reboot() {
     }
 }
 
+/// Review w13-3: tmux-resurrect brings the name back after a reboot, as a
+/// new tmux session (another `session_created`). The row is marked lost
+/// and the next pass does not revive it; a name that kept its tmux session
+/// is spared.
+#[tokio::test]
+async fn a_reboot_marks_a_resurrected_name_lost() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+    let deps = identity_deps(
+        "mefistos",
+        vec![tmux_session("y")],
+        Some(boot_a_pid(Some(1))),
+        vec![agent_for_session("y", "cid-y")],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["y".to_string()], 1)
+        .unwrap();
+    let mut back = tmux_session("y");
+    back.created = 500;
+    let rebooted = crate::tmux::HostIdentity {
+        boot_id: Some("b".into()),
+        tmux_server_pid: Some(2),
+    };
+    let deps = identity_deps(
+        "mefistos",
+        vec![back.clone()],
+        Some(rebooted.clone()),
+        vec![],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let row = store
+        .lock()
+        .unwrap()
+        .get_session("y", "mefistos")
+        .unwrap()
+        .expect("row kept");
+    assert_eq!(row.status, "ghost");
+    assert_eq!(row.lost_reason.as_deref(), Some("host_reboot"));
+    // The next pass sees the same shell: still lost, still resumable.
+    let deps = identity_deps("mefistos", vec![back], Some(rebooted), vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let row = store
+        .lock()
+        .unwrap()
+        .get_session("y", "mefistos")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, "ghost");
+    assert_eq!(row.claude_session_id.as_deref(), Some("cid-y"));
+}
+
 /// Acceptance criterion 4: a host whose identity can never be read (no
 /// `/proc`, an executor that doesn't implement it, a stubborn ssh hiccup —
 /// `identity: None` on every pass) must behave exactly as before Task 6: a
@@ -8381,6 +8435,36 @@ fn reconcile_learns_a_codex_panes_conversation_from_its_rollout() {
         s.session_transcript_path(cx.id).unwrap().as_deref(),
         Some(path.as_str())
     );
+}
+
+/// Review w20-2: a Claude conversation that is the only `claude agents`
+/// row in a Codex pane's checkout (the person's own terminal) is not that
+/// pane's: its id and status stay off the Codex row.
+#[test]
+fn a_codex_row_is_not_paired_with_a_claude_agent_in_its_checkout() {
+    const CLAUDE_ID: &str = "11111111-2222-3333-4444-555555555555";
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    let live = || vec![tmux_session("dev-cx")];
+    let first = vps_probe(&s, live(), None, vec![], PrInfoMap::new());
+    reconcile_write_one_host(&mut s, &first, &[]).unwrap();
+    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
+    s.set_session_agent(cx.id, crate::store::AGENT_CODEX)
+        .unwrap();
+    let terminal = crate::claude_agents::ClaudeAgentRow {
+        session_id: Some(CLAUDE_ID.to_string()),
+        name: None,
+        status: Some("working".into()),
+        cwd: Some("/tmp".into()),
+        kind: crate::claude_agents::AgentKind::Interactive,
+        job_id: None,
+        started_at: None,
+    };
+    let probe = vps_probe(&s, live(), None, vec![terminal], PrInfoMap::new());
+    reconcile_write_one_host(&mut s, &probe, &[]).unwrap();
+    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
+    assert_eq!(cx.claude_session_id, None);
+    assert_ne!(cx.claude_status.as_deref(), Some("working"));
 }
 
 /// Review r05 F8: a credential profile that could not be saved at start

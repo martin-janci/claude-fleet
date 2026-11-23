@@ -402,6 +402,83 @@ async fn a_refused_comment_post_gives_up_and_says_why_on_the_comment() {
     assert!(post.error.unwrap().contains("not permitted"));
 }
 
+/// w07-1: a comment whose answer was lost (a timeout, a body cut off) may
+/// be at the tracker already: it is not sent again, and the person is told
+/// to check there. A connection that never opened still retries.
+#[tokio::test]
+async fn a_comment_whose_answer_was_lost_is_not_posted_twice() {
+    for lost in [
+        TransportError::Timeout,
+        TransportError::Connect(format!(
+            "{}: 7 of 12 body bytes arrived",
+            crate::net::https::TRUNCATED
+        )),
+    ] {
+        let (f, comment) = with_comment_post(true);
+        let t = f.s.require_tracker(f.tracker).unwrap();
+        let store = Mutex::new(f.s);
+        let fake = FakeTransport::new();
+        fake.once(Method::Post, "/rest/api/3/issue/ABC-1/comment", Err(lost));
+        let now = crate::store::now_unix() + 1;
+        let r = drain(&t, &cloud(&fake), &store, now).await;
+        assert_eq!((r.sent, r.retrying, r.given_up), (0, 0, 1));
+        let r = drain(&t, &cloud(&fake), &store, now + backoff_secs(5)).await;
+        assert_eq!(r, DrainReport::default());
+        assert_eq!(fake.requests().len(), 1, "sent once");
+        let s = store.lock().unwrap();
+        let post = s
+            .get_comment(comment)
+            .unwrap()
+            .unwrap()
+            .tracker_post
+            .unwrap();
+        assert_eq!(post.state, "failed");
+        assert!(post.error.unwrap().contains("check there"));
+    }
+    let (f, _) = with_comment_post(true);
+    let t = f.s.require_tracker(f.tracker).unwrap();
+    let store = Mutex::new(f.s);
+    let fake = FakeTransport::new();
+    fake.once(
+        Method::Post,
+        "/rest/api/3/issue/ABC-1/comment",
+        Err(TransportError::Connect(
+            "resolve acme.atlassian.net: no".into(),
+        )),
+    );
+    let r = drain(&t, &cloud(&fake), &store, crate::store::now_unix() + 1).await;
+    assert_eq!(r.retrying, 1, "nothing was sent: it retries");
+}
+
+/// w07-2: writes whose setting is off now do not fill the drain's batch: a
+/// due comment behind more of them than one batch holds is still sent.
+#[tokio::test]
+async fn writes_whose_setting_is_off_never_starve_the_rest() {
+    let (f, _) = with_comment_post(true);
+    let c = f.s.conn_ref();
+    for n in 0..(DRAIN_BATCH as i64 + 1) {
+        c.execute(
+            "INSERT INTO tracker_writes (tracker_id, item_key, op, url, title, state, \
+                                         attempts, next_at, created_at, updated_at) \
+             VALUES (?1, 'ABC-1', 'pr_remote_link', ?2, 'PR', 'pending', 0, 0, 0, 0)",
+            rusqlite::params![f.tracker, format!("https://github.com/o/r/pull/{n}")],
+        )
+        .unwrap();
+    }
+    let mut t = f.s.require_tracker(f.tracker).unwrap();
+    t.settings.write_back.pr_remote_link = false;
+    let store = Mutex::new(f.s);
+    let fake = FakeTransport::new();
+    fake.once(
+        Method::Post,
+        "/rest/api/3/issue/ABC-1/comment",
+        Ok(Response::json(201, &serde_json::json!({ "id": "777" }))),
+    );
+    let r = drain(&t, &cloud(&fake), &store, crate::store::now_unix() + 1).await;
+    assert_eq!(r.sent, 1);
+    assert_eq!(fake.requests().len(), 1);
+}
+
 // ── a PR that was there first ───────────────────────────────────────────
 
 /// The PR probe already saw the PR (signals stamped): it will not queue

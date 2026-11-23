@@ -319,17 +319,37 @@ impl Store {
     }
 
     /// Remove one rule. `true` when there was one. Its cursor goes with it;
-    /// its jobs stay, without the rule.
+    /// its jobs stay, without the rule. Its pending actions end `expired`
+    /// (w15-2): nothing would answer for them, and an approval must not
+    /// send what the person revoked.
     pub fn revoke_agent_rule(&self, id: i64) -> Result<bool, rusqlite::Error> {
-        let n = self
-            .conn
-            .execute("DELETE FROM agent_rules WHERE id = ?1", params![id])?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE agent_actions SET state = 'expired', decided_by = 'revoked', \
+               decided_at = ?2, error = 'the rule was revoked' \
+             WHERE state = 'pending' \
+               AND job_id IN (SELECT id FROM agent_jobs WHERE rule_id = ?1)",
+            params![id, super::now_unix()],
+        )?;
+        let n = tx.execute("DELETE FROM agent_rules WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(n > 0)
     }
 
     /// Remove every rule (the agents' Pause all). Returns how many went.
+    /// Every pending action of a rule ends `expired`, as on a revoke.
     pub fn revoke_all_agent_rules(&self) -> Result<usize, rusqlite::Error> {
-        self.conn.execute("DELETE FROM agent_rules", [])
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE agent_actions SET state = 'expired', decided_by = 'revoked', \
+               decided_at = ?1, error = 'the rule was revoked' \
+             WHERE state = 'pending' \
+               AND job_id IN (SELECT id FROM agent_jobs WHERE rule_id IS NOT NULL)",
+            params![super::now_unix()],
+        )?;
+        let n = tx.execute("DELETE FROM agent_rules", [])?;
+        tx.commit()?;
+        Ok(n)
     }
 
     /// Every rule, expired ones included, by id.

@@ -426,3 +426,62 @@ fn the_rollout_lookup_finds_each_panes_newest_rollout_for_its_cwd() {
     );
     assert_eq!(found["dev-a"].id, ids[1], "the newer of dev-a's two");
 }
+
+/// Review w20-3: before a new Codex pane's first prompt, the newest rollout
+/// for its cwd belongs to an older conversation (a killed session's on the
+/// same worktree): one last written before the pane was created is not its.
+#[cfg(unix)]
+#[test]
+fn a_rollout_older_than_the_pane_is_not_its_conversation() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let created = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 60;
+    // Every pane is `/work/dev-a`, created a minute ago.
+    std::fs::write(
+        bin.join("tmux"),
+        format!("#!/bin/sh\nprintf '%s\\t/work/dev-a\\n' {created}\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("tmux"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let day = dir.path().join("codex/sessions/2026/10/08");
+    std::fs::create_dir_all(&day).unwrap();
+    let id = "01a11dac-0000-7000-8000-000000000001";
+    let f = day.join(format!("rollout-2026-10-08T22-40-00-{id}.jsonl"));
+    std::fs::write(
+        &f,
+        format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"/work/dev-a\"}}}}\n"),
+    )
+    .unwrap();
+    let age = |secs: u64| {
+        std::fs::File::options()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(secs))
+            .unwrap();
+    };
+    let run = || {
+        let script = super::rollouts_script(&["dev-a"]).unwrap();
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .env("CODEX_HOME", dir.path().join("codex"))
+            .output()
+            .unwrap();
+        super::parse_rollouts(&String::from_utf8_lossy(&out.stdout))
+    };
+    age(300);
+    assert!(run().is_empty(), "an older conversation is not the pane's");
+    age(10);
+    assert_eq!(run()["dev-a"].id, id, "written since: the pane's own");
+}

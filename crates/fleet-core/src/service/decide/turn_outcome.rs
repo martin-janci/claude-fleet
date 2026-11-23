@@ -152,12 +152,19 @@ pub fn prepare_tail(raw: &str) -> String {
         .filter(|l| !is_chrome(l))
         .collect();
     let start = lines.len().saturating_sub(TAIL_LINES);
-    let text = lines[start..].join("\n");
+    // Token shapes are masked BEFORE the cut (review w18-2): a token the
+    // window starts inside of has lost its prefix and no longer matches.
+    let text = crate::logging::redact(&lines[start..].join("\n")).into_owned();
     let n = text.chars().count();
     if n <= TAIL_CHARS {
-        text
-    } else {
-        text.chars().skip(n - TAIL_CHARS).collect()
+        return text;
+    }
+    let cut: String = text.chars().skip(n - TAIL_CHARS).collect();
+    // From the first whole line, so no line (and no secret on it) starts
+    // mid-way; one line longer than the window keeps the character cut.
+    match cut.split_once('\n') {
+        Some((_, rest)) if !rest.is_empty() => rest.to_string(),
+        _ => cut,
     }
 }
 

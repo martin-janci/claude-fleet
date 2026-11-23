@@ -55,6 +55,16 @@ pub const PRIMARY: &str = "primary";
 /// payload}`. The primary's events keep their own names and channel.
 pub const FLEET_EVENT: &str = "fleet:event";
 
+/// The event kinds an extra fleet's bridge subscribes to (`/events?kinds=`):
+/// what the window keeps of an extra fleet (`ROW_EVENTS` in
+/// `src/lib/fleets.ts`). The rest would cross the link and IPC only to be
+/// dropped (review w08-3).
+pub const EXTRA_FLEET_KINDS: &str = "session,host,project";
+
+/// The `fleet:event` name [`Fleets::load`] sends after it adds each fleet,
+/// so a window that listed the fleets first lists them again.
+pub const FLEETS_CHANGED: &str = "fleets:changed";
+
 /// The commands that take a `fleet` argument and route through
 /// [`Fleets::select`]. Grown one reviewed command at a time (design D7);
 /// `tests_fleets::every_fleet_scoped_command_selects_and_no_other_takes_a_fleet`
@@ -449,7 +459,12 @@ impl Fleets {
         };
         for row in rows {
             let handle = self.connect(row);
-            self.write().insert(handle.record.id.clone(), handle);
+            let id = handle.record.id.clone();
+            self.write().insert(id.clone(), handle);
+            // The window may have listed the fleets before this one was in
+            // (each connect can wait on the keychain): an unusable or offline
+            // fleet sends nothing else that would make it re-list (w08-1).
+            TaggedSink::new(&id, Arc::clone(&self.sink)).emit_remote(FLEETS_CHANGED, json!({}));
         }
     }
 

@@ -37,6 +37,10 @@ describe('the planner at a usage limit', () => {
     // Review r8: a later login of the same ask answered.
     expect(plannerLimitWait({ events: [ev(3, 'limit_cleared', { host: 'mac', profile: 'work' }), ev(2, 'limit_wait', login), ev(1, 'planned')] })).toBeNull();
     expect(eventSentence(ev(3, 'limit_cleared', { host: 'mac', profile: 'work' }))).toBe('The planner answered on profile work on mac');
+    expect(eventSentence(ev(4, 'planner_failed', { why: 'the planner on mac gave no answer' }))).toBe(
+      'The planner gave no answer: the planner on mac gave no answer'
+    );
+    expect(plannerLimitWait({ events: [ev(3, 'planner_failed', {}), ev(2, 'limit_wait', login), ev(1, 'planned')] })).toBeNull();
   });
 
   it('reads the hub’s own wait over the events page, which a busy log outgrows (review r9)', () => {

@@ -1121,8 +1121,10 @@ Index by area (names only; see the reference for details):
   `paused_reason`); `preview { routine,
   routine_id? }` is the editor's dry run (gap plan G2.3): it writes
   nothing and answers `problem` (what `save` would refuse, absent when it
-  would save), `next_runs` (the schedule's next five fires at
-  `utc_offset_min`, which a daylight-saving change does not move), the
+  would save), `next_runs` (the schedule's next five fires, in
+  `time_zone` when the bundled tz database knows it, so a daylight-saving
+  change keeps their wall-clock time, and `zoned: true` says so; else at
+  `utc_offset_min`, which such a change does not move), the
   `account` its login bills and the host's `logins` for the Account
   picker; `delete`; `set_enabled
   { enabled }` (refused, `E_INVALID_STATE`, for a routine whose project
@@ -1135,7 +1137,11 @@ Index by area (names only; see the reference for details):
   origin `routine` and is the routine's owner's; the prompt is its
   handover, typed into the session once Claude's REPL is ready (a run
   whose prompt could not be typed fails with `E_PROMPT_NOT_DELIVERED`,
-  fix: open its session). A run is `done` when its session's first turn finishes,
+  fix: open its session). Once a `done` run's session (outcome other than
+  `needs_person`) has idled 12 hours the scheduler closes it (a plain
+  kill, timeline `gc_killed`), except its routine's three newest live
+  sessions and any a person pinned, prompted, attached to or opened.
+  A run is `done` when its session's first turn finishes,
   `failed` on an error, a lost or removed session, six quiet hours, or a
   session past the run budget (which also stops its turn and turns the
   routine off with `paused_reason`), and `skipped` when the last run is still going under

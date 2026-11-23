@@ -8,6 +8,7 @@
   import { onDestroy, untrack } from 'svelte';
   import { autoContinue, countdown, hubLacksAutoContinue, spokenCountdown, liveCountdown, type AutoContinueView } from './auto_continue';
   import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
+  import { windowHidden } from './window_hidden';
 
   let {
     sessionId,
@@ -65,14 +66,35 @@
     void refresh();
   });
 
-  const timer = setInterval(() => (now = Date.now()), 1000);
-  const poll = setInterval(() => void refresh(), POLL_MS);
+  // Not while the window is hidden: a desktop left minimised with Control's
+  // chat open asked every 10 s all night (review w19-4). Once when it shows
+  // again, if a read was skipped.
+  let missed = false;
+  const poll = setInterval(() => {
+    if (windowHidden()) missed = true;
+    else void refresh();
+  }, POLL_MS);
+  const shown = () => {
+    if (missed && !windowHidden()) {
+      missed = false;
+      void refresh();
+    }
+  };
+  if (typeof document !== 'undefined') document.addEventListener('visibilitychange', shown);
   onDestroy(() => {
-    clearInterval(timer);
     clearInterval(poll);
+    if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', shown);
   });
 
   const live = $derived(liveCountdown(view, sessionId));
+  // The clock ticks only while a countdown shows.
+  const ticking = $derived(live !== null);
+  $effect(() => {
+    if (!ticking) return;
+    now = Date.now();
+    const timer = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(timer);
+  });
   const left = $derived(live ? live.dueAt * 1000 - now : null);
   // A boolean, not `left`: `left` changes every second, and an effect on it
   // would clear and re-arm the timeout below on each tick so it never fires.

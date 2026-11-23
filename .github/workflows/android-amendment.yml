@@ -47,9 +47,9 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: update-channels
-  cancel-in-progress: false
+# No shared concurrency group: GitHub keeps one PENDING run per group and a
+# newer one cancels it, which lost writes silently (review w09-5).
+# scripts/update-channels.sh retries a push that lost the race instead.
 
 jobs:
   amend:

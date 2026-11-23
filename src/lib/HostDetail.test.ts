@@ -131,6 +131,16 @@ describe('HostDetail', () => {
     const box = within(screen.getByTestId('confirm-dialog')).getByTestId('confirm-remove-credentials') as HTMLInputElement;
     expect(box.checked).toBe(false);
     expect(box.closest('label')?.textContent).toContain('tokens and keys');
+    expect(box.closest('label')?.textContent).toContain('subscription logins stay signed in');
+  });
+
+  it('Remove host offers to delete fleet’s login profiles there, off by default (review w03-7)', async () => {
+    mount('claude-fleet-trn');
+    await fireEvent.click(screen.getByTestId('detail-remove'));
+    await tick();
+    const box = within(screen.getByTestId('confirm-dialog')).getByTestId('confirm-remove-login-profiles') as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    expect(box.closest('label')?.textContent).toContain('login profiles');
   });
 
   it('each login profile has a Remove that confirms first (review w11-7)', async () => {

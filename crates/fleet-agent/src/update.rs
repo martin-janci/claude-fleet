@@ -188,7 +188,10 @@ pub async fn run(
                 unit_path.display()
             )
         })?;
-    let hub = HubHttp::with_ca(&config.hub, &config.token, None, config.ca_file.as_deref())?;
+    let dial =
+        crate::proxy::UpdateDial::resolve(config.proxy.as_deref(), |k| std::env::var(k).ok())?;
+    let hub = HubHttp::with_ca(&config.hub, &config.token, None, config.ca_file.as_deref())?
+        .with_dial(dial.clone());
     let channel = fleet_update::HubUpdateChannel::new(
         hub.clone(),
         trusted_keys(),
@@ -199,7 +202,7 @@ pub async fn run(
         user_scope,
         hub: None,
         link: link.clone(),
-        git: GitFetch::new(None)?,
+        git: GitFetch::for_artifacts(None)?.with_dial(dial),
         mirror: Some(hub),
     };
     let mut cfg = BinaryConfig::new(

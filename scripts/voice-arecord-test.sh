@@ -27,12 +27,12 @@ printf 'FLEET_VOICE_URL=http://127.0.0.1:%s\n' "$PORT" >"$HOME/.claude-fleet/voi
 printf 'Authorization: Bearer good\n' >"$HOME/.claude/fleet-hook.headers"
 
 # The recorder asks for the session of its own pane (`-t "$TMUX_PANE"`):
-# pane %2 is in session t2, %3 in t3, any other pane (or none) in t1.
+# pane %2 is in session t2, %3 in t3, %4 in t4, any other pane (or none) in t1.
 cat >"$TMP/bin/tmux" <<'T'
 #!/usr/bin/env bash
 [ "$1" = display-message ] && [ "$2" = -p ] || exit 1
 if [ "$3" = -t ] && [ "$5" = '#S' ]; then
-  case "$4" in %2) echo t2 ;; %3) echo t3 ;; *) echo t1 ;; esac; exit 0
+  case "$4" in %2) echo t2 ;; %3) echo t3 ;; %4) echo t4 ;; *) echo t1 ;; esac; exit 0
 fi
 if [ "$3" = '#S' ]; then echo t1; exit 0; fi
 exit 1
@@ -66,6 +66,10 @@ class H(BaseHTTPRequestHandler):
                     time.sleep(0.05)
             except OSError:
                 open(os.path.join(MARK, "t2.gone"), "w").close()
+            return
+        if ok and "tmux=t4" in self.path:
+            # The session is already recording.
+            self.send_response(423); self.send_header("Content-Length", "0"); self.end_headers()
             return
         if ok and "tmux=t3" in self.path:
             # The connection drops mid-recording.
@@ -181,4 +185,15 @@ n="$(wc -c <"$TMP/out8" | tr -d ' ')"
 left="$(ls -A "$TMPDIR")"
 [ -z "$left" ] || fail "8: temp files left behind: $left"
 echo "ok 8 a cut stream is not continued from the fallback"
-echo "all 8 passed"
+
+# 9. A session already recording (423) is said as that, not as "turn on 🎤".
+rm -f "$FB_TOKEN"
+set +e
+TMUX_PANE=%4 "$ARECORD" -f S16_LE -r 16000 -c 1 -t raw -q - >"$TMP/out9" 2>"$TMP/err9"
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "9: exit $rc, want 1"
+grep -q 'already recording' "$TMP/err9" || fail "9: stderr lacks the busy hint: $(cat "$TMP/err9")"
+! grep -q 'turn on 🎤' "$TMP/err9" || fail "9: a busy session was told to turn 🎤 on"
+echo "ok 9 hint on 423"
+echo "all 9 passed"

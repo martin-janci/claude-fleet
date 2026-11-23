@@ -333,6 +333,40 @@ fn promoting_is_refused_with_nothing_queued_where_it_may_not_go() {
     assert_eq!(n, 0, "nothing queued for any refusal");
 }
 
+/// w07-3: a promotion that would never be sent is refused, naming why:
+/// the tracker sync is off, or the tracker's credential was refused.
+#[test]
+fn promoting_is_refused_while_nothing_would_send_it() {
+    let f = jira_fx(true);
+    f.store
+        .lock()
+        .unwrap()
+        .set_setting(crate::service::settings::WORK_SYNC_INTERVAL_SECS, "0")
+        .unwrap();
+    let e = promote(&args(f.subtask), &f.store, &OrgScope::All, None).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID_STATE);
+    assert!(e.message.contains("sync is off"), "{}", e.message);
+    let f = jira_fx(true);
+    f.store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE trackers SET state = 'auth_failed' WHERE id = ?1",
+            [f.tracker],
+        )
+        .unwrap();
+    let e = promote(&args(f.subtask), &f.store, &OrgScope::All, None).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID_STATE);
+    assert!(e.message.contains("credential"), "{}", e.message);
+    let s = f.store.lock().unwrap();
+    let n: i64 = s
+        .conn_ref()
+        .query_row("SELECT COUNT(*) FROM tracker_writes", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 0);
+}
+
 #[tokio::test]
 async fn a_subtask_of_a_jira_ticket_becomes_its_sub_task_and_keeps_everything() {
     let f = jira_fx(true);

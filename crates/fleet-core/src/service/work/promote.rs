@@ -258,7 +258,11 @@ pub fn promotion_view(
                 .get(&w.tracker_id)
                 .map(|t| t.name.clone())
                 .unwrap_or_default(),
-            error: (w.state == "failed").then_some(w.last_error).flatten(),
+            // A failed one says why; a pending one that already failed a
+            // try says why it is still trying (w07-3).
+            error: (w.state == "failed" || w.attempts > 0)
+                .then_some(w.last_error)
+                .flatten(),
             state: w.state,
         }))
 }
@@ -435,6 +439,7 @@ pub fn promote(
             ),
         ));
     }
+    trackers::write_back::refuse_unsendable(&s, &t)?;
     let item_org = s.item_org(id)?;
     if crosses(item_org, t.org_id) {
         return Err(IpcError::new(

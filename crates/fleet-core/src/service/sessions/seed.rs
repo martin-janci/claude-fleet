@@ -338,6 +338,22 @@ pub async fn seed_routine(
     seed_outcome(&pane, prompt, &BACKGROUND).await
 }
 
+/// Type a queued handover's `prompt` into `row` before returning
+/// ([`FOREGROUND`]), stamping `handover` delivered once the pane is ready.
+/// For an agent whose hooks never deliver a handover (Codex, review
+/// w20-1). `Err` says why nothing was typed; the session is live either way.
+pub async fn seed_handover_now(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    row: &SessionRow,
+    prompt: &str,
+    handover: i64,
+) -> Result<(), String> {
+    let mut pane = LivePane::new(store, ssh, row, Origin::Person, Some(HANDOVER));
+    pane.carries = vec![handover];
+    seed_outcome(&pane, prompt, &FOREGROUND).await
+}
+
 /// Wait ([`FOREGROUND`]) for `row`'s REPL before the caller types into it
 /// itself.
 pub async fn wait_for_repl(

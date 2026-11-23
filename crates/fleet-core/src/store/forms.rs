@@ -62,6 +62,28 @@ fn row(r: &rusqlite::Row<'_>) -> Result<FormRow> {
     })
 }
 
+/// Cancel the pending forms of `session_ids` on `tx`: their sessions are
+/// lost or gone, so nobody is left to answer (review w13-2). The caller
+/// emits the rows. Returns how many were cancelled.
+pub(super) fn cancel_pending_forms_in(
+    tx: &rusqlite::Connection,
+    session_ids: &[i64],
+    now: i64,
+) -> Result<usize> {
+    if session_ids.is_empty() {
+        return Ok(0);
+    }
+    let sql = format!(
+        "UPDATE form_requests SET state = 'cancelled', decided_at = ?1 \
+          WHERE state = 'pending' AND session_id IN ({})",
+        super::rows::in_clause(session_ids.len())
+    );
+    tx.execute(
+        &sql,
+        super::rows::params_then(rusqlite::params![now], session_ids).as_slice(),
+    )
+}
+
 impl Store {
     pub fn form_notify(&self) -> std::sync::Arc<tokio::sync::Notify> {
         self.form_notify.clone()
@@ -572,5 +594,33 @@ mod tests {
         assert_eq!(s.cancel_forms_of_session(sid).unwrap(), 1);
         assert_eq!(s.form("f_one").unwrap().unwrap().state, "cancelled");
         assert_eq!(s.cancel_forms_of_session(sid).unwrap(), 0);
+    }
+
+    /// Review w13-2: a session lost to a host's mass loss, or deleted, has
+    /// nobody left to answer its form.
+    #[test]
+    fn a_lost_or_deleted_session_cancels_its_pending_form() {
+        let (s, _) = store_with_recorder();
+        let sid = seed(&s);
+        let other = seed_other(&s);
+        s.insert_form(&new("f_lost", sid)).unwrap();
+        s.insert_form(&new("f_gone", other)).unwrap();
+        s.mark_host_sessions_lost("h", "host_reboot", &["other".to_string()], 50, 0)
+            .unwrap();
+        assert_eq!(s.form("f_lost").unwrap().unwrap().state, "cancelled");
+        assert!(s
+            .get_session_by_id(sid)
+            .unwrap()
+            .unwrap()
+            .pending_form
+            .is_none());
+        assert_eq!(s.form("f_gone").unwrap().unwrap().state, "pending");
+        s.delete_session(other).unwrap();
+        // Deleting the row takes its forms with it (or leaves them
+        // cancelled): either way nothing pending is left to answer.
+        assert!(s
+            .form("f_gone")
+            .unwrap()
+            .is_none_or(|f| f.state == "cancelled"));
     }
 }

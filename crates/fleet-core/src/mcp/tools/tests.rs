@@ -1169,6 +1169,53 @@ fn a_readonly_tool_call_writes_no_audit_row_at_all() {
     );
 }
 
+/// Review w19-1: a polled read action of a mixed tool (`routines
+/// {failing}`, `debug_devices {list}`, `control_auto_continue {status}`)
+/// writes no row either, with a controller registered; a write action of
+/// the same tool still does.
+#[test]
+fn a_polled_read_action_writes_no_audit_row() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        id
+    };
+    for (tool, action) in [
+        ("routines", "failing"),
+        ("routines", "list"),
+        ("debug_devices", "list"),
+        ("control_auto_continue", "status"),
+        ("dashboards", "list"),
+    ] {
+        let args = serde_json::json!({ "action": action });
+        persist_audit(&store, tool, args.as_object(), &Caller::master());
+    }
+    assert!(
+        !store
+            .lock()
+            .unwrap()
+            .list_session_events(id, 10)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "mcp_call"),
+        "a polled read must write no audit row"
+    );
+    let args = serde_json::json!({ "action": "run_now", "routine_id": 1 });
+    persist_audit(&store, "routines", args.as_object(), &Caller::master());
+    assert!(store
+        .lock()
+        .unwrap()
+        .list_session_events(id, 10)
+        .unwrap()
+        .iter()
+        .any(|e| e.kind == "mcp_call"));
+}
+
 /// A mutating tool call is still audited — unaffected by the read-only skip.
 #[test]
 fn a_mutating_tool_call_is_still_audited() {
@@ -5451,7 +5498,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// parameter docs already trimmed) beside #1097's dashboard feeds
     /// measured the client full surface at 142,608 bytes for 162 tools (880
     /// a tool) and the master at 134,941 bytes for 158 tools (854 a tool).
-    const BYTES_PER_TOOL: usize = 890;
+    /// Raised to 901 on 2026-11-23: the second 20-wave review's confirm
+    /// nonces (sec-access-5, w15-1) and `waiting` measured the client full
+    /// surface at 145,259 bytes for 163 tools (891 a tool).
+    const BYTES_PER_TOOL: usize = 901;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -9831,6 +9881,56 @@ async fn the_operators_messages_and_review_notes_wait_for_a_person() {
     }
 }
 
+/// Review w03-2: a `resolve` answers the row `list` would show the caller,
+/// so a `drive` grantee who resolves a co-grantee's note does not read that
+/// person's name, device or id from the reply.
+#[tokio::test]
+async fn a_resolve_veils_a_co_grantees_note_as_list_does() {
+    let g = gate_fixture();
+    let (a_row, ada, bob) = (g.a_row, g.ada, g.bob);
+    let carol = g.store.create_person("carol", None).unwrap().id;
+    for who in [bob, carol] {
+        g.store
+            .grant_session(
+                a_row,
+                crate::store::GrantRecipient::Person(who),
+                crate::store::GRANT_DRIVE,
+                ada,
+            )
+            .unwrap();
+    }
+    let note = crate::store::NewReviewNote {
+        path: "a.rs".into(),
+        side: "new".into(),
+        body: "from carol".into(),
+        ..Default::default()
+    };
+    g.store
+        .insert_review_notes(a_row, "c", &[note], "Carol · pixel", Some(carol), 1)
+        .unwrap();
+    let id = g.store.review_notes(a_row).unwrap()[0].id;
+    let t = &test_tools(g.store);
+    let resolve = |who: i64| async move {
+        let p = serde_json::from_value::<ReviewNotesParams>(serde_json::json!({
+            "session_id": a_row, "action": "resolve", "note_id": id,
+        }))
+        .unwrap();
+        result_json(
+            &t.review_notes(Extension(device_of(who, ada)), Parameters(p))
+                .await
+                .expect("a drive grantee resolves"),
+        )
+    };
+    let bobs = resolve(bob).await;
+    assert_eq!(bobs["author"], "someone else", "{bobs}");
+    assert!(bobs["author_person_id"].is_null(), "{bobs}");
+    assert_eq!(bobs["body"], "from carol");
+    // The owner reads every author.
+    let adas = resolve(ada).await;
+    assert_eq!(adas["author"], "Carol · pixel", "{adas}");
+    assert_eq!(adas["author_person_id"], carol);
+}
+
 /// sec-access-1: the operator is bound to the owner, and the owner trusts
 /// their devices, yet the operator passes none of the trusted-device gates
 /// and its text is marked. `/debug` and `/propose` still run a rule.
@@ -9930,27 +10030,57 @@ async fn the_operator_never_passes_a_trusted_device_gate() {
         .unwrap_err();
     assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
 
-    // `agents`: a grant is refused, a run reaches the service (and fails
-    // there: there is no rule 99).
-    let agents = |action: &str| {
+    // `agents`: a grant is refused; a run reaches the service only for a
+    // rule of /debug's or /propose's definition (w15-5).
+    let rule = |definition: &str, scope: &str| {
+        t.store
+            .lock()
+            .unwrap()
+            .grant_agent_rule(&crate::store::NewAgentRule {
+                agent: "fleet".into(),
+                scope: scope.into(),
+                level: "act".into(),
+                host_alias: "box".into(),
+                project_id: None,
+                config: "{}".into(),
+                granted_by: "t".into(),
+                granted_at: 0,
+                expires_at: None,
+                definition: Some(definition.into()),
+                bindings: "[]".into(),
+            })
+            .unwrap()
+    };
+    let debug = rule("self-debug", "fleet:debug");
+    let other = rule("simplify", "fleet:simplify");
+    let agents = |action: &str, id: i64| {
         let t = t.clone();
         let op = op.clone();
         let args =
-            serde_json::from_value(serde_json::json!({ "action": action, "id": 99 })).unwrap();
+            serde_json::from_value(serde_json::json!({ "action": action, "id": id })).unwrap();
         async move { t.agents(Extension(op), Parameters(args)).await }
     };
-    let e = agents("revoke").await.unwrap_err();
+    let e = agents("revoke", debug).await.unwrap_err();
     assert!(
         e.message.starts_with("E_FORBIDDEN") && e.message.contains("trusts it"),
         "{}",
         e.message
     );
-    let e = agents("run").await.unwrap_err();
-    assert!(
-        !e.message.starts_with("E_FORBIDDEN"),
-        "the operator runs an existing rule: {}",
-        e.message
-    );
+    if let Err(e) = agents("run", debug).await {
+        assert!(
+            !e.message.starts_with("E_FORBIDDEN"),
+            "the operator runs /debug's rule: {}",
+            e.message
+        );
+    }
+    for id in [other, 99] {
+        let e = agents("run", id).await.unwrap_err();
+        assert!(
+            e.message.starts_with("E_FORBIDDEN") && e.message.contains("a person starts"),
+            "{}",
+            e.message
+        );
+    }
 }
 
 /// sec-access-3: a person's account ban change lands in the admin log.
@@ -20963,8 +21093,8 @@ fn the_share_schema_offers_a_person_or_an_org_and_nothing_else() {
     names.sort();
     assert_eq!(
         names,
-        vec!["level", "org", "person", "session_id"],
-        "session_share's arguments are exactly these: a person or an org, and no \
+        vec!["confirm_nonce", "level", "org", "person", "session_id"],
+        "session_share's arguments are exactly these: a person or an org (plus the confirm card's nonce, sec-access-5), and no \
          `host_alias`/`tmux_name` pair (a tmux name is reused by the next \
          session on that host)"
     );
@@ -21192,6 +21322,56 @@ async fn a_pane_the_reconcile_pass_rewrote_proves_nothing_next_request() {
 
 // ---- the behavioural half: sharing ----------------------------------------
 
+/// sec-access-5 (D3=b): Control may share the owner's session, but only a
+/// person's approval on a card lets it through; nothing is granted before.
+#[tokio::test]
+async fn the_operators_share_of_the_owners_session_waits_on_a_card() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    let owner = s.personal_owner_id().unwrap().expect("096 mints one");
+    assert_eq!(owner, OWNER_PERSON);
+    s.create_person("bob", None).unwrap();
+    let row = s
+        .upsert_session("a-dev", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.claim_if_unclaimed(row, Some(owner)).unwrap();
+    let t = guarded_tools(s, true);
+    let share = |nonce: Option<String>| {
+        t.session_share(
+            Extension(production_operator()),
+            Parameters(SessionShareParams {
+                session_id: row,
+                person: "bob".into(),
+                org: None,
+                level: "drive".into(),
+                confirm_nonce: nonce,
+            }),
+        )
+    };
+    let nonce = confirm_nonce_of(&share(None).await.unwrap_err());
+    let grants = || {
+        crate::service::sessions::session_access(&t.store.lock().unwrap(), row)
+            .unwrap()
+            .len()
+    };
+    assert_eq!(grants(), 0, "nothing shared before a person says so");
+    let card = t
+        .guards
+        .confirms
+        .pending()
+        .into_iter()
+        .find(|r| r.nonce == nonce)
+        .expect("a card");
+    assert!(
+        card.summary.contains("bob") && card.summary.contains("drive"),
+        "{}",
+        card.summary
+    );
+    assert!(t.guards.confirms.resolve(&nonce, true));
+    share(Some(nonce)).await.expect("approved");
+    assert_eq!(grants(), 1);
+}
+
 #[tokio::test]
 async fn sharing_is_the_owners_alone_and_a_grantee_cannot_share_on() {
     let f = shared_fixture();
@@ -21204,6 +21384,7 @@ async fn sharing_is_the_owners_alone_and_a_grantee_cannot_share_on() {
                 person,
                 org: None,
                 level,
+                confirm_nonce: None,
             }),
         )
     };
@@ -21241,6 +21422,7 @@ async fn an_ask_reaches_the_owner_alone_and_its_id_is_no_oracle() {
             person: "bob".into(),
             org: None,
             level: "watch".into(),
+            confirm_nonce: None,
         }),
     )
     .await
@@ -21263,6 +21445,7 @@ async fn an_ask_reaches_the_owner_alone_and_its_id_is_no_oracle() {
                 action: Some("grant".into()),
                 session_id: None,
                 id: Some(id),
+                confirm_nonce: None,
             }),
         )
     };
@@ -21295,6 +21478,7 @@ async fn a_level_outside_watch_and_drive_is_refused() {
                     person: "bob".into(),
                     org: None,
                     level: bad.into(),
+                    confirm_nonce: None,
                 }),
             )
             .await
@@ -21310,6 +21494,7 @@ async fn a_level_outside_watch_and_drive_is_refused() {
                 person: "bob".into(),
                 org: None,
                 level: "own".into(),
+                confirm_nonce: None,
             }),
         )
         .await
@@ -21337,6 +21522,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
             person: "bob".into(),
             org: None,
             level: "drive".into(),
+            confirm_nonce: None,
         }),
     )
     .await
@@ -21359,6 +21545,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
                 person: "carol".into(),
                 org: None,
                 level: "watch".into(),
+                confirm_nonce: None,
             }),
         )
         .await
@@ -21401,6 +21588,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
                 session_id: f.a_row,
                 person: "bob".into(),
                 org: None,
+                confirm_nonce: None,
             }),
         )
         .await
@@ -21427,6 +21615,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
                 person: "bob".into(),
                 org: None,
                 level: "drive".into(),
+                confirm_nonce: None,
             }),
         )
         .await
@@ -21440,6 +21629,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
             session_id: f.a_row,
             person: "bob".into(),
             org: None,
+            confirm_nonce: None,
         }),
     )
     .await
@@ -21470,6 +21660,7 @@ async fn my_grants_answers_the_callers_own_person_and_nobody_elses() {
             person: "bob".into(),
             org: None,
             level: "watch".into(),
+            confirm_nonce: None,
         }),
     )
     .await

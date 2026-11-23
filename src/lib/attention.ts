@@ -386,10 +386,12 @@ function isIdleLong(s: SessionRow, opts: AttentionOptions): boolean {
 export function classify(s: SessionRow, opts: AttentionOptions): TriageBucket {
   if (s.kind === 'external') return s.claude_status === 'working' ? 'working' : 'idle';
   if (s.kind === 'shell') return 'idle';
-  if (isWaiting(s)) return 'waiting';
-  if (s.stuck_kind || jevSays(s, 'stuck')) return 'stuck';
   // A dead row keeps its last context reading; a lost one reads `lifecycle`.
-  const live = s.status !== 'ghost' && s.lost_at === null;
+  const live = s.status !== 'ghost' && s.lost_at == null;
+  // Waiting is a live state: a lost row's open form has nobody to answer it
+  // (review w13-2). Mirrors `attention::needs_attention_in`.
+  if (live && isWaiting(s)) return 'waiting';
+  if (s.stuck_kind || jevSays(s, 'stuck')) return 'stuck';
   // Step 2.4: Blocked on something outside the session. Live rows only: a
   // host's mass loss is one Restore row, not a badge per session.
   const blocked = live ? blockedBy(s, opts) : null;

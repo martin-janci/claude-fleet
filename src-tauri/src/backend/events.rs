@@ -802,6 +802,10 @@ pub struct HubResync {
     hub: Arc<HubBackend>,
     sink: Arc<dyn RemoteEventSink>,
     seen: Mutex<Seen>,
+    /// Re-list sessions and hosts only: an extra fleet's view keeps no tasks,
+    /// accounts or Work view, so listing them would be calls whose answer the
+    /// window drops, paid on every reconnect (review w08-3).
+    rows_only: bool,
 }
 
 impl HubResync {
@@ -810,7 +814,15 @@ impl HubResync {
             hub,
             sink,
             seen: Mutex::new(Seen::default()),
+            rows_only: false,
         }
+    }
+
+    /// The re-list an extra fleet's bridge runs: sessions and hosts, then
+    /// [`RESYNCED_EVENT`]; no tasks, accounts or `work:changed`.
+    pub fn rows_only(mut self) -> Self {
+        self.rows_only = true;
+        self
     }
 
     /// Emit one row under `name`, exactly as the hub sent it.
@@ -916,6 +928,15 @@ impl FleetResync for HubResync {
                 "[hub events] could not re-list hosts after reconnecting"
             ),
         }
+        if self.rows_only {
+            if reached {
+                self.sink.emit_remote(
+                    RESYNCED_EVENT,
+                    serde_json::json!({ "projects": true, "work": false }),
+                );
+            }
+            return;
+        }
         match self.hub.list_tasks(None, None, None).await {
             Ok(rows) => {
                 reached = true;
@@ -973,11 +994,21 @@ const MAX_HEAD: usize = 64 * 1024;
 /// The real [`HubEventStream`]: `GET /events` on the configured hub.
 pub struct HubSse {
     cfg: RemoteConfig,
+    /// The `?kinds=` filter, `None` for every kind (the primary's bridge).
+    kinds: Option<&'static str>,
 }
 
 impl HubSse {
     pub fn new(cfg: RemoteConfig) -> Self {
-        Self { cfg }
+        Self { cfg, kinds: None }
+    }
+
+    /// Subscribe to these event kinds only (`/events?kinds=`, comma
+    /// separated): an extra fleet's view keeps sessions, hosts and projects,
+    /// so nothing else need cross the link and IPC (review w08-3).
+    pub fn with_kinds(mut self, kinds: &'static str) -> Self {
+        self.kinds = Some(kinds);
+        self
     }
 }
 
@@ -994,9 +1025,12 @@ impl HubEventStream for HubSse {
     async fn open(&self, last_id: Option<&str>) -> Result<Box<dyn EventStreamBody>, String> {
         let url = format!("{}/events", self.cfg.base_url);
         let at = Endpoint::parse(&url)?;
-        let opened = tokio::time::timeout(OPEN_TIMEOUT, open_stream(&at, &self.cfg.token, last_id))
-            .await
-            .map_err(|_| format!("no response head within {OPEN_TIMEOUT:.0?}"))?;
+        let opened = tokio::time::timeout(
+            OPEN_TIMEOUT,
+            open_stream(&at, &self.cfg.token, last_id, self.kinds),
+        )
+        .await
+        .map_err(|_| format!("no response head within {OPEN_TIMEOUT:.0?}"))?;
         // The token can appear in a transport error only if something echoed
         // it back; scrubbed here for the same reason `HubBackend::redact`
         // exists, since this string reaches the log.
@@ -1019,9 +1053,18 @@ fn redact(text: &str, token: &str) -> String {
 /// intermediary buffering the stream into uselessness. `Last-Event-ID` is
 /// the last row frame this client applied (`/events` replays from it, or
 /// says `resumed: false`).
-pub fn events_request(at: &Endpoint, bearer: &str, last_id: Option<&str>) -> String {
+///
+/// `kinds` is the `?kinds=` filter ([`HubSse::with_kinds`]): put on the
+/// request target here, because an [`Endpoint`] holds no query.
+pub fn events_request(
+    at: &Endpoint,
+    bearer: &str,
+    last_id: Option<&str>,
+    kinds: Option<&str>,
+) -> String {
+    let query = kinds.map(|k| format!("?kinds={k}")).unwrap_or_default();
     let mut request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {bearer}\r\n\
+        "GET {}{query} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {bearer}\r\n\
          Accept: text/event-stream\r\nCache-Control: no-cache\r\n",
         at.target(),
         at.authority()
@@ -1048,10 +1091,11 @@ async fn open_stream(
     at: &Endpoint,
     bearer: &str,
     last_id: Option<&str>,
+    kinds: Option<&str>,
 ) -> Result<Box<dyn EventStreamBody>, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut conn = connect(at).await?;
-    let request = events_request(at, bearer, last_id);
+    let request = events_request(at, bearer, last_id, kinds);
     conn.write_all(request.as_bytes())
         .await
         .map_err(|e| format!("send to {}:{}: {e}", at.host(), at.port()))?;

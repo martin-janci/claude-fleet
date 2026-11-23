@@ -823,6 +823,14 @@ async fn write_loop(
                 () = superseded.cancelled() => break,
             },
         };
+        // A cancelled upload's queued chunks and final frame are not sent:
+        // its caller was already told it failed, and up to 200 MiB would
+        // otherwise still cross (and be written) behind it (review w10-4).
+        // Everything queued before the `cancel` is in `bulk` by now: the
+        // drain above runs before the small lane is popped.
+        if let HubFrame::Cancel { id } = &frame {
+            bulk.retain(|f| bulk_upload_id(f) != Some(id.as_str()));
+        }
         // Armed BEFORE the frame goes out, so the answer can never beat its
         // own budget onto the socket.
         if let Some((id, budget, expires)) = answer_budget(&frame) {
@@ -887,6 +895,14 @@ fn is_bulk(frame: &HubFrame) -> bool {
             bytes_b64, chunks, ..
         } => *chunks > 0 || bytes_b64.len() > BULK_FRAME_BYTES,
         _ => false,
+    }
+}
+
+/// The upload a bulk frame belongs to.
+fn bulk_upload_id(frame: &HubFrame) -> Option<&str> {
+    match frame {
+        HubFrame::UploadChunk { id, .. } | HubFrame::Upload { id, .. } => Some(id),
+        _ => None,
     }
 }
 
@@ -1036,32 +1052,49 @@ async fn read_loop(
                             })) => {
                                 // Only for a request this hub is waiting on,
                                 // and only up to what its answer may cost.
-                                let limit = budgets
+                                let (limit, late) = {
+                                    let b = budgets.lock().unwrap_or_else(|e| e.into_inner());
+                                    (b.armed.get(&id).map(|(budget, _)| *budget), b.is_late(&id))
+                                };
+                                if late {
+                                    // Its caller already gave up: drop it.
+                                    assembly.forget(&id);
+                                    tracing::debug!(host = %alias, conn = conn_id, id, "[agent] dropping a late result chunk");
+                                } else {
+                                    let pushed =
+                                        match limit {
+                                            None => Err("a result chunk for no request in flight"
+                                                .to_string()),
+                                            Some(limit) => decode_b64(&stdout_b64)
+                                                .and_then(|out| {
+                                                    decode_b64(&stderr_b64).map(|err| (out, err))
+                                                })
+                                                .and_then(|(out, err)| {
+                                                    assembly.push(&id, &out, &err, limit)
+                                                })
+                                                .map_err(|e| e.to_string()),
+                                        };
+                                    if let Err(why) = pushed {
+                                        tracing::warn!(
+                                            host = %alias, conn = conn_id, why,
+                                            "[agent] refusing a result chunk; closing"
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
+                            Ok(Decoded::Frame(AgentFrame::Result { id, .. }))
+                                if budgets
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner())
-                                    .armed
-                                    .get(&id)
-                                    .map(|(budget, _)| *budget);
-                                let pushed = match limit {
-                                    None => {
-                                        Err("a result chunk for no request in flight".to_string())
-                                    }
-                                    Some(limit) => decode_b64(&stdout_b64)
-                                        .and_then(|out| {
-                                            decode_b64(&stderr_b64).map(|err| (out, err))
-                                        })
-                                        .and_then(|(out, err)| {
-                                            assembly.push(&id, &out, &err, limit)
-                                        })
-                                        .map_err(|e| e.to_string()),
-                                };
-                                if let Err(why) = pushed {
-                                    tracing::warn!(
-                                        host = %alias, conn = conn_id, why,
-                                        "[agent] refusing a result chunk; closing"
-                                    );
-                                    return;
-                                }
+                                    .is_late(&id) =>
+                            {
+                                // The end of an answer whose caller timed
+                                // out: nobody reads it, and its chunks were
+                                // dropped above.
+                                assembly.forget(&id);
+                                budgets.lock().unwrap_or_else(|e| e.into_inner()).done(&id);
+                                tracing::debug!(host = %alias, conn = conn_id, id, "[agent] dropping a late result");
                             }
                             Ok(Decoded::Frame(frame)) => {
                                 let frame = match reassembled(&mut assembly, frame) {
@@ -1189,10 +1222,27 @@ enum Step {
 /// a frame's size has to be judged *before* it is parsed, and its `id` is
 /// inside it: the most an agent can spend is therefore the most any one
 /// outstanding request could honestly need.
+///
+/// An entry whose time ran out moves to `late` for [`LATE_DROP_WINDOW`]: its
+/// caller already got `E_SSH_TIMEOUT`, but the agent may still be shipping
+/// the answer (a cancelled exec's capture, a slow uplink). Those frames are
+/// dropped, not taken as a protocol breach that closes the connection and
+/// fails every other request in flight (review w10-3).
 #[derive(Default)]
 struct Budgets {
     armed: HashMap<String, (usize, Instant)>,
+    /// id → (its budget, when it ran out).
+    late: HashMap<String, (usize, Instant)>,
 }
+
+/// How long a timed-out request's late answer is still recognised (and
+/// dropped quietly).
+const LATE_DROP_WINDOW: Duration = Duration::from_secs(600);
+/// At most this many timed-out ids are remembered.
+const LATE_MAX_IDS: usize = 256;
+/// The frame a late chunk may take: one [`fleet_proto::CHUNK_BYTES`] piece
+/// in base64, plus the envelope.
+const LATE_FRAME_BYTES: usize = fleet_proto::CHUNK_BYTES / 3 * 4 + 64 * 1024;
 
 impl Budgets {
     fn arm(&mut self, id: String, budget: usize, expires: Instant) {
@@ -1201,6 +1251,12 @@ impl Budgets {
 
     fn done(&mut self, id: &str) {
         self.armed.remove(id);
+        self.late.remove(id);
+    }
+
+    /// Whether `id` timed out here and its answer is no longer awaited.
+    fn is_late(&self, id: &str) -> bool {
+        !self.armed.contains_key(id) && self.late.contains_key(id)
     }
 
     /// The ceiling for the next inbound frame. Expired entries are dropped
@@ -1208,13 +1264,33 @@ impl Budgets {
     /// leave the connection at the full ceiling for as long as it stayed open.
     fn allowance(&mut self) -> usize {
         let now = Instant::now();
-        self.armed.retain(|_, (_, expires)| *expires > now);
+        let late = &mut self.late;
+        self.armed.retain(|id, (budget, expires)| {
+            let live = *expires > now;
+            // Only an answer big enough to come in chunks can come late in
+            // a frame larger than the floor.
+            if !live && *budget > MIN_INBOUND_BYTES && late.len() < LATE_MAX_IDS {
+                late.insert(id.clone(), (*budget, now));
+            }
+            live
+        });
+        self.late
+            .retain(|_, (_, since)| now.saturating_duration_since(*since) < LATE_DROP_WINDOW);
+        // A late answer arrives in chunk-sized frames at most, so a timed-out
+        // uncapped exec does not keep the full ceiling open.
+        let floor = self
+            .late
+            .values()
+            .map(|(budget, _)| (*budget).min(LATE_FRAME_BYTES))
+            .max()
+            .unwrap_or(0)
+            .max(MIN_INBOUND_BYTES);
         self.armed
             .values()
             .map(|(budget, _)| *budget)
             .max()
             .unwrap_or(0)
-            .max(MIN_INBOUND_BYTES)
+            .max(floor)
     }
 }
 
@@ -2976,7 +3052,39 @@ mod tests {
             Instant::now() + Duration::from_secs(10),
         );
         assert_eq!(b.allowance(), MIN_INBOUND_BYTES * 4);
+        b.arm(
+            "uncapped".into(),
+            MAX_FRAME_BYTES,
+            Instant::now() + Duration::from_secs(10),
+        );
         tokio::time::sleep(Duration::from_secs(60)).await;
+        // Expired: a late chunk may still arrive (review w10-3), but in
+        // chunk-sized frames, never the full ceiling.
+        assert_eq!(b.allowance(), LATE_FRAME_BYTES.max(MIN_INBOUND_BYTES * 4));
+        const { assert!(LATE_FRAME_BYTES < MAX_FRAME_BYTES) };
+        assert!(b.is_late("gone") && b.is_late("uncapped"));
+        tokio::time::sleep(LATE_DROP_WINDOW).await;
         assert_eq!(b.allowance(), MIN_INBOUND_BYTES, "expired");
+        assert!(!b.is_late("gone"));
+    }
+
+    /// Review w10-3: the answer of an exec whose caller timed out is dropped
+    /// quietly; an id the hub never sent is still a breach.
+    #[tokio::test(start_paused = true)]
+    async fn only_a_timed_out_request_is_late() {
+        let mut b = Budgets::default();
+        b.arm(
+            "slow".into(),
+            MIN_INBOUND_BYTES * 4,
+            Instant::now() + Duration::from_secs(10),
+        );
+        b.allowance();
+        assert!(!b.is_late("slow"), "still awaited");
+        tokio::time::sleep(Duration::from_secs(11)).await;
+        b.allowance();
+        assert!(b.is_late("slow"));
+        assert!(!b.is_late("never-sent"));
+        b.done("slow");
+        assert!(!b.is_late("slow"), "its final result ends it");
     }
 }

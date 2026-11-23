@@ -850,10 +850,15 @@ pub struct PtyOpenArgs {
 ///
 /// Returns the open's generation; `pty_drain` takes it back so a drain meant
 /// for an earlier attach under the same id drains nothing.
-#[tauri::command(async)]
-pub fn pty_open(
+///
+/// An `async fn`, and the blocking part on a blocking thread: `(async)` on a
+/// plain `fn` runs the body on a runtime worker, where the WSL wait (up to
+/// `SETTLE_WAIT`), the `tmux has-session` and the spawn parked one worker
+/// each, and a few panes parked all of them (review w12-2).
+#[tauri::command]
+pub async fn pty_open(
     args: PtyOpenArgs,
-    state: State<'_, Mutex<PtyState>>,
+    app: tauri::AppHandle,
     ssh: State<'_, std::sync::Arc<SshClient>>,
 ) -> Result<u64, IpcError> {
     // Validate untrusted IPC input before it reaches `ssh` / `tmux`.
@@ -865,7 +870,23 @@ pub fn pty_open(
     // A `wsl-` host may still be being detected at startup; until it is, it
     // would read as an SSH alias. Waited for BEFORE `openpty`, so no pseudo
     // console is held open through the (up to `SETTLE_WAIT`) wait.
-    fleet_core::wsl::settled_for_blocking(&args.host_alias);
+    fleet_core::wsl::settled_for(&args.host_alias).await;
+    let ssh = std::sync::Arc::clone(ssh.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        let state = app.state::<Mutex<PtyState>>();
+        open_blocking(args, &state, &ssh)
+    })
+    .await
+    .map_err(|e| IpcError::new(codes::E_PTY, format!("pty_open: {e}")))?
+}
+
+/// The body of [`pty_open`] past the WSL wait, on a blocking thread.
+fn open_blocking(
+    args: PtyOpenArgs,
+    state: &Mutex<PtyState>,
+    ssh: &SshClient,
+) -> Result<u64, IpcError> {
     // Refuse a new id over the cap before spawning anything; `install`
     // checks again under the same lock it inserts with.
     {
@@ -888,7 +909,7 @@ pub fn pty_open(
             || local_tmux_has_session(&args.session_name),
         )
     };
-    let mux_opts = attach_mux_opts(&ssh, &host_alias);
+    let mux_opts = attach_mux_opts(ssh, &host_alias);
     let program = attach_program_label(&host_alias, is_wsl);
 
     let pty_system = native_pty_system();
@@ -1007,10 +1028,15 @@ pub struct PtyDrainResult {
     pub overflowed: bool,
 }
 
-/// The id-only argument of `pty_close`.
+/// The argument of `pty_close`: the id, and optionally the generation
+/// `pty_open` returned. With one, only that attach is closed: an open that
+/// stood down late closes its own PTY, never the one another pane has
+/// installed under the id since (review w12-3).
 #[derive(Deserialize)]
 pub struct PtyIdArgs {
     pub id: String,
+    #[serde(default)]
+    pub generation: Option<u64>,
 }
 
 /// `pty_drain`'s argument: the id, and the generation `pty_open` returned
@@ -1050,7 +1076,8 @@ fn drain_from(state: &Mutex<PtyState>, id: &str) -> Result<PtyDrainResult, IpcEr
 ///
 /// An id that is not open drains nothing: no bytes, no EOF, as a closed
 /// single PTY always did. Neither does a `generation` that is not the open
-/// one's: that drain was meant for an attach that has been replaced.
+/// one's: that drain was meant for an attach that has been replaced. With a
+/// `generation`, both answer EOF and no bytes: that attach is over.
 fn drain_open(
     state: &Mutex<PtyState>,
     id: &str,
@@ -1066,11 +1093,24 @@ fn drain_open(
         let mut map = state
             .lock()
             .map_err(|_| IpcError::new(codes::E_LOCK, "pty mutex poisoned"))?;
+        // A drain that names its attach's generation learns when that attach
+        // is over: gone, or replaced by another open under the id (another
+        // pane, a pop-out, a stale open landing late). "Nothing yet" there
+        // froze the pane for good, since only EOF reconnects it (review
+        // w12-3). The pane that replaced it drains with its own generation.
+        let ended = || PtyDrainResult {
+            eof: true,
+            ..nothing()
+        };
         let Some(s) = map.entries.get_mut(id) else {
-            return Ok(nothing());
+            return Ok(if generation.is_some() {
+                ended()
+            } else {
+                nothing()
+            });
         };
         if generation.is_some_and(|g| g != s.shared.generation) {
-            return Ok(nothing());
+            return Ok(ended());
         }
         #[cfg(windows)]
         s.poll_child_exit(CHILD_EXIT_GRACE);
@@ -1183,8 +1223,31 @@ fn resize_in(state: &Mutex<PtyState>, id: &str, cols: u16, rows: u16) -> Result<
 #[tauri::command(async)]
 pub fn pty_close(args: PtyIdArgs, state: State<'_, Mutex<PtyState>>) -> Result<(), IpcError> {
     validate_pty_id(&args.id)?;
-    close_pty(&state, &args.id);
+    match args.generation {
+        Some(g) => close_pty_generation(&state, &args.id, g),
+        None => close_pty(&state, &args.id),
+    }
     Ok(())
+}
+
+/// [`close_pty`], only while `id` still holds the attach of `generation`.
+fn close_pty_generation(state: &Mutex<PtyState>, id: &str, generation: u64) {
+    let parts = match state.lock() {
+        Ok(mut s) => {
+            if s.entries
+                .get(id)
+                .is_some_and(|e| e.shared.generation == generation)
+            {
+                s.remove(id)
+            } else {
+                None
+            }
+        }
+        Err(_) => return,
+    };
+    if let Some(parts) = parts {
+        parts.teardown();
+    }
 }
 
 #[cfg(test)]
@@ -2046,6 +2109,8 @@ mod tests {
         assert_ne!(old_gen, new.generation);
         new.note("first output");
         let stale = drain_open(&state, ID, Some(old_gen)).unwrap();
+        // No bytes, and EOF: that attach is over (review w12-3). The pane
+        // that issued it has replaced its screen and drops the answer.
         assert_eq!(
             (
                 stale.data.as_str(),
@@ -2053,13 +2118,32 @@ mod tests {
                 stale.eof,
                 stale.overflowed
             ),
-            ("", 0, false, false)
+            ("", 0, true, false)
         );
         let current = drain_open(&state, ID, Some(new.generation)).unwrap();
         assert_eq!(current.data, "first output");
         // No generation drains whatever is open, as before.
         new.note("more");
         assert_eq!(drain_open(&state, ID, None).unwrap().data, "more");
+    }
+
+    // Review w12-3: a pane whose attach was closed or replaced by another
+    // pane learns it is over, and a late close names its own attach.
+    #[test]
+    fn a_drain_for_an_attach_that_is_gone_is_eof_and_a_close_spares_its_successor() {
+        let state = Mutex::new(PtyState::new());
+        let first = state.lock().unwrap().entry(ID).shared.generation;
+        assert!(drain_open(&state, "gone", Some(first)).unwrap().eof);
+        assert!(!drain_open(&state, "gone", None).unwrap().eof);
+        let next = Arc::new(PtyShared::new());
+        state.lock().unwrap().entry(ID).shared = Arc::clone(&next);
+        close_pty_generation(&state, ID, first);
+        assert!(
+            state.lock().unwrap().entries.contains_key(ID),
+            "the successor stays"
+        );
+        close_pty_generation(&state, ID, next.generation);
+        assert!(!state.lock().unwrap().entries.contains_key(ID));
     }
 
     #[test]

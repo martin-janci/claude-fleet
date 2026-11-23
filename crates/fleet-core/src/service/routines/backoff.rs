@@ -135,7 +135,7 @@ pub fn next_fire(
     let Some(cron) = super::schedule(&r.trigger, r.cron.as_deref()).filter(|_| r.enabled) else {
         return (None, None);
     };
-    let next_after = |t: i64| cron.next_after(t, r.utc_offset_min);
+    let next_after = |t: i64| cron.next_in(t, r.time_zone.as_deref(), r.utc_offset_min);
     let Some(first) = next_after(now) else {
         return (None, None);
     };

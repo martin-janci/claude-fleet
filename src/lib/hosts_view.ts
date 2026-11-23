@@ -658,7 +658,8 @@ export function endpointOutage(
  * to them, its control-API token, worktree rows, parent fingerprints and
  * estimated-usage history. `remove_host` runs no SSH (unless the dialog's
  * "also delete fleet's tokens and keys there" is ticked, which deletes only
- * those files), so tmux on the host is untouched. `local` is never removed.
+ * those files, or "also delete fleet's login profiles there", which removes
+ * those profiles), so tmux on the host is untouched. `local` is never removed.
  */
 export function removeHostMessage(alias: string, sessionRows: number): string {
   const rows =

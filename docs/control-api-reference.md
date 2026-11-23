@@ -13,7 +13,7 @@ Asks for a wider level on sessions you OWN. list (default; session_id narrows it
 
 Access: the master or a paired device; not a per-host token · deadline 60 s.
 
-Parameters (* required): `action`, `id`, `session_id`
+Parameters (* required): `action`, `confirm_nonce`, `id`, `session_id`
 
 ### `account_usage`
 
@@ -767,11 +767,11 @@ Parameters (* required): `id`*
 
 ### `remove_host`
 
-Remove a host; its sessions are orphaned. Returns the removed row. delete_credentials: also delete fleet's token and key files from its login profiles first (best effort, reported as `credentials`).
+Remove a host; its sessions are orphaned. Returns the removed row. delete_credentials: also delete fleet's token and key files (setup tokens and API keys only) from its login profiles first (best effort, reported as `credentials`). delete_login_profiles: also remove the login profiles fleet lists there, which signs their subscription logins out (best effort, reported as `login_profiles`).
 
 Access: the master token only · deadline 60 s.
 
-Parameters (* required): `alias`*, `delete_credentials`
+Parameters (* required): `alias`*, `delete_credentials`, `delete_login_profiles`
 
 ### `rename_session`
 
@@ -931,7 +931,7 @@ Ask a colleague to review a session you OWN: ask {session_id, person, note?} sha
 
 Access: the master or a paired device; not a per-host token · deadline 60 s.
 
-Parameters (* required): `action`, `done`, `id`, `note`, `person`, `session_id`
+Parameters (* required): `action`, `confirm_nonce`, `done`, `id`, `note`, `person`, `session_id`
 
 ### `revoke_client`
 
@@ -1091,7 +1091,7 @@ Lower a person's or org's grant on your session to watch (owner only). Nothing r
 
 Access: the master or a paired device; not a per-host token · deadline 60 s.
 
-Parameters (* required): `org`, `person`, `session_id`*
+Parameters (* required): `confirm_nonce`, `org`, `person`, `session_id`*
 
 ### `session_presence`
 
@@ -1115,7 +1115,7 @@ Share a session you OWN with a person, or an org you are in (its members from no
 
 Access: the master or a paired device; not a per-host token · deadline 60 s.
 
-Parameters (* required): `level`*, `org`, `person`, `session_id`*
+Parameters (* required): `confirm_nonce`, `level`*, `org`, `person`, `session_id`*
 
 ### `session_summary_since`
 
@@ -1147,7 +1147,7 @@ Revoke a person's or org's grant on your session (owner only; kept, revoked, for
 
 Access: the master or a paired device; not a per-host token · deadline 60 s.
 
-Parameters (* required): `org`, `person`, `session_id`*
+Parameters (* required): `confirm_nonce`, `org`, `person`, `session_id`*
 
 ### `set_account_nickname`
 

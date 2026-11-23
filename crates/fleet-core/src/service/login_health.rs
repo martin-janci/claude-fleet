@@ -238,10 +238,21 @@ pub fn record(s: &Store, obs: &[Observation], now: i64) -> Result<Vec<Observatio
                 went_out.push(o.clone());
             }
         }
-        // A login seen signed in: panes whose last turn ended before now
-        // still show the old error, and must not note it again.
+        // A login seen signed in after it was signed out (on the row, or
+        // noted and not yet recorded): panes whose last turn ended before
+        // now still show the old error, and must not note it again. Only
+        // such a login is marked; a login that was never out has no stale
+        // pane to forget (review w01-1).
         for o in mine.iter().filter(|o| !o.signed_out) {
-            mark_cleared(&o.host_alias, o.profile.as_deref(), now);
+            let profile = o.profile.as_deref();
+            let noted = with_noted(|q| {
+                q.iter().any(|n| {
+                    n.obs.host_alias == o.host_alias && n.obs.profile.as_deref() == profile
+                })
+            });
+            if is_signed_out(&row, profile) || noted {
+                mark_cleared(s, &o.host_alias, profile, now);
+            }
         }
         s.set_host_signed_out_logins(alias, &next)?;
     }
@@ -255,14 +266,22 @@ pub fn record(s: &Store, obs: &[Observation], now: i64) -> Result<Vec<Observatio
     Ok(went_out)
 }
 
+/// One queued signed-out note: the login, and when the turn that showed
+/// it ended (`i64::MAX` for a headless run refused just now).
+#[derive(Debug, Clone)]
+struct Noted {
+    obs: Observation,
+    turn_ended_at: i64,
+}
+
 #[cfg(not(test))]
-static NOTED: Mutex<Vec<Observation>> = Mutex::new(Vec::new());
+static NOTED: Mutex<Vec<Noted>> = Mutex::new(Vec::new());
 
 /// Run `f` over the queue [`note_signed_out`] fills. Process-wide in the
 /// app; per thread under test (libtest runs each test on a thread of its
 /// own), so a test that builds a signed-out error never leaks a note into
 /// another test's poll.
-fn with_noted<R>(f: impl FnOnce(&mut Vec<Observation>) -> R) -> R {
+fn with_noted<R>(f: impl FnOnce(&mut Vec<Noted>) -> R) -> R {
     #[cfg(not(test))]
     {
         f(&mut NOTED.lock().unwrap_or_else(|e| e.into_inner()))
@@ -270,16 +289,13 @@ fn with_noted<R>(f: impl FnOnce(&mut Vec<Observation>) -> R) -> R {
     #[cfg(test)]
     {
         thread_local! {
-            static NOTED: Mutex<Vec<Observation>> = const { Mutex::new(Vec::new()) };
+            static NOTED: Mutex<Vec<Noted>> = const { Mutex::new(Vec::new()) };
         }
         NOTED.with(|q| f(&mut q.lock().unwrap_or_else(|e| e.into_inner())))
     }
 }
 
-/// A headless run on `host_alias` under `profile` was refused for want of a
-/// login: remember it for the next pass ([`drain_noted`]). No store at hand
-/// where that is found, so it waits here; bounded, the oldest dropped.
-pub fn note_signed_out(host_alias: &str, profile: Option<&str>) {
+fn push_noted(host_alias: &str, profile: Option<&str>, turn_ended_at: i64) {
     let o = Observation {
         host_alias: host_alias.to_string(),
         profile: profile.map(str::to_string),
@@ -287,48 +303,77 @@ pub fn note_signed_out(host_alias: &str, profile: Option<&str>) {
     };
     with_noted(|q| {
         // A pane keeps showing its error every reconcile pass until the
-        // next turn: one note per login is enough.
-        if q.contains(&o) {
+        // next turn: one note per login is enough (the latest turn kept).
+        if let Some(n) = q.iter_mut().find(|n| n.obs == o) {
+            n.turn_ended_at = n.turn_ended_at.max(turn_ended_at);
             return;
         }
         if q.len() >= NOTED_MAX {
             q.remove(0);
         }
-        q.push(o);
+        q.push(Noted {
+            obs: o,
+            turn_ended_at,
+        });
     });
 }
 
-/// When each login was last seen signed in again after a signed-out note
-/// ([`record`]): `(host, profile, at)`. Process-wide in the app, per thread
-/// under test, like the note queue.
+/// A headless run on `host_alias` under `profile` was refused for want of a
+/// login: remember it for the next pass ([`drain_noted`]). No store at hand
+/// where that is found, so it waits here; bounded, the oldest dropped.
+pub fn note_signed_out(host_alias: &str, profile: Option<&str>) {
+    push_noted(host_alias, profile, i64::MAX);
+}
+
+/// The settings key holding when each login was last seen signed in again
+/// after it was signed out ([`record`]): a JSON list of
+/// `[host, profile|null, at]`. In the store rather than in memory, so a
+/// restart does not forget it and let a pane's old error line sign the
+/// login out again (review w01-1: a setup-token or API-key login is never
+/// rechecked, so nothing would ever clear that).
+pub const CLEARED_KEY: &str = "login_health.cleared";
+/// Cleared marks kept, at most (the oldest dropped).
+const CLEARED_MAX: usize = 256;
+
 type Cleared = Vec<(String, Option<String>, i64)>;
 
-#[cfg(not(test))]
-static CLEARED: Mutex<Cleared> = Mutex::new(Vec::new());
+fn read_cleared(s: &Store) -> Cleared {
+    s.get_setting(CLEARED_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default()
+}
 
-fn with_cleared<R>(f: impl FnOnce(&mut Cleared) -> R) -> R {
-    #[cfg(not(test))]
-    {
-        f(&mut CLEARED.lock().unwrap_or_else(|e| e.into_inner()))
-    }
-    #[cfg(test)]
-    {
-        thread_local! {
-            static CLEARED: Mutex<Cleared> = const { Mutex::new(Vec::new()) };
-        }
-        CLEARED.with(|q| f(&mut q.lock().unwrap_or_else(|e| e.into_inner())))
-    }
+/// When the login `profile` on `host_alias` was last signed in again.
+fn cleared_at(s: &Store, host_alias: &str, profile: Option<&str>) -> Option<i64> {
+    read_cleared(s)
+        .into_iter()
+        .find(|(h, p, _)| h == host_alias && p.as_deref() == profile)
+        .map(|(_, _, at)| at)
 }
 
 /// The login `profile` on `host_alias` was signed in again at `at` (Sign
 /// in again, a new token or key, a usage read): remember it, and drop the
 /// notes queued for it before then.
-fn mark_cleared(host_alias: &str, profile: Option<&str>, at: i64) {
-    with_cleared(|c| {
-        c.retain(|(h, p, _)| !(h == host_alias && p.as_deref() == profile));
-        c.push((host_alias.to_string(), profile.map(str::to_string), at));
+fn mark_cleared(s: &Store, host_alias: &str, profile: Option<&str>, at: i64) {
+    let mut c = read_cleared(s);
+    c.retain(|(h, p, _)| !(h == host_alias && p.as_deref() == profile));
+    c.push((host_alias.to_string(), profile.map(str::to_string), at));
+    if c.len() > CLEARED_MAX {
+        c.drain(..c.len() - CLEARED_MAX);
+    }
+    match serde_json::to_string(&c) {
+        Ok(json) => {
+            if let Err(e) = s.set_setting(CLEARED_KEY, &json) {
+                tracing::debug!(error = %e, "[login-health] cleared mark not stored");
+            }
+        }
+        Err(e) => tracing::debug!(error = %e, "[login-health] cleared mark not encoded"),
+    }
+    with_noted(|q| {
+        q.retain(|n| !(n.obs.host_alias == host_alias && n.obs.profile.as_deref() == profile))
     });
-    with_noted(|q| q.retain(|o| !(o.host_alias == host_alias && o.profile.as_deref() == profile)));
 }
 
 /// A session's pane shows that its last turn failed for want of a login
@@ -336,21 +381,27 @@ fn mark_cleared(host_alias: &str, profile: Option<&str>, at: i64) {
 /// last Stop hook, else the pane's last output). A pane keeps its error
 /// line until its next turn, so after a person signed the login in again
 /// the old line would mark it signed out again on the next pass (review
-/// w11-2): a turn that ended before the login was last signed in again
-/// says nothing.
+/// w11-2): [`drain_noted`] drops a note whose turn ended before the login
+/// was last signed in again.
 pub fn note_signed_out_from_pane(host_alias: &str, profile: Option<&str>, turn_ended_at: i64) {
-    let stale = with_cleared(|c| {
-        c.iter()
-            .any(|(h, p, at)| h == host_alias && p.as_deref() == profile && turn_ended_at <= *at)
-    });
-    if !stale {
-        note_signed_out(host_alias, profile);
-    }
+    push_noted(host_alias, profile, turn_ended_at);
 }
 
-/// Record what [`note_signed_out`] queued.
+/// Record what [`note_signed_out`] queued, less the notes from a turn that
+/// ended before its login was last signed in again.
 pub fn drain_noted(s: &Store, now: i64) {
-    let obs: Vec<Observation> = with_noted(std::mem::take);
+    let noted: Vec<Noted> = with_noted(std::mem::take);
+    if noted.is_empty() {
+        return;
+    }
+    let obs: Vec<Observation> = noted
+        .into_iter()
+        .filter(|n| {
+            cleared_at(s, &n.obs.host_alias, n.obs.profile.as_deref())
+                .is_none_or(|at| n.turn_ended_at > at)
+        })
+        .map(|n| n.obs)
+        .collect();
     if obs.is_empty() {
         return;
     }
@@ -556,6 +607,35 @@ mod tests {
         drain_noted(&s, 1_510);
         let row = s.get_host_row("nh").unwrap().unwrap();
         assert!(is_signed_out(&row, Some("work")));
+    }
+
+    /// w01-1: the sign-in-again mark is in the store, so a restart (the
+    /// note queue empty, nothing in memory) does not let the old pane line
+    /// sign the login out again; and only a login that was out is marked.
+    #[test]
+    fn a_sign_in_again_outlives_a_restart() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("nh").unwrap();
+        s.set_host_signed_out_logins(
+            "nh",
+            &[SignedOutLogin {
+                profile: Some("tok".into()),
+                since: 100,
+                checked_at: 100,
+            }],
+        )
+        .unwrap();
+        record(&s, &[obs("nh", Some("tok"), false)], 1_000).unwrap();
+        // A login never seen signed out is not marked.
+        record(&s, &[obs("nh", None, false)], 1_000).unwrap();
+        assert_eq!(cleared_at(&s, "nh", None), None);
+        assert_eq!(cleared_at(&s, "nh", Some("tok")), Some(1_000));
+        // "Restart": whatever was in memory is gone.
+        with_noted(std::mem::take);
+        note_signed_out_from_pane("nh", Some("tok"), 90);
+        drain_noted(&s, 1_010);
+        let row = s.get_host_row("nh").unwrap().unwrap();
+        assert!(!is_signed_out(&row, Some("tok")));
     }
 
     #[test]

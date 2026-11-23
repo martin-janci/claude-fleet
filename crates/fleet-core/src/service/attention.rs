@@ -503,10 +503,11 @@ pub fn needs_attention(row: &SessionRow) -> Option<Attention> {
 
 /// Whether this row needs a person, and why.
 ///
-/// The order of the checks *is* the precedence: a session that is both
-/// blocked and ghosted is reported as blocked, because that is the one a
-/// person can do something about right now — and every reason a person can
+/// The order of the checks *is* the precedence: every reason a person can
 /// act on comes before `Lifecycle`, which nobody can act on from a phone.
+/// Waiting is a live state: a ghost or lost row's open form or blocked
+/// prompt has no agent left to take the answer, so it reads `Lifecycle`
+/// (review w13-2).
 ///
 /// An `external` session — a Claude running outside fleet entirely — never
 /// qualifies, whatever its fields say: it is read-only here, so reporting it
@@ -546,7 +547,11 @@ pub fn needs_attention_in(
     // is still idle after it. Every hook clears it, so it never outvotes
     // one.
     let jev = |o: &str| idle && row.turn_outcome.as_deref() == Some(o);
-    let reason = if row.claude_status.as_deref() == Some("blocked") || row.pending_form.is_some() {
+    // Waiting is a live state: a lost or dead row's open form has nobody
+    // to answer it (review w13-2), so it reads `Lifecycle` like any loss.
+    let reason = if live
+        && (row.claude_status.as_deref() == Some("blocked") || row.pending_form.is_some())
+    {
         Reason::Waiting
     } else if row.stuck_kind.is_some() || jev("stuck") {
         Reason::Stuck
@@ -913,8 +918,21 @@ mod tests {
         let mut r = row();
         r.claude_status = Some("blocked".into());
         r.stuck_kind = Some("auth_menu".into());
-        r.status = "ghost".into();
         assert_eq!(needs_attention(&r).unwrap().reason, Reason::Waiting);
+    }
+
+    /// Review w13-2: a lost row's open form is not "Needs you · waiting":
+    /// nobody is left to answer it.
+    #[test]
+    fn a_lost_row_with_an_open_form_is_not_waiting() {
+        let mut r = row();
+        r.pending_form = Some(crate::store::PendingForm {
+            form_id: "f_x".into(),
+            title: "T".into(),
+        });
+        r.status = "ghost".into();
+        r.lost_at = Some(1);
+        assert_ne!(needs_attention(&r).map(|a| a.reason), Some(Reason::Waiting));
     }
 
     #[test]

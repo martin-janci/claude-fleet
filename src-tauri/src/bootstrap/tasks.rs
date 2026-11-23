@@ -281,9 +281,9 @@ impl crate::backend::fleets::FleetLinks for ExtraFleetLinks {
     ) {
         tracing::info!(fleet, url = %cfg.base_url, "[fleets] following an extra fleet");
         let bridge = EventBridge::new(
-            Arc::new(HubSse::new(cfg)),
+            Arc::new(HubSse::new(cfg).with_kinds(crate::backend::fleets::EXTRA_FLEET_KINDS)),
             Arc::clone(&sink),
-            Arc::new(HubResync::new(hub, sink)),
+            Arc::new(HubResync::new(hub, sink).rows_only()),
             Arc::new(RealDelay),
             cancel,
         )

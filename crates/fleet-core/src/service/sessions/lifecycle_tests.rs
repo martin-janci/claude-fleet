@@ -1966,6 +1966,17 @@ fn the_agent_settles_against_the_kind() {
     args.agent = Some("hermes".into());
     args.kind = Some("shell".into());
     assert_eq!(normalize_launch(&mut args).unwrap_err().code, E_INVALID);
+    // Review w20-4: Hermes takes no effort at launch, so none is stored.
+    let mut args = args_named("dev-z", None);
+    args.agent = Some("hermes".into());
+    args.effort = Some("high".into());
+    let err = normalize_launch(&mut args).unwrap_err();
+    assert_eq!(err.code, E_INVALID);
+    assert!(
+        err.message.starts_with("Hermes takes no effort"),
+        "{}",
+        err.message
+    );
 }
 
 /// A new Hermes session starts bare (Hermes names its own session), and a

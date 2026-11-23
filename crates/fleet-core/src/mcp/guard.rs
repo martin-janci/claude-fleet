@@ -1879,6 +1879,30 @@ pub const READ_ACTIONS: &[(&str, &[&str])] = &[
     ("review_notes", &["list"]),
 ];
 
+/// Read actions of mixed tools that clients POLL (the phone's Needs-you
+/// watcher, Control's bars and boards). [`is_quiet_call`] writes no audit
+/// row for them (review w19-1: one phone and one desktop came to ~13k
+/// `mcp_call` rows a day on the controller's timeline, pruning its real
+/// events within hours). Unlike [`READ_ACTIONS`], this opens nothing to a
+/// readonly device.
+pub const QUIET_ACTIONS: &[(&str, &[&str])] = &[
+    ("routines", &["list", "get", "failing", "budget", "runs"]),
+    ("debug_devices", &["list"]),
+    ("control_auto_continue", &["status"]),
+];
+
+/// Whether `action` of `tool` only reads, on [`READ_ACTIONS`] or
+/// [`QUIET_ACTIONS`]: such a call leaves no audit row.
+pub fn is_quiet_call(tool: &str, action: Option<&str>) -> bool {
+    let Some(action) = action else {
+        return false;
+    };
+    READ_ACTIONS
+        .iter()
+        .chain(QUIET_ACTIONS)
+        .any(|(t, reads)| *t == tool && reads.contains(&action))
+}
+
 /// May a token in `mode` call `tool` at all (the readonly and answer-only
 /// half of `enforce_mode`)?
 pub fn mode_allows_tool(mode: crate::mcp::auth::TokenMode, tool: &str) -> bool {
@@ -1954,6 +1978,14 @@ pub const OPERATOR_CONFIRMS: &[&str] = &[
     // `send_message { deliver | wake }`. (`review_notes` refuses the
     // operator outright: a note is a person's.)
     "send_message",
+    // Who may read and drive the owner's sessions (sec-access-5, D3=b):
+    // a share, unshare or narrow, a review ask (it shares) and an access
+    // ask's grant, each on a card. Gated at the call site for those actions.
+    "session_share",
+    "session_unshare",
+    "session_narrow",
+    "review_request",
+    "access_requests",
 ];
 
 /// The operator's calls that type its text into a session: pre-approved at
@@ -2134,6 +2166,12 @@ pub fn operator_confirm_reason(tool: &str) -> &'static str {
              itself, not one it only briefed: restarts at \"Within your brief\" or \
              \"Autopilot\", at most 3 an hour per session, retiring at \
              \"Autopilot\" only, whatever mcp.confirm_destructive says"
+        }
+        "session_share" | "session_unshare" | "session_narrow" | "review_request"
+        | "access_requests" => {
+            "the operator's changes to who may read or drive a session of yours \
+             always do, whatever mcp.confirm_destructive says: it writes who \
+             reaches your work"
         }
         // D12.
         _ => {
@@ -2627,6 +2665,11 @@ impl PendingConfirms {
     }
 
     /// [`Self::request_from`], with the call in words for the card.
+    ///
+    /// The same call asked again while its first ask still waits (the same
+    /// tool, summary, caller and operator flag) answers the waiting nonce,
+    /// not a new one (w15-1): two cards for one call, both approved, would
+    /// run it twice.
     pub fn request_about(
         &self,
         tool: &str,
@@ -2635,16 +2678,33 @@ impl PendingConfirms {
         operator: bool,
         about: Option<ConfirmAbout>,
     ) -> ConfirmRequest {
-        let nonce = super::generate_token();
-        let asked_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
         let mut entries = self
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         prune(&mut entries, Instant::now());
+        if let Some((nonce, p)) = entries.iter().find(|(_, p)| {
+            p.waiting()
+                && p.tool == tool
+                && p.summary == summary
+                && p.caller == caller
+                && p.operator == operator
+        }) {
+            return ConfirmRequest {
+                nonce: nonce.clone(),
+                tool: p.tool.clone(),
+                summary: p.summary.clone(),
+                caller: p.caller.clone(),
+                operator: p.operator,
+                asked_at: p.asked_at,
+                about: p.about.clone(),
+            };
+        }
+        let nonce = super::generate_token();
+        let asked_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
         entries.insert(
             nonce.clone(),
             Pending {
@@ -3978,6 +4038,27 @@ mod tests {
         );
         prune(&mut entries, now + CONFIRM_TTL);
         assert!(entries.is_empty());
+    }
+
+    /// w15-1: the same call asked twice while the first ask waits is one
+    /// card, so approving "both" runs it once; once answered, a new ask is
+    /// a new card.
+    #[test]
+    fn the_same_call_asked_twice_is_one_card() {
+        let pc = PendingConfirms::new();
+        let first = pc.request_from("new_session", "host=h project=3", "operator", true);
+        let again = pc.request_from("new_session", "host=h project=3", "operator", true);
+        assert_eq!(first.nonce, again.nonce);
+        assert_eq!(pc.pending().len(), 1);
+        // Another call, or another caller, is its own card.
+        let other = pc.request_from("new_session", "host=h project=4", "operator", true);
+        assert_ne!(other.nonce, first.nonce);
+        let master = pc.request_from("new_session", "host=h project=3", "master", false);
+        assert_ne!(master.nonce, first.nonce);
+        assert_eq!(pc.pending().len(), 3);
+        assert!(pc.resolve(&first.nonce, true));
+        let later = pc.request_from("new_session", "host=h project=3", "operator", true);
+        assert_ne!(later.nonce, first.nonce, "an answered ask is not joined");
     }
 
     #[test]

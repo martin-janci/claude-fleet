@@ -10,7 +10,9 @@
 //! (re-signs it with its own CA) needs that CA passed as `--ca-file`.
 //!
 //! Both the WebSocket and the hook relay's requests go through
-//! [`crate::conn::Dialer::connect_io`], so both use the proxy.
+//! [`crate::conn::Dialer::connect_io`], so both use the proxy. The update
+//! passes (`/update/check`, the hub's mirror, GitHub's release downloads)
+//! use it through [`UpdateDial`], with `NO_PROXY` judged per URL host.
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -158,6 +160,70 @@ impl Proxy {
     }
 }
 
+/// The proxy for the update passes' HTTP: every host they reach (the hub,
+/// GitHub), not only the hub's. A configured proxy takes every request; the
+/// environment's is skipped for a host its no-proxy list names.
+pub struct UpdateDial {
+    proxy: Proxy,
+    /// The environment's `NO_PROXY`, when the proxy came from it.
+    no_proxy: Option<String>,
+}
+
+impl UpdateDial {
+    /// `None` when nothing is configured (a direct connection, as before).
+    pub fn resolve(
+        configured: Option<&str>,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<std::sync::Arc<dyn fleet_updater::http::Dial>>, String> {
+        Ok(Self::from_config(configured, env)?
+            .map(|d| std::sync::Arc::new(d) as std::sync::Arc<dyn fleet_updater::http::Dial>))
+    }
+
+    fn from_config(
+        configured: Option<&str>,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<UpdateDial>, String> {
+        let first = |names: &[&str]| {
+            names
+                .iter()
+                .find_map(|n| env(n).filter(|v| !v.trim().is_empty()))
+        };
+        let (proxy, no_proxy) = match configured {
+            Some(url) if url.trim().is_empty() => return Ok(None),
+            Some(url) => (Proxy::parse(url)?, None),
+            None => {
+                let Some(url) = first(&["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"])
+                else {
+                    return Ok(None);
+                };
+                (Proxy::parse(&url)?, first(&["NO_PROXY", "no_proxy"]))
+            }
+        };
+        Ok(Some(UpdateDial { proxy, no_proxy }))
+    }
+
+    /// Whether a request to `host` goes through the proxy.
+    fn proxies(&self, host: &str) -> bool {
+        !self
+            .no_proxy
+            .as_deref()
+            .is_some_and(|l| no_proxy_matches(l, host))
+    }
+}
+
+#[async_trait::async_trait]
+impl fleet_updater::http::Dial for UpdateDial {
+    async fn dial(&self, host: &str, port: u16) -> Result<TcpStream, String> {
+        if self.proxies(host) {
+            self.proxy.tunnel(host, port).await
+        } else {
+            TcpStream::connect((host, port))
+                .await
+                .map_err(|e| format!("{host}:{port}: {e}"))
+        }
+    }
+}
+
 /// The status code of a proxy's answer head.
 fn connect_status(head: &[u8]) -> Option<u16> {
     let mut headers = [httparse::EMPTY_HEADER; 32];
@@ -299,6 +365,26 @@ mod tests {
         assert!(no_proxy_matches("rlt.sk", "rlt.sk"));
         assert!(!no_proxy_matches("rlt.sk", "notrlt.sk"));
         assert!(!no_proxy_matches("", "rlt.sk"));
+    }
+
+    /// Review w10-2: the update passes go through the proxy too, to GitHub
+    /// as well as to the hub, with the environment's no-proxy list judged
+    /// per host.
+    #[test]
+    fn the_update_passes_use_the_proxy_with_no_proxy_per_host() {
+        let e = env(&[("https_proxy", "http://env:1"), ("no_proxy", ".rlt.sk")]);
+        let d = UpdateDial::from_config(None, &e).unwrap().unwrap();
+        assert_eq!(d.proxy.host, "env");
+        assert!(!d.proxies("fleet.rlt.sk"));
+        assert!(d.proxies("github.com"));
+        assert!(d.proxies("objects.githubusercontent.com"));
+        // A configured proxy takes every request.
+        let d = UpdateDial::from_config(Some("http://cfg:2"), &e)
+            .unwrap()
+            .unwrap();
+        assert!(d.proxies("fleet.rlt.sk"));
+        assert!(UpdateDial::from_config(Some(""), &e).unwrap().is_none());
+        assert!(UpdateDial::from_config(None, env(&[])).unwrap().is_none());
     }
 
     /// End to end against a CONNECT proxy on loopback: the bytes after the
