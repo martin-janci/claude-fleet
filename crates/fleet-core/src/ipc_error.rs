@@ -426,8 +426,9 @@ impl IpcError {
 /// A second `lock` of a mutex this thread already holds through `lock` is
 /// a std mutex's deadlock (the hub's of 2026-11-12, review 20 w03-4): it
 /// panics in a debug build, so the test that walks such a path fails
-/// loudly, and answers `E_LOCK` in a release build instead of parking the
-/// thread forever. The check is per thread, which is sound because no guard
+/// loudly, and answers `E_INTERNAL` in a release build instead of parking
+/// the thread forever: one buggy call path, not a poisoned store, so not
+/// `E_LOCK`, whose words say to restart (w02-2). The check is per thread, which is sound because no guard
 /// is held across an `.await`. The caller's location is kept while the
 /// guard lives, for [`lock_holder`] (the hub's stall watchdog names it).
 #[track_caller]
@@ -439,8 +440,11 @@ pub fn lock<T>(m: &std::sync::Mutex<T>) -> Result<LockGuard<'_, T>, IpcError> {
             panic!("a mutex locked again at {at} is already held by this thread: a deadlock");
         }
         return Err(IpcError::new(
-            codes::E_LOCK,
-            format!("store lock taken again at {at} by the thread that holds it"),
+            codes::E_INTERNAL,
+            format!(
+                "this action hit a bug and was not done (store lock taken again at {at} by \
+                 the thread that holds it)"
+            ),
         ));
     }
     let guard = m.lock().map_err(|_| IpcError::lock())?;
