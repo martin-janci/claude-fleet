@@ -1586,6 +1586,13 @@ pub struct ProjectMergeReport {
     /// `into`.
     #[serde(default)]
     pub agent_inputs_moved: usize,
+    /// Review rules watching `gh:<from>` that now watch `gh:<into>`.
+    #[serde(default)]
+    pub review_rules_moved: usize,
+    /// Routines whose PR-event repo filter named `from` and now names
+    /// `into`.
+    #[serde(default)]
+    pub routine_filters_moved: usize,
     /// The prefix of `from`'s ticket space when `into` already had one of
     /// its own, so it was left as it is (its keys still resolve); `None`
     /// when it became `into`'s or there was none.

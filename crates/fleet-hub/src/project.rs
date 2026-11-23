@@ -71,7 +71,8 @@ fn merge_summary(v: &serde_json::Value) -> String {
     };
     format!(
         "{head} {} into {}: {} sessions and {} worktrees moved, {} worktrees folded, {} other rows \
-         moved, {} picks, {} local workspaces moved ({} dropped), {} agent inputs renamed{tail}",
+         moved, {} picks, {} local workspaces moved ({} dropped), {} agent inputs renamed, {} review \
+         rules and {} routine repo filters moved{tail}",
         v["from_name"].as_str().unwrap_or("?"),
         v["into_name"].as_str().unwrap_or("?"),
         n("sessions_moved"),
@@ -82,6 +83,8 @@ fn merge_summary(v: &serde_json::Value) -> String {
         n("workspaces_moved"),
         n("workspaces_dropped"),
         n("agent_inputs_moved"),
+        n("review_rules_moved"),
+        n("routine_filters_moved"),
     )
 }
 
