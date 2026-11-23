@@ -404,6 +404,57 @@ describe('popping back in to a named terminal (M15 G4.4)', () => {
   });
 });
 
+describe('a shell closed elsewhere (review w12-1)', () => {
+  /** Drains end in EOF once terminal `n` is no longer in tmux's list. */
+  function dieWhenClosed(n: number) {
+    const base = inv().getMockImplementation() as (cmd: string, payload?: unknown) => Promise<unknown>;
+    let dead = false;
+    inv().mockImplementation(async (cmd: string, payload?: unknown) => {
+      if (cmd === 'pty_open') dead = false;
+      if (cmd === 'pty_drain') {
+        if (dead || open.includes(n)) return { data: '', bytes: 0 };
+        dead = true;
+        return { data: '', bytes: 0, eof: true };
+      }
+      return base(cmd, payload);
+    });
+  }
+  const opens = () => calls('shell_terminals').filter((c) => args(c).action === 'open');
+
+  it('a pop-out says the terminal was closed and never makes it again', async () => {
+    open = [2];
+    dieWhenClosed(2);
+    render(TerminalView, { props: { popout: 'term-1', shell: 2 } });
+    selectSession(row);
+    await settle();
+    expect(opens()).toHaveLength(1);
+    expect(calls('pty_open')).toHaveLength(1);
+    open = [];
+    await new Promise((r) => setTimeout(r, 900));
+    await settle();
+    expect(opens()).toHaveLength(1);
+    expect(calls('pty_open')).toHaveLength(1);
+    expect(screen.getByTestId('terminal-open-error').textContent).toContain('This terminal was closed');
+  });
+
+  it('the main pane drops the tab and goes back to the agent', async () => {
+    open = [1];
+    dieWhenClosed(1);
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    await fireEvent.click(screen.getByTestId('terminal-tab-1'));
+    await settle();
+    const before = opens().length;
+    open = [];
+    await new Promise((r) => setTimeout(r, 900));
+    await settle();
+    expect(opens()).toHaveLength(before);
+    expect(screen.queryByTestId('terminal-tab-1')).toBeNull();
+    expect(calls('pty_open').map((c) => args(c)).at(-1)).toMatchObject({ id: 'agent' });
+  });
+});
+
 describe('terminals helpers', () => {
   it('names terminals and their ptys like the backend', () => {
     expect(shellTerminalName('api', 3)).toBe('api--sh3');
