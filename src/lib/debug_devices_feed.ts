@@ -6,11 +6,12 @@
 import { writable, type Readable } from 'svelte/store';
 import { listDebugDevices, type DebugDevice } from './debug_devices';
 import { pollWhileShown, type Poller } from './window_hidden';
+import { isOlderHub } from './error_copy';
 
 /** How often the list is read again while a strip is mounted. */
 export const DEVICES_EVERY_MS = 90_000;
 /** Refusals no retry can change: stop asking until the last strip goes. */
-const GIVE_UP = ['E_LOCAL_ONLY', 'E_HUB_CONTRACT', 'E_UNKNOWN_COMMAND'];
+const GIVE_UP = ['E_LOCAL_ONLY', 'E_HUB_CONTRACT'];
 
 export interface DeviceFeed {
   devices: DebugDevice[];
@@ -28,7 +29,9 @@ async function read(): Promise<boolean> {
   const r = await listDebugDevices();
   const at = Date.now() / 1000;
   if (r.ok) feed.set({ devices: Array.isArray(r.value) ? r.value : [], at });
-  else if (GIVE_UP.includes(r.error.code)) {
+  // A hub without `debug_devices` answers what `isOlderHub` knows; nothing
+  // produces `E_UNKNOWN_COMMAND` (review w15-8).
+  else if (GIVE_UP.includes(r.error.code) || isOlderHub(r.error)) {
     feed.set({ devices: [], at });
     return false;
   }

@@ -54,6 +54,9 @@
   import { onMount } from 'svelte';
   import { confirmQueue } from './confirms';
   import { loadMissionList, missionList } from './mission_room';
+  import { missionInScope } from './mission_waits';
+  import { effectiveScope } from './orgs';
+  import { inboxCount } from './inbox';
   import { openMission, WAIT_WORDS } from './missions';
   import { onWorkChangedDebounced } from './work';
   import { classify, limitFor } from './attention';
@@ -70,7 +73,6 @@
     moveView,
     missionsWaiting,
     needsYouCount,
-    needsYouList,
     openElsewhere,
     selectView,
     setViewsOpen,
@@ -92,8 +94,11 @@
     );
   });
   const approvals = $derived($confirmQueue.filter((r) => r.operator));
-  const waitingMissions = $derived(missionsWaiting($missionList.missions));
-  const needsCount = $derived(needsYouCount($needsYouList.length, approvals.length, $missionList.missions));
+  // Under the sidebar's org scope, as the Inbox lists them (review w09-5).
+  const waitingMissions = $derived(
+    missionsWaiting($missionList.missions).filter((m) => missionInScope(m, $effectiveScope)),
+  );
+  const needsCount = $derived(needsYouCount($inboxCount, approvals.length));
   /** Check now: the hub re-reads its hosts at once rather than at its next
    *  pass (a login or a hand-fixed ~/.claude.json shows straight away). */
   let checking = $state(false);

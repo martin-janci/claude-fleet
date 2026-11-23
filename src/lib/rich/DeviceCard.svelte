@@ -37,7 +37,8 @@
 
   // The backend's own words: they name the holder, the missing tool, the
   // adb versions; the generic sentence only stands in for an empty one.
-  const ipcMessage = (e: IpcError) => e.message?.trim() || errorText(e);
+  // The plain sentence first (review w15-6).
+  const ipcMessage = (e: IpcError) => errorText(e);
 
   async function load() {
     loading = true;

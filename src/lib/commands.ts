@@ -10,15 +10,22 @@
 // settings change applies on Enter exactly as Settings' own plain-words row
 // does, and one whose setting asks for confirmation opens Settings instead.
 import { get } from 'svelte/store';
-import { settingsOpen, requestHostsView, shortcutSheetOpen, inspectorToggleRequest, nextNeedsYouRequest } from './app_views';
+import {
+  settingsOpen,
+  requestHostsView,
+  shortcutSheetOpen,
+  inspectorToggleRequest,
+  nextNeedsYouRequest,
+  workViewToggleRequest,
+} from './app_views';
 import { goTo } from './destination';
 import { pauseAllMissions } from './missions';
 import { sessionView } from './prefs';
 import type { SessionView } from './session_view';
 import { theme, applyTheme, themeLabel, THEMES, type Theme } from './theme';
 import { openControl, openToday } from './control';
-import { cycleWorkOrg, selectedTaskId, sidebarView, taskDetailOpen, toggleSidebarView } from './work_view';
-import { cycleScope } from './orgs';
+import { cycleWorkOrg, selectedTaskId, sidebarView, taskDetailOpen } from './work_view';
+import { cyclePrimaryScope } from './fleet_filters';
 import { openNewSessionPicker } from './switcher_request';
 import { openRoutines } from './routines';
 import { openMissionRoom } from './mission_room';
@@ -429,7 +436,9 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
       openToday();
       return;
     case 'app.work-view':
-      toggleSidebarView();
+      // Through App, which also un-collapses the rail as the chord does
+      // (review w14-4): a collapsed list would flip unseen.
+      workViewToggleRequest.update((n) => n + 1);
       return;
     case 'app.shortcuts':
       shortcutSheetOpen.set(true);
@@ -469,7 +478,9 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
       inspectorToggleRequest.update((n) => n + 1);
       return;
     case 'app.scope':
-      (get(sidebarView) === 'work' ? cycleWorkOrg : cycleScope)();
+      // ⌘⇧O's own: it also drops an extra fleet's Machine/Org anchor, which
+      // would otherwise keep the primary list hidden (review w14-4).
+      (get(sidebarView) === 'work' ? cycleWorkOrg : cyclePrimaryScope)();
       return;
     case 'app.new-routine':
       openRoutines({ template: 'blank' });

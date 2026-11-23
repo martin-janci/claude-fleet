@@ -11,6 +11,7 @@ import { downloads, loadDownloads, type Download } from './downloads';
 import { sessions, type SessionRow } from './sessions';
 import { projectById } from './projects';
 import type { PickedFile } from './attachments';
+import { pairedLocalRefusal } from './access';
 
 export type LibraryKind = 'upload' | 'attachment';
 
@@ -234,6 +235,10 @@ export function placedFiles(picked: readonly PickedFile[], remote: readonly stri
  * `null` when the picker was cancelled.
  */
 export async function uploadToSession(session: SessionRow): Promise<Result<LibraryItem[]> | null> {
+  // Paired, the hub's own-machine row resolves on this machine instead
+  // (review w11-7): refused before the picker opens, as the composer does.
+  const here = pairedLocalRefusal(session);
+  if (here !== null) return { ok: false, error: { code: 'E_INVALID', message: here } };
   const pickedR = await invokeCmd<PickedFile[]>('pick_attachments', {});
   if (!pickedR.ok) return pickedR;
   const picked = pickedR.value;

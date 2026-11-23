@@ -156,6 +156,9 @@ interface Reason {
 }
 
 const NOT_ADMIN = 'This desktop is a paired client, and a client never administers the fleet.';
+/** Trackers: not from this desktop, but from the hub or the hub owner's
+ *  trusted phone, whose Trackers screen does this (review w15-7). */
+const TRACKERS_ELSEWHERE = 'This desktop is a paired client and does not do this; the hub owner’s trusted phone can (Trackers).';
 const SETUP_WIZARD =
   'The add-host wizard works from this machine’s SSH config, and this desktop is a paired client. Add host asks the hub to add one instead.';
 
@@ -179,12 +182,13 @@ const REASONS = {
   install_fleet_hook: { text: 'The hook would point at a control API, and this app runs none while it is paired with a hub.' },
   host_tokens: { text: 'Per-host tokens belong to the fleet’s owner; a paired client has none.' },
   mcp_configure: { text: 'The hub already runs this fleet’s control API, and a second one against the same fleet is what pairing exists to prevent.' },
-  // Trackers (work graph M3): the hub's work_admin is master-only.
-  add_tracker: { text: `Trackers and their credentials are fleet administration. ${NOT_ADMIN}`, operator: 'fleet-hub tracker add' },
-  update_tracker: { text: `Trackers and their credentials are fleet administration. ${NOT_ADMIN}`, operator: 'fleet-hub tracker' },
-  set_tracker_credential: { text: `Tracker credentials live on the hub. ${NOT_ADMIN}`, operator: 'fleet-hub tracker set-credential' },
-  test_tracker: { text: `The hub tests its trackers with its own credentials. ${NOT_ADMIN}`, operator: 'fleet-hub tracker test' },
-  remove_tracker: { text: `Trackers and their credentials are fleet administration. ${NOT_ADMIN}`, operator: 'fleet-hub tracker remove' },
+  // Trackers (work graph M3): this desktop does not route work_admin (C17),
+  // but the hub owner's trusted phone does since contract 13 (review w15-7).
+  add_tracker: { text: `Trackers and their credentials are set up on the hub. ${TRACKERS_ELSEWHERE}`, operator: 'fleet-hub tracker add' },
+  update_tracker: { text: `Trackers and their credentials are set up on the hub. ${TRACKERS_ELSEWHERE}`, operator: 'fleet-hub tracker' },
+  set_tracker_credential: { text: `Tracker credentials live on the hub. ${TRACKERS_ELSEWHERE}`, operator: 'fleet-hub tracker set-credential' },
+  test_tracker: { text: `The hub tests its trackers with its own credentials. ${TRACKERS_ELSEWHERE}`, operator: 'fleet-hub tracker test' },
+  remove_tracker: { text: `Trackers and their credentials are set up on the hub. ${TRACKERS_ELSEWHERE}`, operator: 'fleet-hub tracker remove' },
   tracker_sync_metrics: { text: `Sync metrics live in the hub’s memory. ${NOT_ADMIN}`, operator: 'fleet-hub tracker status' },
   // Ticket keys: a project's prefix is `work_admin`, master-only.
   ticket_prefixes: { text: `Which prefix a project’s ticket keys carry is fleet administration. ${NOT_ADMIN}`, operator: 'fleet-hub tracker prefixes' },

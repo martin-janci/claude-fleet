@@ -119,6 +119,13 @@ describe('the watcher’s pane view', () => {
     expect((await screen.findByTestId('watch-level')).textContent).toBe('drive');
   });
 
+  it('an Answer grant captures the pane and names its level too (review w08-1)', async () => {
+    render(WatchView, { props: { session: makeSession(), access: 'answer' } });
+    const pane = await screen.findByTestId('watch-pane');
+    expect(pane.textContent).toContain('working on the ticket');
+    expect(screen.getByTestId('watch-level').textContent).toBe('answer');
+  });
+
   // `null` is "we cannot tell": an unreachable hub, or one that has not said
   // who this device is. Polling then would be an error loop against a hub that
   // is already saying something is wrong.

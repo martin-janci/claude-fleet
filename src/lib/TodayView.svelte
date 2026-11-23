@@ -36,6 +36,8 @@
   import { notWaitingSaid, proposalKey } from './inbox';
   import { pendingAgentCount } from './agents';
   import { failingCount } from './routines';
+  import { reviewRequestCount } from './review_requests';
+  import { fleetInboxCount } from './fleets';
   import { landOn } from './workspace';
   import Skeleton from './states/Skeleton.svelte';
   import { errorText } from './error_copy';
@@ -48,6 +50,7 @@
     groupLabel,
     groupStatusLabel,
     sessionPhrase,
+    attentionFailed,
     todayKpis,
     todayLine,
     shippedWhen,
@@ -162,7 +165,14 @@
 
   // Review w11-8: approvals and failed routines wait on the person too, as
   // the Inbox and the rail count them.
-  const extras = $derived({ approvals: $pendingAgentCount, failedRoutines: $failingCount });
+  // Review asks and the extra fleets too, so the tile is the rail's number
+  // (review w09-5, w11-8).
+  const extras = $derived({
+    approvals: $pendingAgentCount,
+    failedRoutines: $failingCount,
+    reviewAsks: $reviewRequestCount,
+    fleets: $fleetInboxCount,
+  });
   const kpis = $derived(view ? todayKpis(view, extras) : null);
   const dateLine = $derived(
     todayLine(
@@ -192,7 +202,7 @@
    *  stale grey (the status colours the session list draws). */
   function sessionTone(s: TodaySession, bucket: TodayBucket): string {
     // A waiting group's working siblings stay blue (review w11-3).
-    if (bucket === 'waiting' && s.attention) return s.attention === 'failed' ? 'failed' : 'waiting';
+    if (bucket === 'waiting' && s.attention) return attentionFailed(s.attention) ? 'failed' : 'waiting';
     if (bucket === 'stale') return 'idle';
     return 'working';
   }

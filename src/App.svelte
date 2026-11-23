@@ -87,6 +87,7 @@
     hostsViewRequest,
     inspectorToggleRequest,
     nextNeedsYouRequest,
+    workViewToggleRequest,
     onHostsCloseRequested,
     openPathRequest,
     requestNewSessionOnHost,
@@ -564,6 +565,11 @@
     const row = get(sessions).find((s) => s.id === req.sessionId);
     if (!row) return;
     selectSessionExplicitly(row);
+    // Settings and a Work task's detail cover the pane without changing the
+    // destination: close them, or the terminal handed back stays out of
+    // sight (review w14-3), as ⌘K's New terminal does.
+    settingsOpen.set(false);
+    if (get(sidebarView) === 'work' && get(selectedTaskId)) taskDetailOpen.set(false);
     // The view guards read the new selection's derived facts.
     await tick();
     showSession();
@@ -999,6 +1005,15 @@
     if (!inspectorRoom) return;
     inspectorOpen = !inspectorOpen;
   }
+  // ⌘K's "Switch Sessions and Work" (review w14-4): the same as its chord.
+  $effect(() => {
+    if ($workViewToggleRequest === 0) return;
+    untrack(() => {
+      workViewToggleRequest.set(0);
+      sidebarCollapsed = false;
+      toggleSidebarView();
+    });
+  });
   // ⌘K's Inspector row (review w18-4): the same toggle as ⌥⌘B.
   $effect(() => {
     if ($inspectorToggleRequest === 0) return;

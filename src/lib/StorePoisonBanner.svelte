@@ -8,6 +8,7 @@
   import { onDestroy, onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
   import { invokeCmd } from './result';
+  import Modal from './Modal.svelte';
 
   const STORE_POISONED_EVENT = 'app:store-poisoned';
 
@@ -41,36 +42,25 @@
 </script>
 
 {#if poisoned}
-  <div class="poison-backdrop" data-testid="store-poison-banner">
-    <div class="poison-card" role="alertdialog" aria-modal="true" aria-labelledby="store-poison-title">
+  <!-- A <Modal> (review w14-6): showModal() puts it in the top layer above
+       any dialog already open, makes the dead UI behind it inert and traps
+       focus, which a z-index div did not. No `onclose`: Escape and the
+       backdrop do nothing, only Restart helps. -->
+  <Modal label="Orbit Fleet must restart" closeOnBackdrop={false} testid="store-poison-banner">
+    <div class="poison-card" role="alert" aria-labelledby="store-poison-title">
       <h2 id="store-poison-title">Orbit Fleet hit an internal error and must restart</h2>
       <p>Until it does, every action fails. Your sessions keep running on their hosts.</p>
-      <button type="button" class="act" data-testid="store-poison-restart" disabled={restarting} onclick={restart}>
+      <button type="button" class="act" data-testid="store-poison-restart" data-autofocus disabled={restarting} onclick={restart}>
         {restarting ? 'Restarting…' : 'Restart'}
       </button>
       {#if error}<p class="error" role="status">{error}</p>{/if}
     </div>
-  </div>
+  </Modal>
 {/if}
 
 <style>
-  .poison-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 10000;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 16px;
-    background: color-mix(in srgb, var(--bg) 70%, transparent);
-  }
   .poison-card {
     max-width: 28rem;
-    padding: 1.25rem 1.5rem;
-    background: var(--bg);
-    color: var(--fg);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
   }
   h2 {
     margin: 0 0 0.5rem;

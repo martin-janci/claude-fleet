@@ -10,6 +10,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import MissionTriage from './MissionTriage.svelte';
 import MissionNudge from './MissionNudge.svelte';
+import { ALL_SCOPES, orgs, scopeFilter, type OrgDetail } from './orgs';
 import { asProposal, countsLine, outcomeLabel, resetTriageCacheForTests, stepLabel, type Triage } from './mission_triage';
 
 const stuck: Triage = {
@@ -152,6 +153,33 @@ describe('MissionNudge', () => {
     // A finished mission is never asked about.
     expect(triageCalls().map((c) => c.mission_id)).toEqual([1, 2]);
     expect(triageCalls().every((c) => !c.refresh)).toBe(true);
+  });
+
+  it('picks the stuck ones before it caps the list, and cuts them to the scope (review w09-2)', async () => {
+    const running = Array.from({ length: 6 }, (_, i) => ({ id: 10 + i, name: `Run ${i}`, state: 'active', org_id: 1 }));
+    vi.mocked(invoke).mockImplementation(async (c, a) => {
+      if (c === 'work_missions')
+        return [...running, { id: 2, name: 'Braked', state: 'paused', org_id: 1 }, { id: 3, name: 'Theirs', state: 'paused', org_id: 2 }];
+      if (c === 'mission_triage') {
+        const id = (a as { args: { mission_id: number } }).args.mission_id;
+        return id === 2 || id === 3 ? stuck : { may_change: true };
+      }
+      return null;
+    });
+    orgs.set([
+      { id: 1, name: 'one', created_at: 1, rules: [], hosts: [], trackers: [] } as unknown as OrgDetail,
+      { id: 2, name: 'two', created_at: 1, rules: [], hosts: [], trackers: [] } as unknown as OrgDetail,
+    ]);
+    scopeFilter.set('org:1');
+    try {
+      render(MissionNudge);
+      await flush();
+      const rows = screen.getAllByTestId('mission-nudge-row');
+      expect(rows.map((r) => r.querySelector('button')?.textContent)).toEqual(['Braked']);
+    } finally {
+      scopeFilter.set(ALL_SCOPES);
+      orgs.set([]);
+    }
   });
 
   it('review r15: asks Jev once per mission per state, across re-opens', async () => {

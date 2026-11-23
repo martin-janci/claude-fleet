@@ -27,6 +27,9 @@ describe('StorePoisonBanner', () => {
     handlers.get('app:store-poisoned')!();
     const banner = await screen.findByTestId('store-poison-banner');
     expect(banner.textContent).toContain('must restart');
+    // A modal <dialog> in the top layer, focus on Restart (review w14-6).
+    expect(banner.tagName).toBe('DIALOG');
+    expect(document.activeElement).toBe(screen.getByTestId('store-poison-restart'));
     await fireEvent.click(screen.getByTestId('store-poison-restart'));
     expect(vi.mocked(invoke)).toHaveBeenCalledWith('restart_app', undefined);
   });

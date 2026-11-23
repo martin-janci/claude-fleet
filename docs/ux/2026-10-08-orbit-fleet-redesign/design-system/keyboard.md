@@ -2,7 +2,7 @@
 
 Every 0.5.3 shortcut keeps working, except ⌘E, which now opens Control. The registry, `src/lib/shortcuts.ts`, is the one source; this page follows it, and `src/lib/keyboard_doc.test.ts` fails when a global chord below no longer matches it.
 
-Off the Mac the chords do not simply swap ⌘ for Ctrl. Plain Ctrl+K, Ctrl+J and the like belong to the program in the terminal, so the app's ⌘ chords (⌘K, ⌘P, ⌘N, ⌘J, ⌘E, ⌘I and the ⌘⇧ ones) become **Ctrl+Shift** chords, and ⌥⌘ becomes **Ctrl+Alt**. ⌘, is Ctrl+, and ⌘I is Ctrl+Shift+H. The Windows · Linux column is the chord to show there.
+Off the Mac the chords do not simply swap ⌘ for Ctrl. Plain Ctrl+K, Ctrl+J and the like belong to the program in the terminal, so the app's ⌘ chords (⌘K, ⌘P, ⌘N, ⌘J, ⌘E, ⌘I and the ⌘⇧ ones) become **Ctrl+Shift** chords, and ⌥⌘ becomes **Ctrl+Alt**. ⌘, is Ctrl+, and ⌘I is Ctrl+Shift+H. ⌥⌘T is Ctrl+Alt+Shift+T, since GNOME and KDE take Ctrl+Alt+T for their own terminal; where it does arrive, Ctrl+Alt+T still opens one. The Windows · Linux column is the chord to show there.
 
 ## Everywhere
 
@@ -19,7 +19,7 @@ Off the Mac the chords do not simply swap ⌘ for Ctrl. Plain Ctrl+K, Ctrl+J and
 | ⌘⇧T | Ctrl+Shift+T | Today |
 | ⌘⇧E | Ctrl+Alt+E | Open in VS Code |
 | ⌥⌘B | Ctrl+Alt+B | Inspector |
-| ⌥⌘T | Ctrl+Alt+T | New terminal |
+| ⌥⌘T | Ctrl+Alt+Shift+T | New terminal |
 | ⌘` | Ctrl+Alt+` | Next terminal |
 | ⌥⌘P | Ctrl+Alt+P | Go to file (Files tab only) |
 | ⌥⌘N | Ctrl+Alt+N | Next session that needs you |

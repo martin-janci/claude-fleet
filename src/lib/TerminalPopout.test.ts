@@ -129,6 +129,10 @@ describe("a pop-out's own bar (Agent board, M15 G4.4)", () => {
     await fireEvent.keyDown(screen.getByTestId('send-keys'), { key: 'Escape' });
     expect(screen.queryByTestId('send-keys')).toBeNull();
     expect(writes()).toHaveLength(3);
+    // Focus goes back to the terminal, not to <body> (review w14-7).
+    await settle(2);
+    expect(document.activeElement).not.toBe(document.body);
+    expect(screen.getByTestId('terminal-host').closest('.term-root')?.contains(document.activeElement)).toBe(true);
   });
 
   it('Clear view blanks the grid and sends nothing to the terminal', async () => {

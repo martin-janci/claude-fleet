@@ -10,6 +10,18 @@ describe('error copy', () => {
     expect(errorDetail(e)).toBe('E_SSH: ssh: connect to host mercury port 22: Connection timed out');
   });
 
+  it('blames the hub, not this app, for a lock or database error it sent (review w15-4)', () => {
+    expect(errorText({ code: 'E_LOCK', message: 'store mutex poisoned' })).toBe('Orbit Fleet hit an internal error and must restart');
+    const hub = { code: 'E_LOCK', message: 'catalog lock poisoned', details: { origin: 'hub' } };
+    expect(errorText(hub)).toBe('The hub hit an internal error. Its operator needs to restart it');
+    expect(errorDetail(hub)).toBe('E_LOCK: catalog lock poisoned');
+    expect(errorText({ code: 'E_SQLITE', message: 'x', details: { origin: 'hub' } })).toBe("The hub's database couldn't do that");
+  });
+
+  it('points an unknown tool at the hub (review w15-5)', () => {
+    expect(errorText({ code: 'E_HUB_PROTOCOL', message: 'tool not found' })).toBe("The hub doesn't know this action yet. Update the hub");
+  });
+
   // Review w16-8: these were sent and their outcome is unknown
   // (`IpcError::may_have_run`); "failed" sent the person to try again. Every
   // call says so unless it was a read (`{ read: true }`): most call sites are

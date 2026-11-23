@@ -1,13 +1,23 @@
 import { readFileSync } from 'node:fs';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
-import { theme, applyTheme, cycleTheme, sunFor, resolveContrast, paint, BOOT_KEY } from './theme';
+import { theme, applyTheme, cycleTheme, sunFor, resolveContrast, paint, BOOT_KEY, initTheme, accentPref } from './theme';
 
 describe('theme store', () => {
   beforeEach(() => {
     localStorage.clear();
     document.documentElement.removeAttribute('data-theme');
     theme.set('sun');
+  });
+
+  it('takes a theme or accent another window wrote (review w14-2)', () => {
+    initTheme();
+    window.dispatchEvent(new StorageEvent('storage', { key: 'cf:theme', newValue: 'dark' }));
+    expect(get(theme)).toBe('dark');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+    const accent = get(accentPref);
+    window.dispatchEvent(new StorageEvent('storage', { key: 'cf:pref:ui.accent', newValue: '"nope"' }));
+    expect(get(accentPref)).toBe(accent);
   });
 
   it('defaults to "sun"', () => {

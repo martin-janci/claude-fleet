@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import InlineConfirm from './forms/InlineConfirm.svelte';
   // Placement rules (work graph M14): find, edit, enable / disable and
   // delete the rules that put similar tasks under a group. Enabling a rule
@@ -88,7 +89,7 @@
   }
 
   async function onConflict(e: { code: string; message: string; details?: unknown }, what: string) {
-    notice = conflictNotice(e, what) ?? e.message;
+    notice = conflictNotice(e, what) ?? errorText(e);
     await load();
   }
 

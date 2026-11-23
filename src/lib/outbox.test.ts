@@ -85,6 +85,32 @@ describe('outbox: sending', () => {
     expect(h.msgs().map((m) => m.state)).toEqual(['sent', 'sending']);
   });
 
+  it('a second message queued while the first is out keeps the first answer (w04-1)', async () => {
+    const h = harness({ 1: idle() });
+    // Every surface passes a fresh target literal per enqueue.
+    h.box.enqueue({ ...A }, { kind: 'prompt', text: 'one' });
+    await flush();
+    h.box.enqueue({ ...A }, { kind: 'prompt', text: 'two' });
+    h.sends[0].done(ok(undefined));
+    await flush();
+    expect(h.msgs().map((m) => m.state)).toEqual(['sent', 'sending']);
+    h.sends[1].done(fail('boom'));
+    await flush();
+    expect(h.msgs()[1]).toMatchObject({ state: 'failed', error: 'boom' });
+  });
+
+  it('a send in flight when the session is forgotten writes nothing back', async () => {
+    const h = harness({ 1: idle() });
+    h.box.enqueue({ ...A }, { kind: 'prompt', text: 'one' });
+    await flush();
+    h.box.forget(A.id);
+    h.box.enqueue({ ...A }, { kind: 'prompt', text: 'two' });
+    h.sends[0].done(fail('late'));
+    await flush();
+    expect(h.msgs().map((m) => m.text)).toEqual(['two']);
+    expect(h.msgs()[0].state).not.toBe('failed');
+  });
+
   it('puts the prefix in front of a prompt, never a command', async () => {
     const h = harness({ 1: idle() });
     h.box.enqueue(A, { kind: 'prompt', text: 'go', prefix: 'CTX' });

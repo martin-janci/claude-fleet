@@ -300,7 +300,7 @@
       notice = c;
       await loadViews();
     } else {
-      notice = e.message;
+      notice = errorText(e);
     }
   }
 

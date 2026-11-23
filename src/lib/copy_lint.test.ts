@@ -42,6 +42,9 @@ const SELF_GATED: Record<string, string | null> = {
   // Its parents mount it behind their own signingIn state; its `{#if macNote}`
   // only puts the Mac own-login note before the sign-in step (review w02-7).
   SignInAgain: null,
+  // Opened by the backend's `app:store-poisoned` event, never by a button
+  // (review w14-6).
+  StorePoisonBanner: null,
 };
 
 // Findings that wait, each with why. An entry that no longer matches a finding
