@@ -136,8 +136,11 @@ impl HubBase {
         })
     }
 
-    /// From settings: `hub.public_url` when set, else loopback on `mcp.port`.
-    /// Refuses (`E_PROVISION`) when the control API has no master token yet.
+    /// From settings: `hub.public_url` when set, else loopback on `mcp.port`,
+    /// whether or not the control API is enabled or serving there: a caller
+    /// that writes it onto a host checks that itself (the desktop's
+    /// `provision_hosts`, review w13-5). Refuses only a malformed public URL
+    /// or port.
     pub fn read(s: &Store) -> Result<Self, IpcError> {
         let port = crate::mcp::settings::configured_port(s)?;
         match s

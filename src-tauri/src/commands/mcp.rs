@@ -201,7 +201,14 @@ pub async fn provision_hosts(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
     tunnels: State<'_, Arc<fleet_core::service::tunnel::TunnelSupervisor>>,
+    runtime: State<'_, Mutex<McpRuntime>>,
 ) -> Result<Vec<fleet_core::service::provision::HostProvisionResult>, IpcError> {
+    // Standalone, the hooks and MCP entry point at this app's own control
+    // API: with it off they would post to a port nothing serves while the
+    // host read "provisioned" (review w13-5). Paired, they point at the hub.
+    if backend.hub().is_none() {
+        require_control_api_running(&runtime)?;
+    }
     routed::provision_hosts(
         &backend,
         rotate.unwrap_or(false),
@@ -302,9 +309,11 @@ pub async fn rotate_host_token(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
     tunnels: State<'_, Arc<fleet_core::service::tunnel::TunnelSupervisor>>,
+    runtime: State<'_, Mutex<McpRuntime>>,
 ) -> Result<HostTokenInfo, IpcError> {
     backend.refuse_local_only("rotate_host_token")?;
     fleet_core::validate::host_alias(&host_alias)?;
+    require_control_api_running(&runtime)?;
     let base = HubBase::read(&*lock(&store)?)?;
     let warning = fleet_core::service::provision::provision_host_with_token(
         &store,
@@ -536,15 +545,7 @@ pub fn install_fleet_hook(
     let token = hooks_install::local_hook_token(&store)?;
     let base = HubBase::read(&*lock(&store)?)?;
 
-    {
-        let rt = lock(&runtime)?;
-        if !rt.is_running() {
-            return Err(IpcError::new(
-                codes::E_NOT_RUNNING,
-                "MCP server is not running — enable it in Settings → Control API first",
-            ));
-        }
-    }
+    require_control_api_running(&runtime)?;
 
     let settings_path = hooks_install::local_settings_path()?;
     // The SessionStart form follows `work.session_start_context`, as the
@@ -560,6 +561,18 @@ pub fn install_fleet_hook(
         "Hook installed at {} (http hook, bearer header)\nSettings written to {}",
         base.hook_url(),
         settings_path.display()
+    ))
+}
+
+/// `E_NOT_RUNNING` unless this app's control API is serving: what a hook
+/// or MCP entry written for a standalone desktop points at.
+fn require_control_api_running(runtime: &Mutex<McpRuntime>) -> Result<(), IpcError> {
+    if lock(runtime)?.is_running() {
+        return Ok(());
+    }
+    Err(IpcError::new(
+        codes::E_NOT_RUNNING,
+        "MCP server is not running — enable it in Settings → Control API first",
     ))
 }
 

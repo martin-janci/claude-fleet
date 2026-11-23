@@ -251,6 +251,27 @@ pub async fn add_host(
             return list_one(store, &args.alias);
         }
     }
+    // A fleet name already in use for ANOTHER machine is not re-pointed by
+    // an add: the row would keep that machine's token, provisioned flag and
+    // fingerprint (so the new one never got hooks or an MCP entry, yet read
+    // provisioned), and the old machine's token would still authenticate as
+    // this host (review w13-3).
+    if let Some(existing) = lock(store)?.get_host_row(&args.alias)? {
+        if let Some(old) = existing
+            .ssh_alias
+            .as_deref()
+            .filter(|old| *old != args.ssh_alias)
+        {
+            return Err(IpcError::new(
+                codes::E_CONFLICT,
+                format!(
+                    "a host named {:?} already exists and is reached as {old:?}: pick another \
+                     name in fleet, or remove {:?} first to move the name to {:?}",
+                    args.alias, args.alias, args.ssh_alias
+                ),
+            ));
+        }
+    }
     let (reachable, claude_ver, tmux_ver, account) = if args.transport.as_deref() == Some("agent") {
         (false, None, None, None)
     } else {
@@ -404,6 +425,14 @@ pub async fn probe_host(
         } else {
             s.set_host_account(&args.alias, None)?;
         }
+        // A probe that found no version keeps the stored one (review w13-6):
+        // a narrower shell PATH than the sessions' is not an uninstall, and
+        // the reconcile's versions pass reads them where sessions run.
+        let read_claude = claude_ver.is_some();
+        let stored = s.get_host_row(&args.alias)?;
+        let claude_ver =
+            claude_ver.or_else(|| stored.as_ref().and_then(|h| h.claude_version.clone()));
+        let tmux_ver = tmux_ver.or_else(|| stored.as_ref().and_then(|h| h.tmux_version.clone()));
         s.update_host_probe(
             &args.alias,
             reachable,
@@ -413,7 +442,7 @@ pub async fn probe_host(
         )?;
         // Task 1: an explicit re-probe that read a version from the host
         // stamps it like the reconcile pass does.
-        if claude_ver.is_some() {
+        if read_claude {
             s.set_host_versions_at(&args.alias, now_unix())?;
         }
     }
@@ -659,6 +688,9 @@ pub(crate) const OAUTH_ACCOUNT_SCRIPT: &str = oauth_account_script!();
 /// rather than failing the whole probe. MUST be `quote`'d before it's handed to
 /// `bash -lc` over ssh (see `probe_with_token`).
 const PROBE_SCRIPT: &str = concat!(
+    // `crate::ssh::TOOL_PATH_PREFIX`, spelled out for `concat!` (review
+    // w13-6; a test holds the two equal).
+    "PATH=\"$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin\"; export PATH; ",
     "tmux -V 2>/dev/null || true\necho ---\nclaude --version 2>/dev/null || true\necho ---\n",
     oauth_account_script!()
 );
@@ -1736,6 +1768,15 @@ mod tests {
 
     // ── probe script: ssh argv-join + login-shell re-tokenization ─────────────
 
+    /// Review w13-6: the probe looks where sessions find their tools too.
+    #[test]
+    fn the_probe_looks_in_homebrew_and_local_bin_too() {
+        assert!(PROBE_SCRIPT.starts_with(crate::ssh::TOOL_PATH_PREFIX));
+        assert!(
+            crate::service::host_check::check_script().starts_with(crate::ssh::TOOL_PATH_PREFIX)
+        );
+    }
+
     #[test]
     fn probe_script_runs_as_one_program_when_quoted() {
         // The real PROBE_SCRIPT, single-quoted exactly as `probe_with_token`
@@ -1903,6 +1944,36 @@ mod tests {
             fake.calls()
         );
         assert!(host_row(&store, "gamma").is_some(), "the row is persisted");
+    }
+
+    /// Review w13-3: a fleet name in use for another machine is refused, not
+    /// silently moved to the new one with the old one's token and state.
+    #[tokio::test]
+    async fn add_host_never_moves_an_existing_name_to_another_machine() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("dev", Some("dev-old")).unwrap();
+            s.set_host_provisioned("dev", true).unwrap();
+        }
+        let fake = fake_fleet();
+        let err = add_host(
+            AddHostArgs {
+                alias: "dev".into(),
+                ssh_alias: "box2".into(),
+                transport: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_CONFLICT, "{err:?}");
+        assert!(err.message.contains("dev-old"), "{}", err.message);
+        assert!(fake.calls().is_empty(), "refused before any probe");
+        let row = host_row(&store, "dev").unwrap();
+        assert_eq!(row.ssh_alias.as_deref(), Some("dev-old"));
+        assert!(row.provisioned);
     }
 
     /// Review r18 A6: re-adding a connected agent host as an agent host

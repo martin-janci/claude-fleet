@@ -94,6 +94,30 @@ describe('HostDetail: health checklist', () => {
     expect(prov[1]).toEqual({ rotate: false, host: 'mercury' });
   });
 
+  it('review w13-4: a skipped or missing host is not reported as re-provisioned', async () => {
+    const { toasts } = await import('./toasts');
+    const { get } = await import('svelte/store');
+    toasts.set([]);
+    const real = inv.getMockImplementation() as (cmd: string, payload?: unknown) => Promise<unknown>;
+    let answer: unknown[] = [{ host: 'mercury', status: 'skipped', detail: 'unreachable' }];
+    inv.mockImplementation(async (cmd: string, payload?: unknown) => (cmd === 'provision_hosts' ? answer : real(cmd, payload)));
+    mount();
+    await fireEvent.click(screen.getByTestId('detail-reprovision'));
+    await waitFor(() => expect(get(toasts).some((t) => /not re-provisioned: unreachable/.test(t.message))).toBe(true));
+    answer = [];
+    toasts.set([]);
+    await fireEvent.click(screen.getByTestId('detail-reprovision'));
+    await waitFor(() => expect(get(toasts).some((t) => /not re-provisioned/.test(t.message))).toBe(true));
+    expect(get(toasts).some((t) => /mercury re-provisioned/.test(t.message))).toBe(false);
+  });
+
+  it('review w13-4: an offline host cannot be re-provisioned', () => {
+    mount({ host: host('mercury', { reachable: false }) });
+    const prov = screen.getByTestId('detail-reprovision') as HTMLButtonElement;
+    expect(prov.disabled).toBe(true);
+    expect(prov.title).toMatch(/offline/);
+  });
+
   it('New session here starts on this host', async () => {
     const props = mount();
     await fireEvent.click(screen.getByTestId('detail-new-session-here'));

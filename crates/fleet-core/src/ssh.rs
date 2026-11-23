@@ -1204,6 +1204,14 @@ pub const TOOLCHAIN_RETRY_AFTER: Duration = Duration::from_secs(300);
 /// database, else `/bin/sh`. `ssh` always sets `$SHELL`; `wsl.exe --exec`
 /// does not, and a `/bin/sh -lc` there never reads the `.bashrc` / `.zshrc`
 /// that puts `~/.local/bin` (where Claude Code installs) on PATH.
+/// Prepended to a check run under a plain `bash -lc` (the add-host checks,
+/// the probe, Host detail's checklist): the directories Homebrew and Claude
+/// Code install into, which are often on the interactive shell's PATH only
+/// (`.zshrc`/`.zprofile`) — where sessions find them (review w13-6).
+/// Appended, so whatever the login PATH finds first still wins.
+pub const TOOL_PATH_PREFIX: &str =
+    "PATH=\"$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin\"; export PATH; ";
+
 pub fn toolchain_script(interactive: bool) -> String {
     let flags = if interactive { "-ilc" } else { "-lc" };
     let inner = format!(
