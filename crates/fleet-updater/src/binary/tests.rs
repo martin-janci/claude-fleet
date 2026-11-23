@@ -560,6 +560,44 @@ async fn an_interrupted_install_resumes_its_validation() {
     assert_eq!(o, Outcome::Updated(Version::new(0, 5, 4)));
 }
 
+/// Review w09-2: in process nothing counts restarts, so a candidate that
+/// keeps dying while it is validated was resumed (and soaked again) forever.
+#[tokio::test]
+async fn a_candidate_that_keeps_dying_under_validation_is_rolled_back() {
+    let mut r = rig(Behaviour::Good, Component::Agent);
+    let (o, _) = r.u.tick().await;
+    assert_eq!(o, Outcome::Updated(Version::new(0, 5, 4)));
+    let cand = Candidate {
+        version: Version::new(0, 5, 4),
+        sha256: sha256_hex(&tarball("0.5.4")),
+        schema_to: None,
+    };
+    // Each "new process" finds the attempt mid-validation.
+    for _ in 0..MAX_RESUMES {
+        r.u.state.phase = UpdatePhase::Validating;
+        r.u.state.candidate = Some(cand.clone());
+        let (o, _) = r.u.tick().await;
+        assert_eq!(o, Outcome::Updated(Version::new(0, 5, 4)));
+        // The pass finished: a crash before it saved Idle leaves Validating.
+    }
+    r.u.state.phase = UpdatePhase::Validating;
+    r.u.state.candidate = Some(cand.clone());
+    let (o, _) = r.u.tick().await;
+    assert_ne!(o, Outcome::Updated(Version::new(0, 5, 4)), "{o:?}");
+    assert!(r.u.state.bad.is_bad(&cand.version, Some(&cand.sha256)));
+    let failed = r
+        .hub
+        .lock()
+        .unwrap()
+        .reports
+        .iter()
+        .rev()
+        .find(|x| x.phase == UpdatePhase::Failed)
+        .and_then(|x| x.error.clone())
+        .unwrap_or_default();
+    assert!(failed.contains("while being validated"), "{failed}");
+}
+
 #[test]
 fn old_releases_are_pruned_but_never_the_running_or_previous_one() {
     let mut r = rig(Behaviour::Good, Component::Agent);

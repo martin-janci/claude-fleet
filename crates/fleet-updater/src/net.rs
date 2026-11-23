@@ -70,6 +70,12 @@ impl HubHttp {
         })
     }
 
+    /// Every request through `dial` (a proxy) instead of directly.
+    pub fn with_dial(mut self, dial: Option<std::sync::Arc<dyn crate::http::Dial>>) -> Self {
+        self.client = self.client.with_dial(dial);
+        self
+    }
+
     /// `GET <hub><path>` with the bearer token: a file from the hub's
     /// artifact mirror (`/update/artifact/<sha256>`).
     pub async fn get(&self, path: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
@@ -150,10 +156,34 @@ pub struct GitFetch {
     extra_host: Option<String>,
 }
 
+/// A channel document or a manifest: small, so a stalled read fails fast.
+const DOCUMENT_TIMEOUT: Duration = Duration::from_secs(60);
+/// A release tarball: tens of MiB (the hub's carries its language models)
+/// from GitHub over a slow link, as fleet-core's `ARTIFACT_TIMEOUT` (review
+/// w09-3: at 60 s it needed ~6 Mbit/s sustained, and a slower host failed
+/// every pass).
+pub const ARTIFACT_TIMEOUT: Duration = Duration::from_secs(600);
+
 impl GitFetch {
+    /// For channel documents and manifests.
     pub fn new(mirror_base: Option<&str>) -> Result<GitFetch, String> {
+        Self::with_timeout(mirror_base, DOCUMENT_TIMEOUT)
+    }
+
+    /// For release artifacts ([`crate::binary::Host::fetch`]).
+    pub fn for_artifacts(mirror_base: Option<&str>) -> Result<GitFetch, String> {
+        Self::with_timeout(mirror_base, ARTIFACT_TIMEOUT)
+    }
+
+    /// Every request through `dial` (a proxy) instead of directly.
+    pub fn with_dial(mut self, dial: Option<std::sync::Arc<dyn crate::http::Dial>>) -> Self {
+        self.client = self.client.with_dial(dial);
+        self
+    }
+
+    fn with_timeout(mirror_base: Option<&str>, timeout: Duration) -> Result<GitFetch, String> {
         Ok(GitFetch {
-            client: Client::new(true, Duration::from_secs(60))?,
+            client: Client::new(true, timeout)?,
             extra_host: mirror_base.map(Url::parse).transpose()?.map(|u| u.host),
         })
     }

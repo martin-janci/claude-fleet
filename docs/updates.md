@@ -574,6 +574,32 @@ not stop it halfway. One pass:
 `--clear` forgets a rollback failure once an operator has sorted it out.
 The last two releases besides the running and the previous one are kept.
 
+### In process, where no timer runs
+
+`--auto-update` only moves the pass into a unit of its own. Wherever
+`fleet-agent-update.timer` is **not** installed, `fleet-agent run` runs the
+same pass itself, on the same schedule, and installs what the hub decides
+(`update.agent.mode` defaults to `automatic`). That covers every macOS agent
+(launchd has no such timer), containers, agents started by hand or by an
+entrypoint loop, and agents installed without `--auto-update`.
+
+- **Restart** is the process `exec`ing the new build in place: same pid,
+  arguments and environment. The new build resumes the attempt from the
+  state file, must be connected within the soak, and otherwise points
+  `current` back and `exec`s the previous build. A candidate that keeps
+  dying while it is validated (a crash, then the service manager starting
+  it again) is rolled back after three resumes.
+- **State** is in `~/.local/state/fleet-agent-update/` (as root:
+  `/var/lib/fleet-agent-update/`), releases in `~/.local/lib/fleet-agent/`
+  (as root: `/opt/fleet-agent/`); the binary the agent was started as
+  becomes a symlink through `current`, as above.
+- A hub that refuses the agent's protocol wakes the pass at once; after an
+  attempt that failed before anything ran, it waits the normal interval.
+- **To keep an agent where it is**, set `FLEET_AGENT_SELF_UPDATE=off` (or
+  `0`, `false`, `no`) in its environment (the unit's `Environment=`, the
+  LaunchAgent's `EnvironmentVariables`), or set `update.agent.mode` to
+  `notify` or `manual` on the hub.
+
 ## A hub without Docker updates itself
 
 `fleet-hub update apply` is the same pass for a hub run from

@@ -47,6 +47,10 @@ use crate::common::{attempt_id, now_unix, prune_backups, restore_db, safe, wants
 
 /// The state file's name in [`BinaryConfig::state_dir`].
 pub const STATE_FILE: &str = "state.json";
+/// Resumes of one candidate's install or validation before it is rolled
+/// back. An in-process install resumes once by design (the `exec` into the
+/// candidate); every further one is the candidate dying under validation.
+pub const MAX_RESUMES: u32 = 3;
 
 #[derive(Debug, Clone)]
 pub struct BinaryConfig {
@@ -187,6 +191,13 @@ pub struct BinState {
     pub candidate_schema: Option<i64>,
     #[serde(default)]
     pub restored: bool,
+    /// How many times a pass resumed this candidate's install or validation
+    /// (each one a new process: a crash, an `exec`, a restart). Where nothing
+    /// counts restarts for the updater ([`Health::Up::restarts`] is 0 in
+    /// process), a candidate that keeps dying while it is validated is
+    /// caught here (review w09-2).
+    #[serde(default)]
+    pub resumes: u32,
 }
 
 impl BinState {
@@ -650,6 +661,7 @@ impl<H: Host> BinaryUpdater<H> {
             .candidate
             .clone()
             .expect("prepare set the candidate");
+        self.state.resumes = 0;
         self.report(UpdatePhase::Installing, &installed, Value::Null, None)
             .await;
         let switched = point(
@@ -966,6 +978,19 @@ impl<H: Host> BinaryUpdater<H> {
             }
             Installing | Validating => {
                 let cand = self.state.candidate.clone()?;
+                self.state.resumes = self.state.resumes.saturating_add(1);
+                self.save();
+                if self.state.resumes > MAX_RESUMES {
+                    let n = self.state.resumes - 1;
+                    return Some(
+                        self.fail_and_roll_back(
+                            &cand,
+                            format!("it restarted {n} time(s) while being validated"),
+                            None,
+                        )
+                        .await,
+                    );
+                }
                 self.log(&format!(
                     "resuming the validation of {} after an interruption",
                     cand.version
