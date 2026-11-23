@@ -44,6 +44,10 @@ pub fn backup_to(src: &Path, dest: &Path) -> Result<BackupInfo, String> {
     let part_str = part
         .to_str()
         .ok_or_else(|| format!("backup path {} is not UTF-8", part.display()))?;
+    // The copy holds the master and every host token: created empty and
+    // owner-only first (VACUUM INTO accepts an empty file), so it is never
+    // readable under the process umask, not even for a moment (review w11-5).
+    create_private_file(&part)?;
 
     let conn = Connection::open_with_flags(
         src,
@@ -95,6 +99,35 @@ pub fn backup_to(src: &Path, dest: &Path) -> Result<BackupInfo, String> {
         schema,
         bytes,
     })
+}
+
+/// An empty file at `path`, readable and writable by its owner only.
+fn create_private_file(path: &Path) -> Result<(), String> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        o.mode(0o600);
+    }
+    o.open(path)
+        .map(drop)
+        .map_err(|e| format!("create {}: {e}", path.display()))
+}
+
+/// `dir` and its parents, `dir` itself owner-only (0700, as `backup.sh`'s):
+/// where backups of the database, tokens and all, are kept (review w11-5).
+pub fn create_private_dir(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        // Not fatal: a mounted volume may refuse a chmod, as for state.db.
+        if let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)) {
+            tracing::warn!(dir = %dir.display(), error = %e, "[backup] could not make the backup folder private");
+        }
+    }
+    Ok(())
 }
 
 /// `MAX(version)` of `schema_version`, `None` when the table is absent.
@@ -155,6 +188,24 @@ mod tests {
             copy.get_setting("backup.test").unwrap().as_deref(),
             Some("kept")
         );
+    }
+
+    /// Review w11-5: the copy holds every token, so it is owner-only, and
+    /// so is the folder the hub keeps them in.
+    #[cfg(unix)]
+    #[test]
+    fn a_backup_and_its_folder_are_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        let _store = Store::open_with_bus(&db, Arc::new(NoopEventBus)).unwrap();
+        let backups = dir.path().join("backups");
+        create_private_dir(&backups).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&backups), 0o700);
+        let dest = backups.join("x.db");
+        backup_to(&db, &dest).unwrap();
+        assert_eq!(mode(&dest), 0o600);
     }
 
     #[test]

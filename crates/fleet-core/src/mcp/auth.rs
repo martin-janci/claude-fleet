@@ -499,6 +499,57 @@ pub fn sha256_hex(s: &str) -> String {
     hex::encode(sha2::Sha256::digest(s.as_bytes()))
 }
 
+/// The prefix that marks a hook-only token, so `authorize` knows to try
+/// [`resolve_hook_token`] on `/hook` and nowhere else.
+pub const HOOK_TOKEN_PREFIX: &str = "fhk1_";
+
+/// The hook-only token derived from a host's token (review w10-5): what a
+/// public hub writes into the hooks of an agent host that relays them on
+/// loopback, where another local account could take the relay port while the
+/// agent is down and read the bearer of the next hook. HMAC-SHA256 under the
+/// host token with a fixed label, so it needs no column of its own: the hub
+/// recomputes it from the stored host token, a rotated host token rotates it,
+/// and nobody holding it can recover the host token. It authorizes `/hook`
+/// only ([`resolve_hook_token`]); every other route compares stored tokens
+/// and never matches it, so it cannot dial `/agent` or call `/mcp`.
+pub fn hook_token(host_token: &str) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(host_token.as_bytes())
+        .expect("HMAC-SHA256 accepts any key length");
+    mac.update(b"fleet-hook-v1");
+    format!(
+        "{HOOK_TOKEN_PREFIX}{}",
+        hex::encode(mac.finalize().into_bytes())
+    )
+}
+
+/// The host whose [`hook_token`] `presented` is, as the host token itself
+/// would resolve — the caller a `/hook` request needs. Every row is
+/// compared, with no short-circuit, as in [`resolve_token_at`]. For `/hook`
+/// only: the caller of this decides the route.
+pub fn resolve_hook_token(presented: &str, host_tokens: &[HostTokenRow]) -> Option<Caller> {
+    if !presented.starts_with(HOOK_TOKEN_PREFIX) {
+        return None;
+    }
+    let mut found = None;
+    for row in host_tokens {
+        if !row.token.is_empty()
+            && constant_time_eq(presented.as_bytes(), hook_token(&row.token).as_bytes())
+        {
+            found = Some(Caller {
+                host_alias: Some(row.host_alias.clone()),
+                client: None,
+                mode: TokenMode::parse(&row.mode),
+                pane: None,
+                is_personal_owner: false,
+                is_fleet_admin: false,
+                api: None,
+            });
+        }
+    }
+    found
+}
+
 /// Constant-time byte comparison. Returns `false` immediately on a length
 /// mismatch — the token length is fixed and not itself a secret — and runs
 /// in time independent of *where* two equal-length inputs first differ.
@@ -939,6 +990,33 @@ mod tests {
     /// answered `None`. Nobody is the personal owner then, the master
     /// included (T1's fail-closed rule).
     const NO_OWNER: Option<i64> = None;
+
+    /// Review w10-5: the hook-only token names its host, is not the host
+    /// token, and the host token's own resolver never takes it.
+    #[test]
+    fn a_hook_token_resolves_to_its_host_on_the_hook_resolver_only() {
+        let hosts = vec![
+            host_row("a", "tok-a", "full"),
+            host_row("b", "tok-b", "full"),
+        ];
+        let a = hook_token("tok-a");
+        assert!(a.starts_with(HOOK_TOKEN_PREFIX));
+        assert_eq!(a, hook_token("tok-a"), "derived, so the hub recomputes it");
+        assert_ne!(a, hook_token("tok-b"));
+        assert!(!a.contains("tok-a"));
+        let caller = resolve_hook_token(&a, &hosts).expect("host a");
+        assert_eq!(caller.host_alias.as_deref(), Some("a"));
+        assert!(!caller.is_personal_owner && caller.client.is_none());
+        assert!(
+            resolve_hook_token("tok-a", &hosts).is_none(),
+            "the host token is not one"
+        );
+        assert!(resolve_hook_token(&hook_token("gone"), &hosts).is_none());
+        assert!(
+            resolve_token(&a, "master", &hosts, &[], Some(1)).is_none(),
+            "the general resolver never takes a hook token"
+        );
+    }
 
     fn host_row(alias: &str, token: &str, mode: &str) -> HostTokenRow {
         HostTokenRow {

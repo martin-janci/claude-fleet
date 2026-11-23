@@ -327,6 +327,20 @@ async fn authorize(
         // re-provision every host before then. Only with an empty Host
         // allowlist (desktop / loopback hub): a public hub's master token
         // must never be accepted from a URL that proxies and logs can see.
+        // A hook-only token (review w10-5), derived from a host token: good
+        // on `/hook` and nowhere else.
+        Err(StatusCode::UNAUTHORIZED)
+            if request.uri().path() == "/hook"
+                && auth::bearer_token(request.headers().get(axum::http::header::AUTHORIZATION))
+                    .is_some_and(|t| t.starts_with(auth::HOOK_TOKEN_PREFIX)) =>
+        {
+            auth::bearer_token(request.headers().get(axum::http::header::AUTHORIZATION))
+                .and_then(|t| auth::resolve_hook_token(t, &rows.hosts))
+                .ok_or_else(|| {
+                    tracing::warn!("[mcp] rejected /hook request: unknown hook token");
+                    StatusCode::UNAUTHORIZED
+                })?
+        }
         Err(StatusCode::UNAUTHORIZED)
             if request.uri().path() == "/hook" && state.allowed_hosts.is_empty() =>
         {
@@ -1921,6 +1935,26 @@ mod tests {
         assert!(
             hook_ok.contains("204"),
             "expected 204 on /hook with host token:\n{hook_ok}"
+        );
+        // The hook-only token derived from it (review w10-5) posts a hook…
+        let derived = auth::hook_token("host-tok");
+        let hook_derived = round_trip(addr, &post("/hook", Some(&derived), None, stop)).await;
+        assert!(
+            hook_derived.contains("204"),
+            "expected 204 on /hook with the hook-only token:\n{hook_derived}"
+        );
+        // …and is good for nothing else: not /mcp…
+        let mcp_derived = round_trip(addr, &post("/mcp", Some(&derived), None, "{}")).await;
+        assert!(
+            mcp_derived.contains("401"),
+            "the hook-only token must not reach /mcp:\n{mcp_derived}"
+        );
+        // …and one derived from a token the hub does not hold is nobody.
+        let stranger = auth::hook_token("not-a-host-tok");
+        let hook_stranger = round_trip(addr, &post("/hook", Some(&stranger), None, stop)).await;
+        assert!(
+            hook_stranger.contains("401"),
+            "an unknown hook token must be refused:\n{hook_stranger}"
         );
         // Transitional `?token=` form with the master token still works…
         let hook_q = round_trip(addr, &post("/hook?token=s3cret", None, None, stop)).await;
