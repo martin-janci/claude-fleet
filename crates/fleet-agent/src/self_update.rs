@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use fleet_update::wire::Speaks;
 use fleet_update::{Component, Version};
 use fleet_updater::binary::{
-    parse_version_output, BinState, BinaryConfig, BinaryUpdater, Health, Host,
+    parse_version_output, BinState, BinaryConfig, BinaryUpdater, Health, Host, Outcome,
 };
 use fleet_updater::common::{trusted_keys, FileSequences};
 use fleet_updater::net::{GitFetch, HubHttp};
@@ -135,7 +135,13 @@ impl SelfUpdate {
             "[agent] self-update on (no fleet-agent-update.timer here)"
         );
         loop {
-            let (_, wait) = updater.tick().await;
+            let (outcome, wait) = updater.tick().await;
+            // A refusal wakes the pass at every redial (~60 s). After an
+            // attempt that failed before anything ran (a download or an
+            // unpacked build that will not run), that would download the
+            // same tarball again every minute (review w09-4): such a pass
+            // waits its normal interval, and only `update-now` cuts it short.
+            let heed_refusals = !matches!(outcome, Outcome::Failed(_));
             let poke = self.poke_dir.join("update-now");
             let deadline = tokio::time::Instant::now() + wait;
             loop {
@@ -148,8 +154,10 @@ impl SelfUpdate {
                 tokio::select! {
                     () = tokio::time::sleep(step) => {}
                     () = link.refused.notified() => {
-                        tracing::info!("[agent] the hub refused this agent's protocol: checking for an update now");
-                        break;
+                        if heed_refusals {
+                            tracing::info!("[agent] the hub refused this agent's protocol: checking for an update now");
+                            break;
+                        }
                     }
                 }
                 if std::fs::remove_file(&poke).is_ok() {
@@ -166,7 +174,10 @@ impl SelfUpdate {
         link: Arc<LinkStatus>,
     ) -> Result<BinaryUpdater<ExecHost>, String> {
         let state = BinState::load(&self.paths.state_dir)?;
-        let hub = HubHttp::with_ca(&config.hub, &config.token, None, config.ca_file.as_deref())?;
+        let dial =
+            crate::proxy::UpdateDial::resolve(config.proxy.as_deref(), |k| std::env::var(k).ok())?;
+        let hub = HubHttp::with_ca(&config.hub, &config.token, None, config.ca_file.as_deref())?
+            .with_dial(dial.clone());
         let channel = fleet_update::HubUpdateChannel::new(
             hub.clone(),
             trusted_keys(),
@@ -178,7 +189,7 @@ impl SelfUpdate {
                 user_scope: false,
                 hub: None,
                 link: self.link.clone(),
-                git: GitFetch::new(None)?,
+                git: GitFetch::for_artifacts(None)?.with_dial(dial),
                 mirror: Some(hub),
             },
             link: self.link.clone(),
@@ -220,10 +231,12 @@ impl ExecHost {
     /// Whether `link` already resolves to the build this process runs. After
     /// an `exec` the new process resumes the attempt and "restarts" again on
     /// the way through: that must be a no-op, not an endless `exec`.
+    /// `current_exe` rather than `/proc/self/exe`: macOS has no `/proc`, and
+    /// there the check was always false, so a rollback `exec`'d forever.
     fn runs_link(&self) -> bool {
         match (
             std::fs::canonicalize(&self.link),
-            std::fs::canonicalize("/proc/self/exe"),
+            std::env::current_exe().and_then(std::fs::canonicalize),
         ) {
             (Ok(a), Ok(b)) => a == b,
             _ => false,
@@ -451,5 +464,32 @@ mod tests {
         }
         // A link that is not this process's build is not "already running".
         assert!(!host.runs_link());
+    }
+
+    /// The rollback loop guard: a link that resolves to this very binary is
+    /// "already running", on every OS (macOS has no `/proc/self/exe`).
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_this_very_binary_is_already_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("current");
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &link).unwrap();
+        let host = ExecHost {
+            files: SystemdHost {
+                unit: "x".into(),
+                user_scope: false,
+                hub: None,
+                link: link.clone(),
+                git: GitFetch::new(None).unwrap(),
+                mirror: None,
+            },
+            link,
+            args: vec![],
+            status: crate::conn::Notifier::at(None).link(),
+            running: own_version().unwrap(),
+        };
+        assert!(host.runs_link());
+        // So `restart` is a no-op rather than an `exec`.
+        assert!(host.restart().is_ok());
     }
 }

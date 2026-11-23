@@ -317,7 +317,7 @@ pub async fn provision_one_with(
         ssh,
         host,
         &base.hook_url(),
-        token,
+        &base.hook_token(token),
         base.session_start_context,
     )
     .await?;
@@ -807,7 +807,7 @@ pub async fn provision_content_only(
         ssh,
         host,
         &base.hook_url(),
-        &token,
+        &base.hook_token(&token),
         base.session_start_context,
     )
     .await?;
@@ -857,8 +857,16 @@ const REPROVISION_BACKOFF_MAX: Duration = Duration::from_secs(6 * 3600);
 /// [`REPROVISION_EVERY`], then twice that, up to
 /// [`REPROVISION_BACKOFF_MAX`]. In memory only — a hub restart retries
 /// every stale host at once, which is what an upgrade wants.
+///
+/// The second map keeps why each host is still owed its refresh, so the
+/// loop's health is judged over every stale host, those backing off
+/// included (review w02-3: a pass that tried nobody reported `ok` for
+/// hours while the host was still not refreshed).
 #[derive(Debug, Default)]
-pub struct RetryBook(std::collections::HashMap<String, (u32, i64)>);
+pub struct RetryBook(
+    std::collections::HashMap<String, (u32, i64)>,
+    std::collections::HashMap<String, String>,
+);
 
 impl RetryBook {
     fn due(&self, host: &str, now: i64) -> bool {
@@ -877,6 +885,24 @@ impl RetryBook {
 
     fn succeeded(&mut self, host: &str) {
         self.0.remove(host);
+        self.1.remove(host);
+    }
+
+    /// `host` is still owed its refresh, for `why`.
+    fn owe(&mut self, host: &str, why: String) {
+        self.1.insert(host.to_string(), why);
+    }
+
+    /// The loop's health over every host still owed a refresh (`stale`, due
+    /// or backing off): an error while any of them has a reason on record.
+    /// Reasons of hosts no longer stale are forgotten.
+    fn outcome(&mut self, stale: &[String]) -> Result<(), String> {
+        self.1.retain(|h, _| stale.contains(h));
+        let not_refreshed: Vec<String> = stale
+            .iter()
+            .filter_map(|h| self.1.get(h).map(|why| format!("{h}: {why}")))
+            .collect();
+        refresh_outcome(&not_refreshed, stale.len())
     }
 }
 
@@ -929,19 +955,19 @@ async fn reprovision_stale_pass(
         return None;
     }
     let now = crate::store::now_unix();
-    let stale: Vec<String> = match store.lock() {
+    // Every host owed a refresh, and of those the ones due now.
+    let owed: Vec<String> = match store.lock() {
         Ok(s) => crate::service::hosts::active_hosts(
             s.list_hosts().unwrap_or_default(),
             crate::service::hub::local_host_enabled(),
         )
         .into_iter()
-        .filter(|h| h.provisioned && h.reachable && h.provision_stale && book.due(&h.alias, now))
+        .filter(|h| h.provisioned && h.reachable && h.provision_stale)
         .map(|h| h.alias)
         .collect(),
         Err(_) => return None,
     };
-    // The hosts not refreshed, and the first reason, for the loop's health.
-    let mut not_refreshed: Vec<String> = Vec::new();
+    let stale: Vec<String> = owed.iter().filter(|h| book.due(h, now)).cloned().collect();
     for host in &stale {
         // A host whose hooks post to another fleet (the hub a desktop
         // migrated to, or a desktop beside a hub) is that fleet's: an
@@ -964,7 +990,9 @@ async fn reprovision_stale_pass(
                 theirs,
                 "[provision] stale host reports to another fleet; left alone"
             );
-            not_refreshed.push(format!("{host}: its hooks report to another fleet"));
+            // Deliberate, and already on the host row: nothing this loop can
+            // clear, so not a failure of it.
+            book.1.remove(host.as_str());
             continue;
         }
         match provision_content_only(store, ssh, host, base).await {
@@ -997,20 +1025,17 @@ async fn reprovision_stale_pass(
                     error = %e.message,
                     "[provision] stale content not refreshed"
                 );
-                not_refreshed.push(format!("{host}: {}", e.message));
+                book.owe(host, e.message.to_string());
             }
         }
     }
-    crate::service::loops::report(
-        "reprovision",
-        refresh_outcome(&not_refreshed, stale.len()),
-        Some(REPROVISION_EVERY),
-    );
+    crate::service::loops::report("reprovision", book.outcome(&owed), Some(REPROVISION_EVERY));
     Some(stale)
 }
 
 /// A pass's outcome for the loop's health: an error naming how many of the
-/// `tried` hosts were not refreshed, and the first reason, when any was not.
+/// `tried` (owed) hosts were not refreshed, and the first reason, when any
+/// was not.
 fn refresh_outcome(not_refreshed: &[String], tried: usize) -> Result<(), String> {
     match not_refreshed.first() {
         None => Ok(()),
@@ -3922,12 +3947,17 @@ mod tests {
         let warning = row.provision_warning.expect("the reason is kept");
         assert!(warning.contains("agent not connected"), "{warning}");
 
+        assert!(book.outcome(&["h1".to_string()]).is_err());
+
         // Backed off: the very next pass leaves it alone.
         let calls = down.calls().len();
         assert_eq!(
             reprovision_stale_pass(&store, &down, &base(), &mut book).await,
             Some(vec![])
         );
+        // Review w02-3: and the loop stays failed while it is still owed.
+        let e = book.outcome(&["h1".to_string()]).unwrap_err();
+        assert!(e.contains("agent not connected"), "{e}");
         assert_eq!(
             down.calls().len(),
             calls,
@@ -3943,7 +3973,8 @@ mod tests {
         let row = store.lock().unwrap().get_host_row("h1").unwrap().unwrap();
         assert!(!row.provision_stale);
         assert_eq!(row.provision_warning, None);
-        assert!(book.0.is_empty());
+        assert!(book.0.is_empty() && book.1.is_empty());
+        assert_eq!(book.outcome(&[]), Ok(()));
     }
 
     /// A pass reports itself failed when any host was not refreshed, so the
@@ -4004,6 +4035,8 @@ mod tests {
         assert!(row.provision_stale);
         let warning = row.provision_warning.expect("says why");
         assert!(warning.contains("https://hub.example/hook"), "{warning}");
+        // Review w02-3: left alone on purpose, so not a loop failure.
+        assert_eq!(book.outcome(&["h1".to_string()]), Ok(()));
 
         // Its own loopback hooks: refreshed.
         let own = fresh_host();
@@ -5082,6 +5115,23 @@ mod tests {
             all.contains("https://fleet.example.com/mcp"),
             "the MCP entry is not an http hook and stays public"
         );
+        // Review w10-5: the relayed hooks carry the hook-only token, never
+        // the host's own (which the MCP entry still holds).
+        let derived = crate::mcp::auth::hook_token(&format!("{TOKEN}-relay"));
+        assert!(all.contains(&derived), "hooks carry the hook-only token");
+        for call in fake.calls() {
+            let text = format!(
+                "{}\n{}",
+                call.command(),
+                call.stdin_str().unwrap_or_default()
+            );
+            if text.contains(relay_hook) || text.contains(&derived) {
+                assert!(
+                    !text.contains(&format!("{TOKEN}-relay")),
+                    "no hook write carries the host token:\n{text}"
+                );
+            }
+        }
 
         // The unattended content refresh writes the same.
         let fake = fresh_host();
@@ -5123,6 +5173,13 @@ mod tests {
             public.for_host(&s, "a").mcp_url(),
             "https://fleet.example.com/mcp"
         );
+        // Review w10-5: only the relayed hooks take the hook-only token.
+        assert_eq!(
+            public.for_host(&s, "a").hook_token("t"),
+            crate::mcp::auth::hook_token("t")
+        );
+        assert_eq!(base().for_host(&s, "a").hook_token("t"), "t");
+        assert_eq!(public.for_host(&s, "unknown").hook_token("t"), "t");
         assert_eq!(
             public.for_host(&s, "unknown").hook_url(),
             "https://fleet.example.com/hook"

@@ -1477,6 +1477,15 @@ impl FleetTools {
             // boundary first (`missions::sees_mission`).
             // The operator reads them as the hub's owner, whose missions it
             // saves (`operator_owner_scope`).
+            // `waiting: true` (the phone's watcher, every minute) reads
+            // the active ones only, off the writer (review w19-2).
+            WorkAction::Missions if args.waiting == Some(true) => ok_json_compact(
+                &w::missions::waiting_missions(
+                    self.reader(),
+                    &self.mission_read_scope(&caller, &view_scope)?,
+                )
+                .map_err(to_mcp_err)?,
+            ),
             WorkAction::Missions => ok_json_compact(
                 &w::missions::missions(
                     &self.store,

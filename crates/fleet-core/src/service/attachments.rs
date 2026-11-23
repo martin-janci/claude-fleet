@@ -88,12 +88,24 @@ pub fn root_script(tmux_name: &str) -> String {
 /// COMMON dir, so writing beside the `.git` file would never take effect even
 /// if it could be created. This repo develops in linked worktrees, so that is
 /// the normal case here, not the exotic one.
+///
+/// The folder must be a real directory inside the worktree (review w18-4):
+/// a repo that commits `.claude-fleet-attachments` as a symlink would
+/// otherwise have the composer's files written wherever it points (a shared
+/// `/tmp/drop`), while the UI says they were staged inside the worktree.
 pub fn stage_script(root: &str) -> String {
     let dir = quote(&format!("{root}/{ATTACH_DIR}"));
     let root_q = quote(root);
+    let name = quote(ATTACH_DIR);
     let line = quote(&format!("/{ATTACH_DIR}/"));
+    let refused = quote(&format!(
+        "the worktree's {ATTACH_DIR} folder is a link out of the worktree; remove it"
+    ));
     format!(
-        "mkdir -p {dir} && \
+        "if [ -L {dir} ]; then echo {refused} >&2; exit 8; fi && \
+         mkdir -p {dir} && \
+         {{ [ \"$(cd {dir} && pwd -P)\" = \"$(cd {root_q} && pwd -P)/\"{name} ] || \
+            {{ echo {refused} >&2; exit 8; }}; }} && \
          g=$(git -C {root_q} rev-parse --path-format=absolute --git-common-dir) && \
          mkdir -p \"$g/info\" && \
          {{ grep -qxF {line} \"$g/info/exclude\" 2>/dev/null || \
@@ -262,6 +274,44 @@ mod tests {
         let excl = std::fs::read_to_string(main.join(".git/info/exclude"))
             .expect("the common dir's info/exclude must exist");
         assert!(excl.contains(&format!("/{ATTACH_DIR}/")));
+    }
+
+    /// Review w18-4: a committed `.claude-fleet-attachments` symlink is
+    /// refused, and nothing is created where it points.
+    #[test]
+    fn a_linked_attachment_folder_is_refused() {
+        if !bash_and_git_available() {
+            eprintln!("SKIP a_linked_attachment_folder_is_refused: bash or git not on PATH");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let drop = tmp.path().join("drop");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&drop).unwrap();
+        run(&repo, &["git", "init", "-q"]);
+        let bash = |script: &str| {
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(script)
+                .output()
+                .expect("spawn bash")
+        };
+        // A real folder is fine.
+        let ok = bash(&stage_script(repo.to_str().unwrap()));
+        assert!(
+            ok.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ok.stderr)
+        );
+        std::fs::remove_dir(repo.join(ATTACH_DIR)).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&drop, repo.join(ATTACH_DIR)).unwrap();
+            let out = bash(&stage_script(repo.to_str().unwrap()));
+            assert_eq!(out.status.code(), Some(8));
+            assert!(String::from_utf8_lossy(&out.stderr).contains("is a link"));
+        }
     }
 
     fn bash_and_git_available() -> bool {

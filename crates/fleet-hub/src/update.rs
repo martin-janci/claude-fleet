@@ -177,7 +177,7 @@ async fn apply(
             env: unit_env,
         }),
         link: a.link.clone(),
-        git: GitFetch::new(None)?,
+        git: GitFetch::for_artifacts(None)?,
         mirror: Some(hub),
     };
     let mut cfg = BinaryConfig::new(Component::Hub, "fleet-hub", &a.root, &a.link, &a.state_dir);

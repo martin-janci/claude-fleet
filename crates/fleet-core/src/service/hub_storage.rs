@@ -36,6 +36,9 @@ pub const LOW_DISK_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const LOW_DISK_PCT: u64 = 5;
 /// How long one disk reading is reused: `fleet_health` is polled often.
 const DISK_CACHE: Duration = Duration::from_secs(60);
+/// A reading in flight this long is hung (a NAS mount that stopped
+/// answering): the last one is no longer served as current (review w02-4).
+const READING_HUNG_AFTER: Duration = Duration::from_secs(5 * 60);
 
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -68,6 +71,14 @@ pub struct StorageHealth {
     /// No backup, or the newest is older than [`BACKUP_STALE_SECS`].
     #[serde(default)]
     pub backup_stale: bool,
+    /// When the disk was last read (unix seconds).
+    #[serde(default)]
+    pub read_at: Option<i64>,
+    /// A reading of the data dir's disk has hung past
+    /// [`READING_HUNG_AFTER`]: the free space is unknown (`None`), not the
+    /// last value seen. A client warns.
+    #[serde(default)]
+    pub disk_unreadable: bool,
 }
 
 /// The hub's storage health at `now`; `None` where no data dir was named
@@ -79,8 +90,29 @@ pub struct StorageHealth {
 /// fresh reading on a thread of its own, at most one at a time.
 pub fn health(now: i64) -> Option<StorageHealth> {
     let dir = DATA_DIR.get()?;
-    let (space, last_backup_at) = cached_reading(dir)?;
-    let (free_bytes, total_bytes) = space.unzip();
+    let last = cached_reading(dir);
+    let in_flight_for = (*READING_STARTED.lock().unwrap_or_else(|p| p.into_inner()))
+        .filter(|_| READING_IN_FLIGHT.load(Ordering::Acquire))
+        .map(|at| at.elapsed());
+    assess(last, in_flight_for, now)
+}
+
+/// PURE: the health from the last reading (`None` before the first) and how
+/// long the current one has been in flight. A reading hung past
+/// [`READING_HUNG_AFTER`] makes the disk unknown rather than leaving the
+/// pre-hang free space (and `low_disk: false`) on show for good.
+fn assess(
+    last: Option<(i64, Reading)>,
+    in_flight_for: Option<Duration>,
+    now: i64,
+) -> Option<StorageHealth> {
+    let hung = in_flight_for.is_some_and(|d| d >= READING_HUNG_AFTER);
+    let (read_at, (space, last_backup_at)) = match last {
+        Some(r) => r,
+        None if hung => (0, (None, None)),
+        None => return None,
+    };
+    let (free_bytes, total_bytes) = if hung { (None, None) } else { space.unzip() };
     Some(StorageHealth {
         free_bytes,
         total_bytes,
@@ -89,6 +121,8 @@ pub fn health(now: i64) -> Option<StorageHealth> {
             .is_some_and(|(f, t)| low_disk(f, t)),
         last_backup_at,
         backup_stale: backup_stale(last_backup_at, now),
+        read_at: Some(read_at).filter(|t| *t > 0),
+        disk_unreadable: hung,
     })
 }
 
@@ -131,20 +165,22 @@ type Space = Option<(u64, u64)>;
 /// One reading of the disk and the backups.
 type Reading = (Space, Option<i64>);
 
-/// The last reading and when it was taken.
-static READING: Mutex<Option<(Instant, Reading)>> = Mutex::new(None);
+/// The last reading, when it was taken, and that time in unix seconds.
+static READING: Mutex<Option<(Instant, i64, Reading)>> = Mutex::new(None);
 /// Whether a reading is under way (claimed before its thread starts).
 static READING_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+/// When the reading under way started.
+static READING_STARTED: Mutex<Option<Instant>> = Mutex::new(None);
 
-/// The last reading of `dir`'s disk and backups, `None` before the first;
-/// starts a fresh one in the background when it is missing or stale. The
-/// lock is never held across the reading.
-fn cached_reading(dir: &Path) -> Option<Reading> {
+/// The last reading of `dir`'s disk and backups with its unix time, `None`
+/// before the first; starts a fresh one in the background when it is
+/// missing or stale. The lock is never held across the reading.
+fn cached_reading(dir: &Path) -> Option<(i64, Reading)> {
     let last = *READING.lock().unwrap_or_else(|p| p.into_inner());
-    if last.is_none_or(|(at, _)| at.elapsed() >= DISK_CACHE) {
+    if last.is_none_or(|(at, _, _)| at.elapsed() >= DISK_CACHE) {
         refresh_in_background(dir);
     }
-    last.map(|(_, r)| r)
+    last.map(|(_, unix, r)| (unix, r))
 }
 
 /// Read `dir`'s disk and backups on a thread of its own, unless a reading
@@ -153,12 +189,14 @@ fn refresh_in_background(dir: &Path) {
     if READING_IN_FLIGHT.swap(true, Ordering::AcqRel) {
         return;
     }
+    *READING_STARTED.lock().unwrap_or_else(|p| p.into_inner()) = Some(Instant::now());
     let dir = dir.to_path_buf();
     let spawned = std::thread::Builder::new()
         .name("hub-storage-reading".into())
         .spawn(move || {
             let reading = (disk_space(&dir), newest_backup(&backup_dirs(&dir)));
-            *READING.lock().unwrap_or_else(|p| p.into_inner()) = Some((Instant::now(), reading));
+            *READING.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some((Instant::now(), crate::store::now_unix(), reading));
             READING_IN_FLIGHT.store(false, Ordering::Release);
         });
     if spawned.is_err() {
@@ -214,11 +252,62 @@ pub fn backup_if_due(data_dir: &Path, now: i64) -> Result<Option<BackupInfo>, St
         return Ok(None);
     }
     let dir = data_dir.join("backups");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    crate::store::backup::create_private_dir(&dir)?;
+    // A `.part` a kill left behind (the stop watchdog's exit while a copy
+    // ran) is never reused: the next run takes a new stamp.
+    prune_parts(&dir, now);
+    // Room for the copy first (review w11-4): writing it until ENOSPC
+    // starves the live hub's WAL (SQLITE_FULL), and would every hour.
+    let db = data_dir.join("state.db");
+    let needed = db_bytes(&db).saturating_add(BACKUP_MARGIN_BYTES);
+    if let Some((free, _)) = disk_space(&dir) {
+        if free < needed {
+            return Err(format!(
+                "skipped: {} free under {}, a copy of the database needs about {}",
+                free,
+                dir.display(),
+                needed
+            ));
+        }
+    }
     let dest = daily_path(&dir, now);
-    let info = backup_to(&data_dir.join("state.db"), &dest)?;
+    let info = backup_to(&db, &dest)?;
     prune_daily(&dir, KEEP_DAILY);
     Ok(Some(info))
+}
+
+/// Free space kept beyond the copy's size.
+const BACKUP_MARGIN_BYTES: u64 = 256 * 1024 * 1024;
+
+/// The database's size on disk, its WAL included.
+fn db_bytes(db: &Path) -> u64 {
+    let size = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let mut wal = db.as_os_str().to_owned();
+    wal.push("-wal");
+    size(db).saturating_add(size(Path::new(&wal)))
+}
+
+/// Remove `daily-*.db.part` files in `dir` older than a day.
+fn prune_parts(dir: &Path, now: i64) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let prefix = format!("{DAILY_PREFIX}-");
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !(name.starts_with(&prefix) && name.ends_with(".db.part")) {
+            continue;
+        }
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .is_some_and(|t| now - t.as_secs() as i64 > BACKUP_EVERY_SECS);
+        if old {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 /// `<dir>/daily-YYYYmmdd-HHMMSS.db` in UTC (`backup.sh`'s stamp), with
@@ -328,7 +417,63 @@ mod tests {
             assert!(Instant::now() < deadline, "no reading landed");
             std::thread::sleep(Duration::from_millis(10));
         };
-        assert!(reading.0.is_some());
+        assert!(reading.1 .0.is_some());
+    }
+
+    /// Review w11-4: a stranded `.part` older than a day is removed; a fresh
+    /// one (a copy under way) and other files are not.
+    #[test]
+    fn a_stranded_part_is_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = crate::store::now_unix();
+        let old = dir.path().join("daily-20200101-000000.db.part");
+        let fresh = dir.path().join("daily-20990101-000000.db.part");
+        let other = dir.path().join("pre-0.6.4.db.part");
+        for p in [&old, &fresh, &other] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        let two_days_ago =
+            std::time::UNIX_EPOCH + Duration::from_secs((now - 2 * BACKUP_EVERY_SECS) as u64);
+        for p in [&old, &other] {
+            std::fs::File::options()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_modified(two_days_ago)
+                .unwrap();
+        }
+        prune_parts(dir.path(), now);
+        assert!(!old.exists());
+        assert!(fresh.exists() && other.exists());
+    }
+
+    /// Review w02-4: a reading that never returns (a hung NAS mount) stops
+    /// the last free space from being served as current.
+    #[test]
+    fn a_hung_reading_makes_the_disk_unknown() {
+        const GB: u64 = 1024 * 1024 * 1024;
+        let now = 1_800_000_000;
+        let last = Some((now - 30, (Some((50 * GB, 100 * GB)), Some(now - 60))));
+        let fresh = assess(last, Some(Duration::from_secs(10)), now).unwrap();
+        assert_eq!(fresh.free_bytes, Some(50 * GB));
+        assert!(!fresh.disk_unreadable);
+        assert_eq!(fresh.read_at, Some(now - 30));
+        let hung = assess(last, Some(READING_HUNG_AFTER), now).unwrap();
+        assert!(hung.disk_unreadable);
+        assert_eq!((hung.free_bytes, hung.total_bytes), (None, None));
+        assert!(!hung.low_disk);
+        assert_eq!(
+            hung.last_backup_at,
+            Some(now - 60),
+            "the backup age still shows"
+        );
+        // Hung before the first reading ever landed: still said.
+        assert!(
+            assess(None, Some(READING_HUNG_AFTER), now)
+                .unwrap()
+                .disk_unreadable
+        );
+        assert_eq!(assess(None, Some(Duration::from_secs(1)), now), None);
     }
 
     /// A day's backup is taken once, named like `backup.sh`'s, and only the

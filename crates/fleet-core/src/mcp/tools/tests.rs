@@ -1169,6 +1169,53 @@ fn a_readonly_tool_call_writes_no_audit_row_at_all() {
     );
 }
 
+/// Review w19-1: a polled read action of a mixed tool (`routines
+/// {failing}`, `debug_devices {list}`, `control_auto_continue {status}`)
+/// writes no row either, with a controller registered; a write action of
+/// the same tool still does.
+#[test]
+fn a_polled_read_action_writes_no_audit_row() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        id
+    };
+    for (tool, action) in [
+        ("routines", "failing"),
+        ("routines", "list"),
+        ("debug_devices", "list"),
+        ("control_auto_continue", "status"),
+        ("dashboards", "list"),
+    ] {
+        let args = serde_json::json!({ "action": action });
+        persist_audit(&store, tool, args.as_object(), &Caller::master());
+    }
+    assert!(
+        !store
+            .lock()
+            .unwrap()
+            .list_session_events(id, 10)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "mcp_call"),
+        "a polled read must write no audit row"
+    );
+    let args = serde_json::json!({ "action": "run_now", "routine_id": 1 });
+    persist_audit(&store, "routines", args.as_object(), &Caller::master());
+    assert!(store
+        .lock()
+        .unwrap()
+        .list_session_events(id, 10)
+        .unwrap()
+        .iter()
+        .any(|e| e.kind == "mcp_call"));
+}
+
 /// A mutating tool call is still audited — unaffected by the read-only skip.
 #[test]
 fn a_mutating_tool_call_is_still_audited() {

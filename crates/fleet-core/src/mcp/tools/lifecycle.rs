@@ -799,6 +799,23 @@ impl FleetTools {
     /// its org's hosts'.
     fn require_clipboard_host(&self, caller: &Caller, host_alias: &str) -> Result<(), McpError> {
         require_host(caller, host_alias, "the clipboard")?;
+        // A host's clipboard is what the person at it copied: an unbound
+        // device of someone other than the hub's owner (even a read-only
+        // phone, `get_clipboard` being readonly) must not read or replace
+        // it (review w25-1, the second-person half). An org-bound device is
+        // fenced to its org's hosts below.
+        if let Some(c) = &caller.client {
+            if c.org_id.is_none() && !caller.is_personal_owner && !caller.is_operator() {
+                return Err(to_mcp_err(IpcError::new(
+                    codes::E_FORBIDDEN,
+                    format!(
+                        "{} is not the hub owner's device: the clipboard of {host_alias} is not \
+                         reachable from it",
+                        caller.label()
+                    ),
+                )));
+            }
+        }
         let s = lock(&self.store).map_err(to_mcp_err)?;
         require_bound_client_sees_host(&s, caller, host_alias)
     }
@@ -954,5 +971,31 @@ mod tests {
         assert!(t
             .require_clipboard_host(&org_bound_client(org), "build-box")
             .is_ok());
+    }
+
+    /// Review w25-1 (still open): another person's unbound read-only phone
+    /// read the owner's clipboard. The owner's own device still may.
+    #[tokio::test]
+    async fn another_persons_unbound_device_reaches_no_clipboard() {
+        let t = clipboard_tools();
+        let mut phone = org_bound_client(0);
+        if let Some(c) = phone.client.as_mut() {
+            c.org_id = None;
+        }
+        phone.mode = crate::mcp::auth::TokenMode::Readonly;
+        assert_forbidden(
+            t.get_clipboard(
+                Extension(phone.clone()),
+                Parameters(crate::service::clipboard::GetClipboardArgs {
+                    host_alias: "mac".into(),
+                }),
+            )
+            .await,
+        );
+        assert!(t.require_clipboard_host(&phone, "mac").is_err());
+        let mut owners = phone;
+        owners.is_personal_owner = true;
+        owners.is_fleet_admin = true;
+        assert!(t.require_clipboard_host(&owners, "mac").is_ok());
     }
 }

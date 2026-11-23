@@ -239,13 +239,16 @@ upgrade is still the edit below.
 
 **Back up `state.db` first.** It lives in the `hub-data` volume at
 `/var/lib/fleet-hub/state.db` and carries the master token, every host, every
-session and the asset catalog. Copy it with the container stopped, so you are
-not copying a database mid-write:
+session and the asset catalog. Take a consistent copy while the hub is still
+up, then copy it out. Do not copy `state.db` alone after a stop: the hub
+keeps recent committed writes in `state.db-wal`, so the main file by itself
+can be an older snapshot.
 
 ```bash
 cd ~/fleet-hub
-docker compose stop fleet-hub
-docker compose cp fleet-hub:/var/lib/fleet-hub/state.db "state.db.$(date +%F).bak"
+docker compose exec fleet-hub fleet-hub backup --prefix pre-upgrade --json
+# {"path":"/var/lib/fleet-hub/backups/pre-upgrade-<stamp>.db",...}
+docker compose cp fleet-hub:/var/lib/fleet-hub/backups/pre-upgrade-<stamp>.db .
 ```
 
 **Upgrade.**
@@ -498,15 +501,37 @@ It prints the build the process runs (`version`, `commit`, `build_id`,
 network: run it with `docker compose exec`. A hub that stops removes the
 file, and one that was killed leaves a stale file, which reads as not ready.
 
-**Restore drill** (rehearse it once; a backup nobody restored is a hope):
+**Restore drill** (rehearse it once; a backup nobody restored is a hope).
+The backups to restore from are `backup.sh`'s `state-<stamp>.db` (and
+`upgrade.sh`'s `pre-<version>-<stamp>.db`) in `backups/` beside the compose
+file, and the hub's own daily `daily-<stamp>.db` and `fleet-hub backup`'s
+`<prefix>-<stamp>.db` under `/var/lib/fleet-hub/backups/`, inside the data
+volume. With a bind-mounted `./data` (*Behind an existing reverse proxy*):
 
 ```bash
 docker compose stop fleet-hub
 mkdir -p data.aside && mv data/state.db data/state.db-wal data/state.db-shm data.aside/ 2>/dev/null
-cp backups/state-<stamp>.db data/state.db && chown 1000 data/state.db
+cp backups/state-<stamp>.db data/state.db && chown 1000 data/state.db   # or data/backups/daily-<stamp>.db
 docker compose up -d fleet-hub
 curl -s https://fleet.example.com/mcp/json -H "Authorization: Bearer <readonly token>" ... # fleet_health.schema_version
 ```
+
+With the default named volume `hub-data` (*Setup with Docker*), swap the
+file inside the volume with a throwaway container. Compose prefixes the
+volume with the project name: `docker volume ls` shows it (here
+`fleet-hub_hub-data`).
+
+```bash
+docker compose stop fleet-hub
+docker run --rm -v fleet-hub_hub-data:/d alpine sh -c '
+  mkdir -p /d/aside && mv /d/state.db /d/state.db-wal /d/state.db-shm /d/aside/ 2>/dev/null
+  cp /d/backups/daily-<stamp>.db /d/state.db && chown 1000 /d/state.db'
+docker compose up -d fleet-hub
+```
+
+A copy you took out with `docker compose cp` goes back in the same way:
+`docker run --rm -v fleet-hub_hub-data:/d -v "$PWD":/b alpine cp /b/<file>.db /d/state.db`
+(after moving the old `state.db`, `-wal` and `-shm` aside as above).
 
 Restoring a copy taken before a migration onto a newer image re-runs the
 migrations (fine). Never restore a *newer* copy onto an *older* image: the
@@ -912,8 +937,12 @@ in the URL (`http://user:password@proxy:3128`, percent-encoded). `--proxy ""`
 turns the environment's off. Only an `http://` proxy is spoken: the agent
 tunnels its own TLS through `CONNECT`, so the proxy sees the hub's name and
 nothing else. A proxy that inspects TLS re-signs the hub's certificate with its
-own CA: pass that CA as `--ca-file`. The hook relay uses the same proxy. The
-in-process updater's downloads do not (yet).
+own CA: pass that CA as `--ca-file`. The hook relay uses the same proxy, and
+so do the update passes (in process and `fleet-agent update`): the
+`/update/check`, the hub's mirror and GitHub's release downloads, with
+`NO_PROXY` judged per host. GitHub's certificate is checked against the
+host's own CA bundle, so a TLS-inspecting proxy's CA must be installed there
+for a download from GitHub (the hub's mirror, `update.mirror`, avoids that).
 
 ### The hook relay
 
@@ -942,8 +971,14 @@ So `fleet-agent` relays them:
   name, port and TLS trust (`--ca-file`) the agent dials `/agent` with, so a
   host whose agent connects has working hooks whatever its DNS says. Only
   `POST /hook` crosses, with only `Authorization`, `Content-Type`,
-  `X-Fleet-Pane` and `X-Fleet-Sync`; the bearer is the hook's own host
-  token, checked by the hub as before, and the agent adds no credential. A
+  `X-Fleet-Pane` and `X-Fleet-Sync`; the bearer is the hook's own, and the
+  agent adds no credential. That bearer is not the host token but a
+  hook-only token derived from it (`fhk1_` + HMAC-SHA256 under the host
+  token, `mcp::auth::hook_token`): the hub recomputes it from the stored
+  host token and accepts it on `/hook` only, so another local account that
+  takes the port while the agent is down collects nothing that can dial
+  `/agent` or call `/mcp`. Rotating the host token rotates it. An older
+  agent relays it unchanged; an older hub writes the host token as before. A
   request carrying an `Origin`, or a `Host` that is not loopback, is refused
   (a browser aimed at the port). The hub's answer — status, `Content-Type`,
   body — goes back unchanged, since Claude reads it.
@@ -956,6 +991,37 @@ So `fleet-agent` relays them:
 Only a hub with a public URL uses the relay, and only for agent hosts. An SSH
 host is unchanged: it posts to `127.0.0.1` through its reverse tunnel on a
 loopback hub, or to the public URL directly on a public hub.
+
+### Removing the agent
+
+There is no `fleet-agent uninstall` yet. After `remove_host` (or after moving
+the host back to `transport: ssh`) the hub refuses the agent's token (401, or
+403 "not an agent host"); the agent keeps dialling every minute or so and its
+status (`fleet-agent status`, systemd's `STATUS=`) says the hub no longer
+takes it. Remove it on the host:
+
+```bash
+# Linux, system unit (installed with sudo)
+sudo systemctl disable --now fleet-agent.service fleet-agent-update.timer fleet-agent-update.path 2>/dev/null
+sudo rm -f /etc/systemd/system/fleet-agent.service /etc/systemd/system/fleet-agent-update.*
+sudo systemctl daemon-reload
+sudo rm -rf /etc/fleet-agent /var/lib/fleet-agent-update /opt/fleet-agent
+# Linux, --user unit
+systemctl --user disable --now fleet-agent.service fleet-agent-update.timer fleet-agent-update.path 2>/dev/null
+rm -f ~/.config/systemd/user/fleet-agent.service ~/.config/systemd/user/fleet-agent-update.*
+systemctl --user daemon-reload
+# macOS
+launchctl bootout "gui/$(id -u)/sk.rlt.fleet-agent"
+rm -f ~/Library/LaunchAgents/sk.rlt.fleet-agent.plist ~/Library/Logs/fleet-agent.log
+# both: the config (0600, it holds the host's token), state and releases
+rm -rf ~/.config/fleet-agent ~/.local/state/fleet-agent ~/.local/state/fleet-agent-update \
+       ~/.local/lib/fleet-agent
+```
+
+Then remove the binary `install` ran from (`/usr/local/bin/fleet-agent` or
+`~/.local/bin/fleet-agent`, a symlink once the agent has updated itself).
+The tmux servers and sessions the hub started stay; end them with
+`tmux kill-server` if nothing else uses them.
 
 ### Protocol version negotiation
 
@@ -3202,7 +3268,9 @@ public URL (for example the machine's Tailscale address,
 `--bind 100.64.0.1`), pass `--allow-plaintext` (or set
 `FLEET_HUB_ALLOW_PLAINTEXT=1`): the hub refuses any non-loopback bind that
 is not fronted by an `https://` public URL unless plaintext is explicitly
-allowed.
+allowed. A hub bound to one specific address also forwards `127.0.0.1:<port>`
+to it, so the `fleet-hub` CLI (`pair`, `client revoke`, …), `healthcheck` and
+the hosts' reverse tunnels, which all dial loopback, keep working.
 
 ## Single binary with its own certificate
 

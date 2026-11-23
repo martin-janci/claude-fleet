@@ -288,7 +288,7 @@ pub use session_grants::{
     grant_generation, validate_grant_level, GrantDetail, GrantRecipient, SessionGrantRow,
     GRANT_ANSWER, GRANT_DRIVE, GRANT_LEVELS, GRANT_WATCH,
 };
-pub use sessions::PromptAckState;
+pub use sessions::{PromptAckState, SessionFactsRow};
 pub use setting_review::{
     NewSettingProposal, SettingAuditRow, SettingProposalRow, DECIDED_PROPOSAL_KEEP_SECS,
     SETTING_AUDIT_KEEP,

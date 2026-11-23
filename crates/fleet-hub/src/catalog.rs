@@ -78,8 +78,13 @@ pub fn run(
     opts: &HubOptions,
     env: &HashMap<String, String>,
 ) -> Result<ExitCode, String> {
-    serve::existing_db(&config::resolve_data_dir(opts, env))?;
-    let store = Mutex::new(serve::open_store(opts, env)?);
+    // `show` reads only: never the migrating open (review w11-6).
+    let store = Mutex::new(if matches!(cmd, CatalogCmd::Show) {
+        crate::dbarg::open_read_only(&serve::existing_db(&config::resolve_data_dir(opts, env))?)?
+    } else {
+        serve::existing_db(&config::resolve_data_dir(opts, env))?;
+        serve::open_store(opts, env)?
+    });
     match cmd {
         CatalogCmd::Show => show(&store),
         CatalogCmd::Set { path, remote } => set_personal(&store, path, remote),

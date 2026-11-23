@@ -1148,6 +1148,13 @@ pub(super) fn persist_audit(
     if guard::is_readonly_tool(tool) {
         return;
     }
+    // Likewise a read action of a mixed tool a client polls (review w19-1):
+    // `routines {failing}` every minute from every phone wrote a row, and a
+    // `session:event` frame to every subscriber, each time.
+    let action = args.and_then(|a| a.get("action")).and_then(|v| v.as_str());
+    if guard::is_quiet_call(tool, action) {
+        return;
+    }
     let Ok(s) = store.lock() else { return };
     let Some(session_id) = find_audit_session(&s, args) else {
         return;

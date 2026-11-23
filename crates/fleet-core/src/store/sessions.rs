@@ -1554,6 +1554,31 @@ impl Store {
         fetch_session_by_id(&self.conn, id)
     }
 
+    /// The identity facts of one session, all the visibility rule reads
+    /// (`ViewScope::sees_session_facts`), without the full row's correlated
+    /// work-link subqueries: `/events` judges every id-only session frame
+    /// once per subscriber with this (review w19-6). The org is computed by
+    /// the same `session_org_sql!` the full row uses.
+    pub fn session_facts_by_id(&self, id: i64) -> Result<Option<SessionFactsRow>, rusqlite::Error> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .prepare_cached(concat!(
+                "SELECT id, host_alias, ",
+                crate::session_org_sql!("sessions"),
+                " AS org_id, visibility, owner_person_id FROM sessions WHERE id = ?1"
+            ))?
+            .query_row([id], |r| {
+                Ok(SessionFactsRow {
+                    id: r.get(0)?,
+                    host_alias: r.get(1)?,
+                    org_id: r.get(2)?,
+                    visibility: r.get(3)?,
+                    owner_person_id: r.get(4)?,
+                })
+            })
+            .optional()
+    }
+
     /// Announce every live session on `account_uuid` again, unchanged, so
     /// the hub re-stamps their derived `needs_attention` after the account
     /// moved into or out of a limit or a lost login (review r05 F9). A dead
@@ -2737,6 +2762,17 @@ impl Store {
         })?;
         rows.collect()
     }
+}
+
+/// [`Store::session_facts_by_id`]'s answer: the owned half of
+/// `service::view_scope::SessionFacts`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionFactsRow {
+    pub id: i64,
+    pub host_alias: String,
+    pub org_id: Option<i64>,
+    pub visibility: String,
+    pub owner_person_id: Option<i64>,
 }
 
 #[cfg(test)]
@@ -5736,5 +5772,22 @@ mod tests {
             Some(ada),
             "the owner record is what is left to refuse a resume with"
         );
+    }
+
+    /// Review w19-6: the facts read alone are the full row's, org included.
+    #[test]
+    fn session_facts_match_the_full_rows() {
+        let s = store();
+        let id = seed(&s, "w19-6");
+        let org = s.add_org("Acme", None, false).unwrap().id;
+        s.set_host_org("local", Some(org)).unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        let facts = s.session_facts_by_id(id).unwrap().unwrap();
+        assert_eq!(
+            crate::service::view_scope::SessionFacts::of_facts(&facts),
+            crate::service::view_scope::SessionFacts::of(&row)
+        );
+        assert_eq!(facts.org_id, Some(org));
+        assert_eq!(s.session_facts_by_id(id + 1000).unwrap(), None);
     }
 }

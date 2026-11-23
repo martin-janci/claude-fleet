@@ -686,7 +686,8 @@ impl Store {
     }
 
     fn mission_repos(&self, id: i64) -> Result<Vec<MissionRepoRow>, IpcError> {
-        let mut stmt = self.conn.prepare(
+        // Cached: a missions list asks once per mission (review w19-2).
+        let mut stmt = self.conn.prepare_cached(
             "SELECT r.project_id, p.owner || '/' || p.repo, r.role, r.created_at \
              FROM orchestration_project_repos r JOIN projects p ON p.id = r.project_id \
              WHERE r.orchestration_project_id = ?1 ORDER BY r.created_at, r.project_id",
@@ -716,6 +717,21 @@ impl Store {
 
     /// Every mission: live ones (draft, active, paused) first, then by last
     /// change. The caller fences by org and owner.
+    /// The `active` missions only, newest first: the only ones that can
+    /// wait on a person (`fill_spend`), for `work { missions, waiting }`.
+    pub fn list_active_missions(&self) -> Result<Vec<MissionRow>, IpcError> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {MISSION_COLUMNS} FROM orchestration_projects m \
+             WHERE m.state = 'active' ORDER BY m.updated_at DESC, m.id DESC"
+        ))?;
+        let rows = stmt.query_map([], map_mission)?;
+        let mut out = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        for m in &mut out {
+            m.repos = self.mission_repos(m.id)?;
+        }
+        Ok(out)
+    }
+
     pub fn list_missions(&self) -> Result<Vec<MissionRow>, IpcError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {MISSION_COLUMNS} FROM orchestration_projects m \

@@ -20,6 +20,7 @@ use crate::pair::{fmt_time, table};
 use clap::{Args, Subcommand};
 use fleet_core::service::org_admin::Me;
 use fleet_core::service::realm_admin::{self, RealmAdminArgs};
+#[cfg(test)]
 use fleet_core::store::Store;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -573,6 +574,7 @@ fn render(action: &str, v: &Value) -> Option<String> {
 }
 
 /// Run one request against `store` as the fleet authority and print it.
+#[cfg(test)]
 fn execute(store: Store, cmd: RealmCmd) -> Result<ExitCode, String> {
     let (a, json) = request(cmd);
     let store = Mutex::new(store);
@@ -602,9 +604,23 @@ pub fn run(
     opts: &HubOptions,
     env: &HashMap<String, String>,
 ) -> Result<ExitCode, String> {
-    crate::serve::existing_db(&crate::config::resolve_data_dir(opts, env))?;
-    let store = crate::serve::open_store(opts, env)?;
-    execute(store, cmd)
+    let (a, json) = request(cmd);
+    // A read (list, show, effective, audit) never takes the migrating open:
+    // it must not reshape the schema under a running older daemon (review
+    // w11-6).
+    let read = realm_admin::Action::parse(&a.action).is_ok_and(|x| x.is_read());
+    let store = if read {
+        crate::dbarg::open_read_only(&crate::serve::existing_db(
+            &crate::config::resolve_data_dir(opts, env),
+        )?)?
+    } else {
+        crate::serve::existing_db(&crate::config::resolve_data_dir(opts, env))?;
+        crate::serve::open_store(opts, env)?
+    };
+    let store = Mutex::new(store);
+    let v = realm_admin::run(&a, &store, Me::LOCAL).map_err(|e| e.message)?;
+    print(&a.action, &v, json)?;
+    Ok(ExitCode::SUCCESS)
 }
 
 #[cfg(test)]

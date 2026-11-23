@@ -340,6 +340,23 @@ impl SelfUpdate {
             )
         };
         let (mut url, signature) = installable(&target)?;
+        // Taken before the mirror fetch (review w09-7): two installs at once
+        // (the automatic one and the banner's button) wrote the same
+        // `update-bundle.part` and corrupted each other's download. Released
+        // on every way out by the guard.
+        if self.installing.swap(true, Ordering::SeqCst) {
+            return Err(IpcError::new(
+                codes::E_CONFLICT,
+                "an update is already installing",
+            ));
+        }
+        struct Release<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for Release<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let _installing = Release(&self.installing);
         // The hub's mirror first when it offers one (S9): the same bytes,
         // checked here against the signed manifest's sha256 and size and
         // handed to the plugin from loopback; the plugin still checks the
@@ -352,17 +369,8 @@ impl SelfUpdate {
                 }
             }
         }
-        if self.installing.swap(true, Ordering::SeqCst) {
-            return Err(IpcError::new(
-                codes::E_CONFLICT,
-                "an update is already installing",
-            ));
-        }
-        let result = self
-            .install_inner(app, backend, data_dir, &target, url, signature)
-            .await;
-        self.installing.store(false, Ordering::SeqCst);
-        result
+        self.install_inner(app, backend, data_dir, &target, url, signature)
+            .await
     }
 
     async fn install_inner<R: tauri::Runtime>(

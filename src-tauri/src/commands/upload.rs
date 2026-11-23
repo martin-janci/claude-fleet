@@ -515,6 +515,17 @@ fn last_nonempty_line(stdout: &str, host: &str) -> Result<String, IpcError> {
     Ok(root.to_string())
 }
 
+/// `E_UPLOAD` when `path` is a symlink (to a file or anywhere else).
+fn refuse_a_link(path: &str) -> Result<(), IpcError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => Err(IpcError::new(
+            codes::E_UPLOAD,
+            format!("{path} is a link; remove it"),
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Copy `local_paths` (named `names`, in order) into `dir` on `host` and
 /// return their absolute destination paths, in order. The one local-vs-remote
 /// branch `upload_to_session` and `upload_attachments` share: a local session
@@ -535,14 +546,24 @@ async fn transfer_all(
             .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("mkdir {dir}: {e}")))?;
         for (src, name) in local_paths.iter().zip(names) {
             let dest = format!("{dir}/{name}");
+            // `copy` writes THROUGH a symlink: a committed link of the same
+            // name would have the file overwrite wherever it points (review
+            // w18-4).
+            refuse_a_link(&dest)?;
             std::fs::copy(src, &dest)
                 .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("copy {src}: {e}")))?;
             remote_paths.push(dest);
         }
     } else {
-        let mkdir = ssh
-            .run(host, &["mkdir", "-p", &quote(dir)], timeout)
-            .await?;
+        // The upload writes through a symlink of the same name as well.
+        let mut script = format!("mkdir -p {}", quote(dir));
+        for name in names {
+            let dest = quote(&format!("{dir}/{name}"));
+            script.push_str(&format!(
+                " && {{ [ ! -L {dest} ] || {{ echo {dest}' is a link; remove it' >&2; exit 8; }}; }}"
+            ));
+        }
+        let mkdir = fleet_core::ssh::run_shell(ssh.as_ref(), host, &script, timeout).await?;
         if !mkdir.status.success() {
             return Err(IpcError::new(
                 codes::E_UPLOAD,
@@ -730,6 +751,21 @@ fn suffix_name(name: &str, n: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review w18-4: a local copy never writes through a link.
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_that_is_a_link_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere");
+        std::fs::write(&target, "keep").unwrap();
+        let link = dir.path().join("a.png");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let e = refuse_a_link(link.to_str().unwrap()).unwrap_err();
+        assert_eq!(e.code, codes::E_UPLOAD);
+        assert!(refuse_a_link(target.to_str().unwrap()).is_ok());
+        assert!(refuse_a_link(dir.path().join("new.png").to_str().unwrap()).is_ok());
+    }
 
     #[test]
     fn resolve_worktree_root_takes_the_last_line() {

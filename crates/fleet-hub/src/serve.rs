@@ -139,6 +139,14 @@ fn persist(store: &Mutex<Store>, r: &Resolved) -> Result<(), String> {
     Ok(())
 }
 
+/// Said on stderr whenever the master token is replaced: a running hub
+/// keeps the token it started with (docs/hub.md), so the old one stays valid
+/// until it restarts (review r04), and the CLI's calls, which read the new
+/// one, are refused until then.
+const REGENERATED_NOTE: &str = "note: a new master token is saved; a running hub still accepts \
+     the old one until it restarts, and refuses the fleet-hub CLI's calls (401) until then. \
+     Restart the hub now.";
+
 pub fn init(
     opts: &HubOptions,
     env: &HashMap<String, String>,
@@ -153,6 +161,10 @@ pub fn init(
         if regenerate {
             s.set_setting(mcp::SETTING_TOKEN, &mcp::generate_token())
                 .map_err(|e| e.to_string())?;
+            // As `token regenerate` says it (review w11-8): every `hub_conn`
+            // command reads the new token and gets 401 from a hub still
+            // running on the old one.
+            out::error(REGENERATED_NOTE);
         }
         // Multi-user M1: a hub knows whose it is before it serves anything.
         // Migration 098 inserts the personal owner, so this is normally one
@@ -203,12 +215,7 @@ pub fn token(
     if regenerate {
         s.set_setting(mcp::SETTING_TOKEN, &mcp::generate_token())
             .map_err(|e| e.to_string())?;
-        // A running hub keeps the token it started with (docs/hub.md), so
-        // the old one stays valid until it restarts (review r04).
-        out::error(
-            "note: a new master token is saved; a running hub still accepts the old one \
-             until it restarts. Restart the hub now.",
-        );
+        out::error(REGENERATED_NOTE);
     }
     // The write paths of `token` are the other place a fresh database can
     // be minted into; give it its personal owner here too (see `init`).
@@ -677,7 +684,7 @@ pub fn backup(
         Some(p) => p,
         None => {
             let dir = data_dir.join("backups");
-            std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+            fleet_core::store::backup::create_private_dir(&dir)?;
             default_backup_path(&dir, prefix, fleet_core::store::now_unix())
         }
     };
@@ -967,6 +974,7 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| format!("could not bind {addr}: {e}"))?;
+    spawn_loopback_forward(r.bind, r.port).await;
 
     // Task 5: close every unresolved `session_move_waiting` as
     // `hub_restarted` before the listener below can serve a single request —
@@ -1570,6 +1578,53 @@ async fn wait_for_signal() -> Result<&'static str, String> {
     }
 }
 
+/// A hub bound to one specific address (`--bind 100.64.0.1`, as the docs
+/// suggest for Tailscale) is not on loopback, yet everything that runs next
+/// to it dials `127.0.0.1:<port>`: the CLI (`pair`, `client revoke`, …),
+/// `healthcheck` (so fleet-updater rolled back every update) and the hosts'
+/// reverse tunnels (review w11-2). The loopback port is forwarded to the
+/// bound address, byte for byte (TLS passes through untouched). Not fatal:
+/// a loopback port someone else holds is a warning.
+async fn spawn_loopback_forward(bind: std::net::IpAddr, port: u16) {
+    if bind.is_unspecified() || bind == std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) {
+        return;
+    }
+    let lo = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    match tokio::net::TcpListener::bind(lo).await {
+        Ok(l) => {
+            tracing::info!(%lo, %bind, "forwarding loopback to the bound address for the CLI, healthcheck and tunnels");
+            tokio::spawn(forward_each(l, std::net::SocketAddr::from((bind, port))));
+        }
+        Err(e) => tracing::warn!(
+            %lo, error = %e,
+            "could not listen on loopback: the fleet-hub CLI, healthcheck and host tunnels will not reach this hub"
+        ),
+    }
+}
+
+/// Every connection to `listener`, relayed to `target`.
+async fn forward_each(listener: tokio::net::TcpListener, target: std::net::SocketAddr) {
+    loop {
+        match listener.accept().await {
+            Ok((mut inbound, _)) => {
+                tokio::spawn(async move {
+                    match tokio::net::TcpStream::connect(target).await {
+                        Ok(mut outbound) => {
+                            let _ =
+                                tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                        }
+                        Err(e) => tracing::debug!(%target, error = %e, "loopback forward failed"),
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "loopback accept failed");
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1899,6 +1954,35 @@ mod tests {
         let (r, _store) =
             resolve_with_store(&opts, &HashMap::new(), Arc::new(NoopEventBus)).unwrap();
         assert_eq!(r.public_url.as_deref(), Some("https://fleet.example.com"));
+    }
+
+    /// Review w11-2: the loopback port reaches a hub bound elsewhere.
+    #[tokio::test]
+    async fn the_loopback_forward_relays_to_the_bound_address() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let hub = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let target = hub.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut c, _) = hub.accept().await.unwrap();
+            let mut buf = [0u8; 4];
+            c.read_exact(&mut buf).await.unwrap();
+            c.write_all(b"pong").await.unwrap();
+        });
+        let lo = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let lo_addr = lo.local_addr().unwrap();
+        tokio::spawn(forward_each(lo, target));
+        let mut c = tokio::net::TcpStream::connect(lo_addr).await.unwrap();
+        c.write_all(b"ping").await.unwrap();
+        let mut buf = [0u8; 4];
+        c.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"pong");
+        // Nothing to forward for a hub that is on loopback already.
+        spawn_loopback_forward("0.0.0.0".parse().unwrap(), 1).await;
+        spawn_loopback_forward("127.0.0.1".parse().unwrap(), 1).await;
     }
 
     #[test]
