@@ -14,8 +14,9 @@ describe('waitingForYou', () => {
   });
 
   it('leaves out a mass loss folded into one row, as the Sidebar does', () => {
+    // Stuck, since a lost row is never waiting (review w13-2).
     const lost = (n: string) =>
-      blocked('trn', n, { lost_at: 1, claude_session_id: `c-${n}`, kind: 'work' });
+      session('trn', n, { stuck_kind: 'oom', lost_at: 1, claude_session_id: `c-${n}`, kind: 'work' });
     expect(waitingForYou([lost('a'), lost('b'), lost('c'), blocked('nas', 'd')], opts)).toBe(1);
     // Two lost rows are not a fold, and still count.
     expect(waitingForYou([lost('a'), lost('b')], opts)).toBe(2);

@@ -334,8 +334,8 @@ pub async fn new_bg_session_tracked(
 
 /// A Codex background agent (gap plan G7.3): Codex has no `--bg` mode, so
 /// it runs as a Codex session in the project's checkout, named `name`, with
-/// the prompt queued as its first message (delivered once the pane reads
-/// input, as a routine's is). The row is the person's like any session's;
+/// the prompt queued as its first message and typed once the pane reads
+/// input, as a routine's is (Codex runs no hook to deliver it). The row is the person's like any session's;
 /// `requester_session_id` becomes its parent. No `claude_session_id`:
 /// Codex picks its own, which reconcile reads off its rollout.
 async fn new_codex_bg_session(
@@ -379,7 +379,7 @@ async fn new_codex_bg_session(
     };
     let row = crate::service::sessions::new_session(session_args, store, ssh, reg).await?;
     let mut warning: Option<String> = None;
-    let row = {
+    let handover = {
         let s = lock(store)?;
         // Parentage and the requester's work, as `stamp_bg_row` gives a
         // `claude --bg` agent.
@@ -387,19 +387,31 @@ async fn new_codex_bg_session(
             let _ = s.set_parent_session_id(row.id, Some(req));
             let _ = s.inherit_worker_work(row.id, req);
         }
-        if let Err(e) = s.enqueue_handover(row.id, &args.prompt, None) {
-            let line = format!(
-                "the prompt was not queued ({}); type it into the session",
-                e.message
-            );
-            warning = Some(match warning.take() {
-                Some(w) => format!("{w}; {line}"),
-                None => line,
-            });
-        }
         let _ = s.set_last_prompt(row.id, &args.prompt);
-        s.get_session_by_id(row.id)?.unwrap_or(row)
+        match s.enqueue_handover(row.id, &args.prompt, None) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                warning = Some(format!(
+                    "the prompt was not queued ({}); type it into the session",
+                    e.message
+                ));
+                None
+            }
+        }
     };
+    // Codex runs no hook that would deliver the handover: type it, as a
+    // routine's prompt is typed (review w20-1).
+    if let Some(id) = handover {
+        if let Err(why) =
+            crate::service::sessions::seed::seed_handover_now(store, ssh, &row, &args.prompt, id)
+                .await
+        {
+            warning = Some(format!(
+                "the prompt was not typed ({why}); type it into the session"
+            ));
+        }
+    }
+    let row = lock(store)?.get_session_by_id(row.id)?.unwrap_or(row);
     Ok(NewBgSessionResult {
         claude_session_id: None,
         warning,

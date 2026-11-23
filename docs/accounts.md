@@ -222,8 +222,20 @@ closes its login panes and deletes `.fleet-oauth-token`, `.fleet-api-key` and
 directories, not `~/.claude`, not a symlinked profile). It is best effort:
 a host that does not answer is removed all the same, and the reply's
 `credentials: { deleted, error }` says what happened. Either way the made-up
-accounts the host's logins held are swept as above. Without the checkbox the
-host's files stay as they were: fleet only forgets the host.
+accounts the host's logins held are swept as above. That covers setup
+tokens and API keys only: a subscription login (`/login`) keeps its
+`.credentials.json` and stays signed in.
+
+A second checkbox, also off by default: *Also delete fleet's login profiles
+there* (MCP: `delete_login_profiles: true`). Each login profile fleet lists
+on the host goes as **Remove** on one login profile takes it: its sign-in
+pane closed, its folder `~/.claude-profiles/<name>` deleted with its
+`.credentials.json` (a symlinked profile loses only the link; the host's own
+`~/.claude` is never touched). That signs those subscription logins out, so
+it is asked for separately. Best effort as well: the reply's
+`login_profiles: { removed, error }` names what went and the first failure.
+Without either checkbox the host's files stay as they were: fleet only
+forgets the host.
 
 ### Switch a running session
 

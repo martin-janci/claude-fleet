@@ -307,14 +307,25 @@
 
   /** "Wait until <reset>" on the paused panel: every paused session of the
    *  account waits out its limit, as each row's own Wait does. */
+  const pausedAtOf = (a: AccountSummary, s: SessionRow): number | null =>
+    limitFor($attentionFacts, { account_uuid: a.uuid, launch_model: s.launch_model })?.resets_at ?? null;
+  /** When the last of the account's paused sessions is ready again: what
+   *  "Wait until …" waits for, from the paused rows' own limits (a model's
+   *  weekly window included, review w03-5). `null` = none has one. */
+  function waitAllAt(a: AccountSummary): number | null {
+    const ats = pausedOf(a)
+      .map((s) => pausedAtOf(a, s))
+      .filter((t): t is number => t != null);
+    return ats.length === 0 ? null : Math.max(...ats);
+  }
+
   function waitAll(a: AccountSummary) {
     // Each session waits for its own limit: a model's weekly window holds
     // only the sessions on that model (review w10-5).
     const paused = pausedOf(a);
-    const atOf = (s: SessionRow) => limitFor($attentionFacts, { account_uuid: a.uuid, launch_model: s.launch_model })?.resets_at ?? null;
-    const ats = paused.map(atOf).filter((t): t is number => t != null);
-    if (ats.length === 0) return;
-    const at = Math.max(...ats);
+    const atOf = (s: SessionRow) => pausedAtOf(a, s);
+    const at = waitAllAt(a);
+    if (at == null) return;
     for (const s of paused) {
       const t = atOf(s);
       if (t != null) waitOut(s.id, t);
@@ -515,6 +526,7 @@
             </button>
             {#if paused.length > 0}
               {@const target = switchTo[a.uuid]}
+              {@const waitAt = waitAllAt(a)}
               <div class="paused" data-testid="account-paused">
                 <button
                   type="button"
@@ -525,7 +537,7 @@
                     showPaused(a.uuid);
                   }}>{paused.length} paused {paused.length === 1 ? 'session' : 'sessions'} → Show</button
                 >
-                {#if limitOf(a.uuid) != null}
+                {#if waitAt != null}
                   <button
                     type="button"
                     class="btn-quiet"
@@ -533,7 +545,7 @@
                     onclick={(e) => {
                       e.stopPropagation();
                       waitAll(a);
-                    }}>Wait until {resetText(limitOf(a.uuid) ?? 0, { now, locale, timeZone })}</button
+                    }}>Wait until {resetText(waitAt, { now, locale, timeZone })}</button
                   >
                 {/if}
                 {#if target === null}

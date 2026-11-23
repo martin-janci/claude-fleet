@@ -3753,7 +3753,11 @@ row into the new one in one transaction:
    different base paths, or a worktree of one name on one host at two
    paths. With the github layout the old name is its own directory
    (`…/github.com/<old-owner>/<repo>`); remove or rename the old checkout
-   first, then merge, or the next scan registers it again. It also refuses
+   first, then merge, or the next scan registers it again. A path of the
+   old row that is gone from this machine's disk (or is the new row's own
+   directory) no longer counts, so the merge goes through once the old
+   checkout is removed; a hub with `hub.local_host=false` cannot look, and
+   there you forget the old row instead. It also refuses
    while the `from` row has a live session (`E_INVALID_STATE`), as
    `forget_project` does: kill or move those sessions first.
 2. Find the two ids with `list_projects`, then, with the hub running,
@@ -3781,7 +3785,10 @@ resolve). The choices that name the repository as `owner/repo` move too,
 `from` workspace on a host and worktree `into` already syncs is dropped,
 `workspaces_dropped`, and its local files stay where they are), and a fleet
 agent's input whose value is exactly the old `owner/repo`
-(`agent_inputs_moved`). Forbidden accounts add
+(`agent_inputs_moved`), a review rule's `gh:<owner>/<repo>` scope
+(`review_rules_moved`; `from`'s rule goes when `into` already has one for
+the new name) and a routine's PR-event repo filter
+(`routine_filters_moved`). Forbidden accounts add
 up: after the merge the project forbids every account either row did. What is
 left alone: history that names the repository in words (`org_rules`, the
 review tables), and the checkouts on the hosts. What is deleted: the `from`

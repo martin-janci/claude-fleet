@@ -948,6 +948,23 @@ impl Store {
         into: i64,
         dry_run: bool,
     ) -> Result<ProjectMergeReport, crate::ipc_error::IpcError> {
+        self.merge_project_checked(from, into, dry_run, &HashSet::new())
+    }
+
+    /// [`Self::merge_project_with`], where `gone` names the LOCAL paths of
+    /// `from` (its base path, its `local` worktrees) that are no longer a
+    /// checkout of their own: removed from disk, or the same directory as
+    /// `into`'s. Such a path does not make the two rows "two checkouts"
+    /// (review w01-2: after a github-layout rename the old row keeps its
+    /// old base path for good, so the merge was refused even once the old
+    /// checkout was gone). The caller stats the disk; the store does not.
+    pub fn merge_project_checked(
+        &self,
+        from: i64,
+        into: i64,
+        dry_run: bool,
+        gone: &HashSet<String>,
+    ) -> Result<ProjectMergeReport, crate::ipc_error::IpcError> {
         use crate::ipc_error::{codes, IpcError};
         if from == into {
             return Err(IpcError::new(
@@ -980,27 +997,37 @@ impl Store {
         // would come apart again on the next scan, which re-registers the
         // old one from its path, and a session on a folded twin would carry
         // the other directory's worktree row (review w05-4).
-        if bases[0] != bases[1] {
+        if bases[0] != bases[1] && !gone.contains(&bases[0]) {
             return Err(IpcError::new(
                 codes::E_INVALID,
                 format!(
-                    "{from_name} ({}) and {into_name} ({}) are two checkouts, not one; remove or rename the old checkout first, then merge",
+                    "{from_name} ({}) and {into_name} ({}) are two checkouts, not one; remove or rename the old checkout first, then merge (if it is already gone from a host fleet cannot look at from here, forget {from_name} instead)",
                     bases[0], bases[1]
                 ),
             ));
         }
-        let crossed_twin: Option<(String, String, String, String)> = self
-            .conn
-            .query_row(
+        let crossed_twin: Option<(String, String, String, String)> = {
+            let mut stmt = self.conn.prepare(
                 "SELECT w1.host_alias, w1.name, w1.path, w2.path FROM worktrees w1
                    JOIN worktrees w2 ON w2.project_id = ?2 AND w2.host_alias = w1.host_alias
                     AND w2.name = w1.name
                   WHERE w1.project_id = ?1 AND w1.path IS NOT w2.path
-                  ORDER BY w1.id LIMIT 1",
-                rusqlite::params![from, into],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .optional()?;
+                  ORDER BY w1.id",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![from, into], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?;
+            let mut first = None;
+            for row in rows {
+                let (host, name, a, b): (String, String, String, String) = row?;
+                if host == "local" && gone.contains(&a) {
+                    continue;
+                }
+                first = Some((host, name, a, b));
+                break;
+            }
+            first
+        };
         if let Some((host, name, a, b)) = crossed_twin {
             return Err(IpcError::new(
                 codes::E_INVALID,
@@ -1186,6 +1213,23 @@ impl Store {
             }
             n
         };
+        // Two more settings name the repo in words (review w03-3): a review
+        // rule's scope `gh:<owner>/<repo>` and a routine's PR-event filter.
+        // A review rule into already has for its new scope wins; from's
+        // twin goes (its jobs keep their rows, `rule_id` set NULL).
+        let review_rules_moved = tx.execute(
+            "UPDATE OR IGNORE agent_rules SET scope = 'gh:' || ?2 \
+              WHERE agent = 'review' AND lower(scope) = lower('gh:' || ?1)",
+            rusqlite::params![from_name, into_name],
+        )?;
+        tx.execute(
+            "DELETE FROM agent_rules WHERE agent = 'review' AND lower(scope) = lower('gh:' || ?1)",
+            [&from_name],
+        )?;
+        let routine_filters_moved = tx.execute(
+            "UPDATE routines SET event_repo = ?2 WHERE lower(event_repo) = lower(?1)",
+            rusqlite::params![from_name, into_name],
+        )?;
         tx.execute("DELETE FROM projects WHERE id = ?1", [from])?;
         let report = ProjectMergeReport {
             from,
@@ -1200,6 +1244,8 @@ impl Store {
             workspaces_moved,
             workspaces_dropped,
             agent_inputs_moved,
+            review_rules_moved,
+            routine_filters_moved,
             ticket_space_left,
             dry_run,
         };
@@ -1698,6 +1744,8 @@ mod tests {
                 workspaces_moved: 0,
                 workspaces_dropped: 0,
                 agent_inputs_moved: 0,
+                review_rules_moved: 0,
+                routine_filters_moved: 0,
                 ticket_space_left: None,
                 dry_run: false,
             }
@@ -1998,6 +2046,70 @@ mod tests {
 
     /// Review w05-4: two rows over two checkouts are no merge: the next
     /// scan would split them again from the paths.
+    /// Review w03-3: a review rule's `gh:<owner>/<repo>` scope and a
+    /// routine's PR-event repo filter follow the merge; a review rule into
+    /// already has for the new name wins.
+    #[test]
+    fn a_merge_moves_review_scopes_and_routine_repo_filters() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mac").unwrap();
+        let old = s.upsert_project("frantisek", "app", "/p/app").unwrap();
+        let new = s.upsert_project("sales-twins", "app", "/p/app").unwrap();
+        let routine = s
+            .insert_routine(
+                None,
+                None,
+                &crate::store::RoutineFields {
+                    name: "prs".into(),
+                    enabled: true,
+                    trigger: "manual".into(),
+                    host_alias: "mac".into(),
+                    project_id: old,
+                    prompt: "p".into(),
+                    overlap: "skip".into(),
+                    event_repo: Some("Frantisek/App".into()),
+                    ..Default::default()
+                },
+                None,
+                0,
+            )
+            .unwrap();
+        let rule = |scope: &str| {
+            s.conn_for_test()
+                .execute(
+                    "INSERT INTO agent_rules (agent, scope, level, host_alias, granted_by, \
+                     granted_at) VALUES ('review', ?1, 'watch', 'mac', 'me', 1)",
+                    [scope],
+                )
+                .unwrap();
+        };
+        rule("gh:frantisek/app");
+        let dry = s.merge_project_with(old, new, true).unwrap();
+        assert_eq!((dry.review_rules_moved, dry.routine_filters_moved), (1, 1));
+        // into's own rule for the new name wins over the moved one.
+        rule("gh:sales-twins/app");
+        let rep = s.merge_project(old, new).unwrap();
+        assert_eq!((rep.review_rules_moved, rep.routine_filters_moved), (0, 1));
+        let scopes: Vec<String> = {
+            let c = s.conn_for_test();
+            let mut st = c
+                .prepare("SELECT scope FROM agent_rules WHERE agent = 'review'")
+                .unwrap();
+            let v = st.query_map([], |r| r.get(0)).unwrap();
+            v.collect::<Result<_, _>>().unwrap()
+        };
+        assert_eq!(scopes, vec!["gh:sales-twins/app".to_string()]);
+        let repo: Option<String> = s
+            .conn_for_test()
+            .query_row(
+                "SELECT event_repo FROM routines WHERE id = ?1",
+                [routine.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(repo.as_deref(), Some("sales-twins/app"));
+    }
+
     #[test]
     fn a_merge_refuses_two_checkouts() {
         let s = Store::open_in_memory().unwrap();

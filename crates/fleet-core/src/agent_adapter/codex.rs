@@ -796,7 +796,11 @@ pub(crate) struct PaneRollout {
 /// rollout under `${CODEX_HOME:-~/.codex}/sessions` whose `session_meta`
 /// names the pane's cwd: what `codex resume --last` would resume there.
 /// Codex allots a conversation's id itself and writes its rollout on the
-/// first prompt, so this is how fleet learns the id. Prints
+/// first prompt, so this is how fleet learns the id. Until that prompt the
+/// newest match is an older conversation (a killed session's on the same
+/// worktree, a `codex` the person ran there): a rollout last written before
+/// the pane's tmux session was created is not its own (review w20-3), and
+/// the files are newest first, so the lookup stops there. Prints
 /// `cdx<TAB>name<TAB>path` per pane found; `None` for no panes.
 pub(crate) fn rollouts_script(panes: &[&str]) -> Option<String> {
     if panes.is_empty() {
@@ -812,10 +816,17 @@ files=$(ls -1t "$d"/*/*/*/rollout-*.jsonl 2>/dev/null | head -n {ROLLOUT_SCAN})
     );
     for name in panes {
         s.push_str(&format!(
-            r#"c=$(tmux display-message -p -t {target} '#{{pane_current_path}}' 2>/dev/null)
+            r#"l=$(tmux display-message -p -t {target} '#{{session_created}}	#{{pane_current_path}}' 2>/dev/null)
+t=${{l%%	*}}; c=${{l#*	}}
+case "$t" in ''|*[!0-9]*) t=0;; esac
 if [ -n "$c" ]; then
   printf '%s\n' "$files" | while IFS= read -r f; do
-    if head -n 1 "$f" | grep -qF "\"cwd\":\"$c\""; then printf 'cdx\t%s\t%s\n' {name} "$f"; break; fi
+    if head -n 1 "$f" | grep -qF "\"cwd\":\"$c\""; then
+      m=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)
+      case "$m" in ''|*[!0-9]*) m=0;; esac
+      [ "$t" -gt 0 ] && [ "$m" -gt 0 ] && [ "$m" -lt "$t" ] && break
+      printf 'cdx\t%s\t%s\n' {name} "$f"; break
+    fi
   done
 fi
 "#,

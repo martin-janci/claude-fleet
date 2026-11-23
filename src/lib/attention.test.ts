@@ -249,6 +249,11 @@ describe('triage rank', () => {
     expect(classify(r, opts)).toBe('waiting');
   });
 
+  it('a lost session with an open form is not waiting (review w13-2)', () => {
+    const r = row({ status: 'ghost', lost_at: 1, pending_form: { form_id: 'f_a', title: 'T' } });
+    expect(classify(r, opts)).toBe('lifecycle');
+  });
+
   it('classifies every bucket reachable from today\'s fields', () => {
     expect(classify(row({ claude_status: 'blocked' }), opts)).toBe('waiting');
     expect(classify(row({ stuck_kind: 'oom' }), opts)).toBe('stuck');
