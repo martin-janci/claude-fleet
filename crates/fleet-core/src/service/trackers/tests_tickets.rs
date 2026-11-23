@@ -3427,6 +3427,80 @@ async fn a_base_branch_reaches_the_new_checkout() {
     );
 }
 
+/// w10-6: with no base asked for, a new checkout starts from its own
+/// branch, so a ticket started again after Clean up (which keeps the
+/// branch) checks that branch out rather than failing `-b` on it.
+#[tokio::test]
+async fn a_start_with_no_base_continues_its_own_branch() {
+    let fx = Fx::new();
+    let plan = plan_start(
+        &fx.store,
+        &StartArgs {
+            reference: Some("ABC-1".into()),
+            project_id: Some(fx.pid),
+            host_alias: Some("hosta".into()),
+            ..Default::default()
+        },
+        &OrgScope::All,
+        &fx.net(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(plan.base_branch, None);
+    let seen = Arc::new(Mutex::new(None));
+    let seen2 = Arc::clone(&seen);
+    let store = Arc::clone(&fx.store);
+    start_with(&fx.store, &plan, None, &OrgScope::All, move |a| {
+        *seen2.lock().unwrap() = Some((a.new_worktree.clone(), a.base_branch.clone()));
+        let s = store.lock().unwrap();
+        let id = s
+            .upsert_session("started", &a.host_alias, None, None, 1, 1, "running", None)
+            .unwrap();
+        std::future::ready(Ok(s.get_session_by_id(id).unwrap().unwrap()))
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        seen.lock().unwrap().clone(),
+        Some((Some(plan.branch.clone()), Some(plan.branch.clone())))
+    );
+}
+
+/// w10-5: a slashed branch's checkout is the row named by its directory
+/// (`feat/x` → `feat-x`), so a start names it, and takes its landing gate,
+/// instead of landing in it unseen.
+#[tokio::test]
+async fn a_slashed_branch_finds_its_checkout_by_directory_name() {
+    let fx = Fx::new();
+    let wid = fx
+        .store
+        .lock()
+        .unwrap()
+        .upsert_worktree_on(
+            "hosta",
+            fx.pid,
+            "feat-x",
+            "/p/acme/app/.worktrees/feat-x",
+            Some("feat/x"),
+        )
+        .unwrap();
+    let plan = plan_start(
+        &fx.store,
+        &StartArgs {
+            reference: Some("ABC-1".into()),
+            project_id: Some(fx.pid),
+            host_alias: Some("hosta".into()),
+            worktree: Some("feat/x".into()),
+            ..Default::default()
+        },
+        &OrgScope::All,
+        &fx.net(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(plan.worktree_id, Some(wid));
+}
+
 /// A mission's run lands only in the mission's repos (orchestration §4.2):
 /// a project the last same-prefix ticket used is refused with E_FORBIDDEN
 /// when the mission does not list it, and kept when it does.

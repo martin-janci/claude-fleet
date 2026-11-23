@@ -1280,12 +1280,22 @@ pub fn plan_resolved(
         .into_iter()
         .filter(|w| w.project_id == project_id)
         .collect();
+    // A checkout row is named by its directory, and a branch's directory
+    // flattens its slashes (`feat/x` → `feat-x`, `worktree_dir_name`): the
+    // checkout a slashed branch lands in is found by that name (w10-5).
+    let is_checkout_of = |w: &crate::store::WorktreeRow, b: &str| {
+        w.name == b || w.name == crate::projects::worktree_dir_name(b)
+    };
     let branch = if args.parallel && args.worktree.is_none() {
-        free_branch(&branch, |b| checkouts.iter().any(|w| w.name == b))
+        free_branch(&branch, |b| checkouts.iter().any(|w| is_checkout_of(w, b)))
     } else {
         branch
     };
-    let worktree_id = checkouts.iter().find(|w| w.name == branch).map(|w| w.id);
+    let worktree_id = checkouts
+        .iter()
+        .find(|w| is_checkout_of(w, &branch))
+        .map(|w| w.id);
+    let branch_dir = crate::projects::worktree_dir_name(&branch);
     // A start whose branch slug matches an EXISTING checkout lands its pane
     // in that checkout — so `work_link { start }` acts on an existing row
     // after all, and takes the same landing gate `new_session` /
@@ -1304,7 +1314,8 @@ pub fn plan_resolved(
                 && r.status == "running"
                 && r.lost_at.is_none()
                 && ((worktree_id.is_some() && r.worktree_id == worktree_id)
-                    || r.worktree_key.as_deref() == Some(branch.as_str()))
+                    || r.worktree_key.as_deref() == Some(branch.as_str())
+                    || r.worktree_key.as_deref() == Some(branch_dir.as_str()))
         }) {
             return Err(already_running(
                 &key,
@@ -1697,7 +1708,16 @@ where
         name: String::new(),
         call_id: None,
         new_worktree: plan.worktree_id.is_none().then(|| plan.branch.clone()),
-        base_branch: plan.base_branch.clone(),
+        // No base asked for: the branch itself (w10-6). A Clean up removes
+        // the checkout but keeps its branch, so a second start of the same
+        // ticket finds `refs/heads/<branch>`; with base == name the script
+        // checks it out (the work continues) rather than failing `-b` on a
+        // branch that exists. A branch that does not exist starts from the
+        // default branch as before.
+        base_branch: plan
+            .base_branch
+            .clone()
+            .or_else(|| plan.worktree_id.is_none().then(|| plan.branch.clone())),
         kind: None,
         start_command: None,
         friendly_name: crate::validate::friendly_name(&plan.name)

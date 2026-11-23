@@ -151,13 +151,37 @@ pub fn plan_abandon(s: &Store, session_id: i64) -> Result<AbandonPlan, IpcError>
     })
 }
 
+/// The line [`remove_script`] prints once the start's branch is deleted.
+const BRANCH_DELETED: &str = "FLEET_ABANDON_BRANCH_DELETED";
+
+/// PURE: remove the start's checkout and then (best effort, `-d` refuses a
+/// branch that grew a commit) its branch, from the worktree's own
+/// repository ([`crate::service::safe_kill::git_for_worktree`]). Fails
+/// only when the checkout could not be removed.
+fn remove_script(p: &AbandonPlan) -> String {
+    let (prelude, git) = crate::service::safe_kill::git_for_worktree(
+        &p.host_alias,
+        &p.project_base,
+        &p.worktree_path,
+    );
+    format!(
+        "{prelude}{git} worktree remove -- {wt} || exit 1; \
+         if {git} branch -d -- {branch} >/dev/null 2>&1; then echo {BRANCH_DELETED}; fi",
+        wt = quote(&p.worktree_path),
+        branch = quote(&p.branch),
+    )
+}
+
 /// PURE: the one round trip that inspects the checkout — its changes, then
 /// the number of commits on HEAD that no other branch and no remote has.
+/// Its own output starts after a marker line (w10-8): a login banner
+/// before it is not a changed file.
 fn inspect_script(p: &AbandonPlan) -> String {
     format!(
-        "cd {wt} && git status --porcelain && echo {SEP} && \
+        "cd {wt} && printf '%s\\n' {marker} && git status --porcelain && echo {SEP} && \
          git rev-list --count HEAD --not --exclude={branch} --branches --remotes",
         wt = quote(&p.worktree_path),
+        marker = quote(crate::service::move_session::carry::OUT_MARKER),
         branch = quote(&p.branch),
     )
 }
@@ -194,7 +218,8 @@ async fn require_clean(exec: &dyn SshExec, p: &AbandonPlan) -> Result<(), IpcErr
         Duration::from_secs(30),
     )
     .await?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let own = crate::service::move_session::carry::payload(&out.stdout).unwrap_or(&out.stdout);
+    let stdout = String::from_utf8_lossy(own);
     let found = match (out.status.success(), parse_inspection(&stdout)) {
         (true, Some(found)) => found,
         _ => {
@@ -256,15 +281,14 @@ pub async fn abandon_start(
         ssh,
     )
     .await?;
-    let remove = format!(
-        "git -C {} worktree remove {}",
-        quote(&plan.project_base),
-        quote(&plan.worktree_path)
-    );
+    // One round trip: the remove, then (only after it) the branch, both
+    // against the worktree's own repository (w10-1: on a remote host the
+    // project base is this machine's path). The branch's outcome is a
+    // marker line, so a login banner cannot fake it.
     let out = crate::ssh::run_shell(
         ssh.as_ref(),
         &plan.host_alias,
-        &remove,
+        &remove_script(&plan),
         Duration::from_secs(30),
     )
     .await?;
@@ -285,15 +309,9 @@ pub async fn abandon_start(
             "[abandon_start] dropping the worktree row failed"
         );
     }
-    let branch = format!(
-        "git -C {} branch -d -- {}",
-        quote(&plan.project_base),
-        quote(&plan.branch)
-    );
-    let branch_deleted = matches!(
-        crate::ssh::run_shell(ssh.as_ref(), &plan.host_alias, &branch, Duration::from_secs(30)).await,
-        Ok(out) if out.status.success()
-    );
+    let branch_deleted = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .any(|l| l.trim() == BRANCH_DELETED);
     Ok(AbandonOutcome {
         session_id,
         worktree_removed: true,
@@ -321,7 +339,9 @@ mod tests {
     #[test]
     fn the_inspection_counts_changes_and_the_heads_own_commits() {
         let s = inspect_script(&plan());
-        assert!(s.starts_with("cd '/r/.worktrees/pay-142' && git status --porcelain"));
+        assert!(s.starts_with(
+            "cd '/r/.worktrees/pay-142' && printf '%s\\n' '__CF_OUT__' && git status --porcelain"
+        ));
         assert!(
             s.contains("git rev-list --count HEAD --not --exclude='pay-142' --branches --remotes"),
             "{s}"
@@ -381,5 +401,49 @@ mod tests {
         );
         let err = require_clean(&broken, &plan()).await.unwrap_err();
         assert_eq!(err.code, codes::E_DIRTY, "an unreadable checkout is kept");
+
+        // w10-8: a login banner is not a changed file.
+        let banner = FakeSsh::new();
+        banner.on(
+            Match::contains("git status --porcelain"),
+            Reply::ok(&format!("Welcome!\n__CF_OUT__\n{SEP}\n0\n")),
+        );
+        require_clean(&banner, &plan())
+            .await
+            .expect("clean behind a banner");
+    }
+
+    /// w10-1: on a remote host the checkout is removed from its own
+    /// repository, never from the project's base path (this machine's);
+    /// on `local` the base is the repository. The branch goes after it.
+    #[test]
+    fn the_checkout_is_removed_from_its_own_repository() {
+        let remote = remove_script(&plan());
+        assert!(
+            remote.starts_with(
+                "fleet_git_dir=$(git -C '/r/.worktrees/pay-142' rev-parse --path-format=absolute \
+                 --git-common-dir) || exit 1; "
+            ),
+            "{remote}"
+        );
+        assert!(!remote.contains("git -C '/r' "), "{remote}");
+        assert!(
+            remote.contains(
+                "git --git-dir=\"$fleet_git_dir\" worktree remove -- '/r/.worktrees/pay-142' || exit 1;"
+            ),
+            "{remote}"
+        );
+        assert!(
+            remote.contains("git --git-dir=\"$fleet_git_dir\" branch -d -- 'pay-142'"),
+            "{remote}"
+        );
+        let local = remove_script(&AbandonPlan {
+            host_alias: "local".into(),
+            ..plan()
+        });
+        assert!(
+            local.starts_with("git -C '/r' worktree remove -- '/r/.worktrees/pay-142' || exit 1;"),
+            "{local}"
+        );
     }
 }
