@@ -28,6 +28,8 @@ import { sessions } from './sessions';
 import { selectSession } from './selection';
 import { session } from './hosts_fixture';
 import { expectAccessible } from './a11y_check';
+import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { myGrants, myPersonId } from './access';
 
 // Redesign step 9.7: Control's Library.
 
@@ -78,6 +80,39 @@ describe('LibraryView (step 9.7)', () => {
       files: [{ path: '/w/.claude-fleet-attachments/spec.pdf', name: 'spec.pdf', size: 12 }],
     });
     expect(getAllByTestId('library-row')[0].getAttribute('data-kind')).toBe('upload');
+  });
+
+  it('Upload… is refused, with the reason, to a Read grantee (review w11-7)', async () => {
+    const remote: HubStatus = {
+      remote: true,
+      url: 'https://fleet.example.com',
+      client_name: 'laptop',
+      client_mode: null,
+      configured_url: 'https://fleet.example.com',
+      configured_client_name: 'laptop',
+      allow_plaintext: false,
+      warning: null,
+      restart_required: false,
+      unavailable: null,
+    };
+    const theirs = { ...focus, owner_person_id: 7 };
+    hubStatus.set(remote);
+    myPersonId.set(3);
+    myGrants.set(new Map([[theirs.id, 'watch']]));
+    sessions.set([theirs]);
+    selectSession(theirs);
+    try {
+      const { getByTestId } = render(LibraryView);
+      const btn = getByTestId('library-upload') as HTMLButtonElement;
+      expect(btn.disabled).toBe(true);
+      expect(btn.title).not.toContain('Put files beside');
+      await fireEvent.click(btn);
+      expect(calls.some((c) => c.cmd === 'pick_attachments' || c.cmd === 'upload_attachments')).toBe(false);
+    } finally {
+      hubStatus.set({ ...STANDALONE });
+      myPersonId.set(null);
+      myGrants.set(new Map());
+    }
   });
 
   it('filters, and passes the axe and audit checks', async () => {

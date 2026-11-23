@@ -54,7 +54,9 @@
   const count = $derived(mine.held.length + mine.waiting.length);
   const folded = $derived(count > FOLD_OVER && !open);
 
-  const message = (e: IpcError) => e.message?.trim() || errorText(e);
+  // The plain sentence first (review w15-6): `errorText` already keeps the
+  // backend's message for every code that has no sentence of its own.
+  const message = (e: IpcError) => errorText(e);
 
   // One shared read for every strip on screen, for as long as this one is.
   $effect(() => watchDebugDevices());

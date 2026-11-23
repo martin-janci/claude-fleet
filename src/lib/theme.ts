@@ -1,5 +1,5 @@
 import { writable, get } from 'svelte/store';
-import { readPref, writePref } from './prefs';
+import { followPref, followStorage, readPref, writePref } from './prefs';
 import { ACCENTS, defaultPlace, orbitPalette, sunHeight, sunTimes, type AccentId, type ContrastLevel } from './palette';
 
 /**
@@ -161,4 +161,16 @@ export function initTheme(): void {
     if (get(theme) === 'sun') paint();
   }, 60_000);
   if (typeof document !== 'undefined') document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && paint());
+  // Another window (a pop-out terminal) changed the theme, contrast or
+  // accent: take it, or this one keeps painting the old one and writes it
+  // back into the boot snapshot (review w14-2).
+  followStorage(KEY, (v) => {
+    if (isTheme(v)) {
+      theme.set(v);
+      paint();
+    }
+  });
+  followPref('ui.contrast', contrastPref, isContrastPref);
+  followPref('ui.accent', accentPref, isAccent);
+  followPref('ui.moodLine', moodLine, isBool);
 }

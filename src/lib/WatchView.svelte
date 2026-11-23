@@ -26,6 +26,7 @@
   // over this pane exactly as it does over the terminal.
   import { captureSession, type SessionRow } from './sessions';
   import { noAttachReason, type SessionAccess } from './access';
+  import { isSharedAccess } from './session_scope';
   import { hubStatus } from './hub';
   import WatchSummary from './WatchSummary.svelte';
   import { errorSentence } from './error_copy';
@@ -79,7 +80,9 @@
   /** A grant is the only state worth polling: with `null` we do not know
    *  whether we may read the pane at all, and asking anyway would be an error
    *  toast loop against a hub that is already saying something is wrong. */
-  const pollable = $derived(access === 'watch' || access === 'drive');
+  // Every grant level, Answer included (review w08-1): the hub allows
+  // `capture_session` at Read.
+  const pollable = $derived(isSharedAccess(access));
 
   /** `id` is captured by the caller, not re-read after the await: a capture
    *  that lands after the selection moved on belongs to the pane that asked
@@ -160,7 +163,7 @@
          never say. The `watch-reason` paragraph below gets it right; the
          header used to contradict it, because the ternary treated `null` as
          the default level rather than as the absence of one. -->
-    {#if access === 'watch' || access === 'drive'}
+    {#if isSharedAccess(access)}
       <span class="badge" data-testid="watch-level">{access}</span>
     {/if}
     <span class="label">Read-only snapshot</span>

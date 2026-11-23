@@ -76,6 +76,9 @@ export const shortcutSheetOpen = writable(false);
  *  the Sidebar opens the next session that needs you. */
 export const inspectorToggleRequest = writable(0);
 export const nextNeedsYouRequest = writable(0);
+/** ⌘K's "Switch Sessions and Work" (review w14-4): App flips the list and
+ *  un-collapses the rail, as the chord does. */
+export const workViewToggleRequest = writable(0);
 
 /** The Settings section to scroll to when the dialog opens (`work`: the
  *  work section, e.g. from a "Reconnect Jira (acme)" Attention item). The

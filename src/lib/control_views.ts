@@ -175,10 +175,12 @@ export function missionsWaiting(missions: readonly Mission[]): Mission[] {
   return missions.filter((m) => m.waiting_on != null && !isFinal(m.state));
 }
 
-/** Needs you's count: its session rows, Control's approvals waiting on a
- *  card, and the missions waiting on a person (review w04-7). */
-export function needsYouCount(rows: number, operatorConfirms: number, missions: readonly Mission[]): number {
-  return rows + operatorConfirms + missionsWaiting(missions).length;
+/** Needs you's count: the Inbox's own count (`inboxCount`, the rail's
+ *  number: sessions, failed routines, scoped missions, agent actions, review
+ *  asks, the extra fleets; decision F3, review w09-5), plus Control's own
+ *  approvals waiting on a card, which only this tab lists. */
+export function needsYouCount(inbox: number, operatorConfirms: number): number {
+  return inbox + operatorConfirms;
 }
 
 // ── Needs you folds and search (G3.10, board MissionControl) ──

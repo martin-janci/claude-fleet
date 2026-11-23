@@ -177,6 +177,12 @@ export function receipt(m: OutboxMessage, held: boolean, nowMs: number): { tone:
 export function createOutbox(deps: OutboxDeps) {
   const store = writable<OutboxValue>({ msgs: {}, lastSent: {} });
   const targets = new Map<number, OutboxTarget>();
+  // Bumped per session by `forget`: a send in flight from before it must
+  // write nothing back. Not the target's identity — every `enqueue` stores
+  // a fresh target literal, and a second message queued while the first is
+  // in flight must not orphan the first one's answer (review w04-1).
+  const gens = new Map<number, number>();
+  const genOf = (sid: number) => gens.get(sid) ?? 0;
   const running = new Set<number>();
   // Last `prompt_submit_seq` seen per session: a receipt is the count
   // moving past it, however many row events the move is spread over.
@@ -301,6 +307,7 @@ export function createOutbox(deps: OutboxDeps) {
     const target = targets.get(sid);
     let m = find(sid, id);
     if (!target || !m) return;
+    const gen = genOf(sid);
 
     let paths = m.paths;
     if (paths === null && m.attachments.length > 0) {
@@ -310,7 +317,7 @@ export function createOutbox(deps: OutboxDeps) {
         m.attachments.map((a) => a.path),
         target.fleet,
       );
-      if (mine !== epoch || targets.get(sid) !== target) return;
+      if (mine !== epoch || genOf(sid) !== gen) return;
       if (!up.ok) {
         // `upload_attachments` consumes each path's allow-list entry as it
         // clears the budget, so the same paths cannot be uploaded twice.
@@ -340,7 +347,7 @@ export function createOutbox(deps: OutboxDeps) {
     const before = deps.row(sid);
     patch(sid, id, { turnSeqAtSend: before?.turn_seq ?? null });
     const r = await deps.send(target.host_alias, target.tmux_name, body, target.fleet);
-    if (mine !== epoch || targets.get(sid) !== target) return;
+    if (mine !== epoch || genOf(sid) !== gen) return;
     if (!r.ok) {
       patch(sid, id, { state: 'failed', error: errorText(r.error), retryable: true, acked: false });
       return;
@@ -441,6 +448,7 @@ export function createOutbox(deps: OutboxDeps) {
    *  going: the session's key no longer names that target (an extra fleet
    *  that was removed, review w08-4). A send in flight writes nothing back. */
   function forget(sid: number) {
+    gens.set(sid, genOf(sid) + 1);
     targets.delete(sid);
     running.delete(sid);
     lastSubmit.delete(sid);
@@ -453,6 +461,7 @@ export function createOutbox(deps: OutboxDeps) {
   function resetForTests() {
     epoch += 1;
     targets.clear();
+    gens.clear();
     running.clear();
     lastSubmit.clear();
     store.set({ msgs: {}, lastSent: {} });

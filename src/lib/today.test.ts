@@ -11,6 +11,7 @@ import {
   isEmptyView,
   todayKpis,
   sessionPhrase,
+  attentionFailed,
   type Today,
   type TodaySession,
 } from './today';
@@ -190,6 +191,12 @@ describe('todayKpis (review w11-3)', () => {
     expect(k.inProgress).toBe(3);
     expect(k.stale).toBe(1);
   });
+
+  it('counts review asks and the extra fleets, as the rail does (review w09-5, w11-8)', () => {
+    const v = scopeToday(digest, ALL_SCOPES, rows(), () => ALL_SCOPES);
+    const k = todayKpis(v, { approvals: 1, failedRoutines: 1, reviewAsks: 2, fleets: 3 });
+    expect(k.needsYou).toBe(1 + 1 + 1 + 2 + 3);
+  });
 });
 
 describe('sessionPhrase (review w11-11)', () => {
@@ -197,6 +204,15 @@ describe('sessionPhrase (review w11-11)', () => {
     const p = s(7, 'maybe', { proposed: 'probably_waiting' });
     expect(sessionPhrase(p, 'in_progress')).toBe('maybe (probably waiting)');
     expect(sessionPhrase(p, 'in_progress', true)).toBe('maybe');
+  });
+
+  it('words every reason the hub sends, never the raw token (review w09-3)', () => {
+    expect(sessionPhrase(s(1, 'fed-v2', { attention: 'host_down' }), 'waiting')).toBe('fed-v2 (host unreachable)');
+    expect(sessionPhrase(s(2, 'api', { attention: 'ci_failing' }), 'waiting')).toBe('api (checks failing)');
+    expect(sessionPhrase(s(3, 'x', { attention: 'from_a_newer_hub' }), 'waiting')).toBe('x (needs a look)');
+    expect(attentionFailed('ci_failing')).toBe(true);
+    expect(attentionFailed('stop_failed')).toBe(true);
+    expect(attentionFailed('host_down')).toBe(false);
   });
 });
 

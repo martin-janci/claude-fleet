@@ -913,7 +913,17 @@ pub fn run() {
                             pty::close_pty(pty.inner(), window.label());
                         }
                     }
-                    OnDestroyed::ShutDown => exit_cleanup_for_window.run(window.app_handle()),
+                    OnDestroyed::ShutDown => {
+                        exit_cleanup_for_window.run(window.app_handle());
+                        // The pop-outs go with it, or the app keeps running
+                        // with no main window to come back to (review w14-1).
+                        let open = window.app_handle().webview_windows();
+                        for label in commands::windows::popouts_to_close(open.keys().map(String::as_str)) {
+                            if let Some(w) = open.get(label) {
+                                let _ = w.destroy();
+                            }
+                        }
+                    }
                     OnDestroyed::Nothing => {}
                 }
             }

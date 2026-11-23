@@ -69,7 +69,7 @@
   import { selectedSession, selectSession, selectSessionExplicitly, revealSeq } from './selection';
   import { applySessionRename, renameKeyHandler } from './session_rename';
   import { readPref, writePref } from './prefs';
-  import { accessOf, backendMode, myGrantInfo } from './access';
+  import { accessOf, backendMode, myGrantInfo, waitsOnMe } from './access';
   import { sharedRowLine, sharerName } from './shared_view';
   import AddProjectDialog from './AddProjectDialog.svelte';
   import { hostFilter, effectiveHostFilter, hosts, hostByAlias, hideHost } from './hosts';
@@ -1134,10 +1134,26 @@
   // shows them; the extra fleets' follow under their badges (FleetInbox).
   const inboxPool = $derived(
     $sidebarView === 'inbox' && $showPrimary
-      ? [...pinnedRows, ...routineRows, ...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions, ...sharedWithMe]
+      ? [
+          ...pinnedRows,
+          ...routineRows,
+          ...filtered.flatMap((r) => sessionsForProject(r.project.id)),
+          ...orphanSessions,
+          ...sharedWithMe.filter((s) => waitsOnMe($accessOf(s))),
+        ]
       : [],
   );
   const inboxList = $derived(inboxRows(inboxPool, attentionOpts));
+  // Review w08-3 (option a): a session shared with this person at Read that
+  // waits is listed, apart and uncounted: its question is the owner's.
+  const inboxWatched = $derived(
+    $sidebarView === 'inbox' && $showPrimary
+      ? inboxRows(
+          sharedWithMe.filter((s) => !waitsOnMe($accessOf(s))),
+          attentionOpts,
+        )
+      : [],
+  );
   const inboxNeeding = $derived(
     inboxList.length +
       $failingCount +
@@ -1824,6 +1840,16 @@
         {/if}
       </div>
     {/each}
+    {#if inboxWatched.length > 0}
+      <div class="inbox-section" data-testid="inbox-watched" data-key="watched">
+        <div class="section-header inbox-sec">Shared with you · waiting on their owner</div>
+        <div class="tree" role="tree" aria-label="Shared with you, waiting on their owner">
+          {#each inboxWatched as sess (sess.id)}
+            {@render sessionRow(sess)}
+          {/each}
+        </div>
+      </div>
+    {/if}
     <FleetInbox />
     <div class="inbox-rest" data-testid="inbox-rest">
       {#if inboxRestText && !(inboxNeeding === 0 && !listUnavailable)}<span class="muted">Not waiting · {inboxRestText}</span>{/if}

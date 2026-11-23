@@ -70,6 +70,24 @@ describe('Tour', () => {
     expect(get(tourStep)).toBeNull();
     expect(get(tourSeen)).toBe(true);
   });
+
+  it('an Escape that closes what "try it" opened leaves the tour running (review w14-5)', async () => {
+    render(Tour, { mac: true });
+    startTour();
+    await screen.findByTestId('tour');
+    const dialog = document.createElement('dialog');
+    dialog.setAttribute('open', '');
+    const input = document.createElement('input');
+    dialog.appendChild(input);
+    document.body.appendChild(dialog);
+    try {
+      await fireEvent.keyDown(input, { key: 'Escape' });
+      expect(get(tourStep)).toBe(0);
+      expect(get(tourSeen)).toBe(false);
+    } finally {
+      dialog.remove();
+    }
+  });
 });
 
 describe('FirstRun', () => {

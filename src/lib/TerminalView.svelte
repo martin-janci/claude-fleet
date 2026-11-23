@@ -1214,7 +1214,21 @@
       // the budget and its back-off, or a session that overflows on every
       // attach (`yes` over a slow link) would reconnect at once, for ever,
       // and never raise the banner (review w12-4).
-      scheduleAutoReconnect();
+      // Let go of this attach first: its later bytes resume mid-sequence and
+      // must not reach the screen while the re-attach waits, and once the
+      // budget is spent the "Connection lost" banner must be true (w04-2).
+      const sessionAtOverflow = currentSession;
+      const hostAtOverflow = currentHost;
+      const closing = ptyGeneration;
+      ptyOpen = false;
+      ptyGeneration = null;
+      drain.stop();
+      void invoke('pty_close', {
+        args: closing === null ? { id: PTY_ID } : { id: PTY_ID, generation: closing },
+      }).catch(() => {
+        /* nothing to undo */
+      });
+      scheduleAutoReconnect(sessionAtOverflow, hostAtOverflow);
       return false;
     }
     if (result.bytes > 0) {
@@ -1688,7 +1702,16 @@
         data-testid="popout-pop-back-in">Pop back in</button
       >
       {#if sendKeysOpen}
-        <SendKeys target={what} onsend={sendKeys} onclose={() => (sendKeysOpen = false)} />
+        <!-- Closing unmounts the popover that held focus: hand it back to the
+             terminal, or typing goes nowhere until a click (review w14-7). -->
+        <SendKeys
+          target={what}
+          onsend={sendKeys}
+          onclose={() => {
+            sendKeysOpen = false;
+            void tick().then(focusInput);
+          }}
+        />
       {/if}
     </div>
   {/if}

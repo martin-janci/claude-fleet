@@ -61,6 +61,20 @@ describe('error copy at display sites', () => {
     ).toEqual([]);
   });
 
+  // Review w15-6: the same raw text reached a person through a parameter
+  // (`conflictNotice(e) ?? e.message`, `e.message || errorText(e)`,
+  // `e.message || e.code`), which the `.error.message` check above misses.
+  it('never falls back to a raw message, nor puts it before errorText', () => {
+    const RAW_FALLBACK = /\?\?\s*\w+\.message\b|\.message(\?\.trim\(\))?\s*\|\|\s*errorText\(|\.message\s*\|\|\s*\w+\.code\b/;
+    const offenders: string[] = [];
+    for (const [file, text] of Object.entries(files)) {
+      text.split('\n').forEach((line, i) => {
+        if (RAW_FALLBACK.test(line)) offenders.push(`${file}:${i + 1}: ${line.trim()}`);
+      });
+    }
+    expect(offenders, 'Show errorText(e) instead:\n  ' + offenders.join('\n  ')).toEqual([]);
+  });
+
   it('every waiting entry still matches a line', () => {
     for (const w of WAITING) {
       expect(files[w.file] ?? '', `${w.file}: ${w.text} (${w.why})`).toContain(w.text);

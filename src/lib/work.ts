@@ -6,6 +6,7 @@
 
 import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
+import { isOlderHub } from './error_copy';
 import { acceptCommandRow, sessions, type SessionRow } from './sessions';
 import type { WorkItemRow } from './trackers';
 import { timeAgo } from './session_status';
@@ -930,7 +931,9 @@ export async function workResumePlan(key: string, opts: ResumePlanOpts = {}): Pr
   if (r.ok && (!r.value || !Array.isArray(r.value.modes))) {
     return { ok: false, error: { code: 'E_UNSUPPORTED', message: RESUME_UNSUPPORTED } };
   }
-  if (!r.ok && (r.error.code === 'E_PARSE' || r.error.code === 'E_UNKNOWN_COMMAND')) {
+  // No `E_UNKNOWN_COMMAND`: nothing produces it. An older hub or desktop
+  // answers what `isOlderHub` knows (review w15-8).
+  if (!r.ok && (r.error.code === 'E_PARSE' || isOlderHub(r.error))) {
     return { ok: false, error: { code: 'E_UNSUPPORTED', message: RESUME_UNSUPPORTED } };
   }
   return r;

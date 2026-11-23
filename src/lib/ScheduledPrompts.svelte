@@ -4,6 +4,7 @@
   // a scheduled prompt was invisible on the desktop once the Undo toast went:
   // withdrawing it needed the phone or MCP.
   import { untrack } from 'svelte';
+  import { isOlderHub } from './error_copy';
   import { cancelQueuedPrompt, queuePrompt, queuedPrompts, type QueuedPrompt } from './sessions';
   import { scheduledWhen, waitingPrompts } from './send_later';
   import { heldPreview } from './composer_hold';
@@ -39,7 +40,9 @@
   const shown = $derived(waitingFor === sessionId ? waiting : []);
 
   /** Codes that mean "this hub or share has no such list", not a blip. */
-  const NO_LIST = new Set(['E_LOCAL_ONLY', 'E_HUB_PROTOCOL', 'E_FORBIDDEN', 'E_UNKNOWN_COMMAND', 'E_UNSUPPORTED']);
+  // No `E_UNKNOWN_COMMAND`: nothing produces it (review w15-8); a desktop
+  // older than the command answers `E_UNKNOWN`, which `isOlderHub` knows.
+  const NO_LIST = new Set(['E_LOCAL_ONLY', 'E_HUB_PROTOCOL', 'E_FORBIDDEN', 'E_UNSUPPORTED']);
 
   function clear() {
     // Bumping `seq` drops a read still in flight for another session.
@@ -62,7 +65,7 @@
       waiting = waitingPrompts(r.value ?? []);
       waitingFor = id;
       stale = false;
-    } else if (NO_LIST.has(r.error.code) || waitingFor !== id) {
+    } else if (NO_LIST.has(r.error.code) || isOlderHub(r.error) || waitingFor !== id) {
       // An older hub or no access shows nothing rather than an error
       // above every composer.
       waiting = [];

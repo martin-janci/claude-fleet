@@ -150,4 +150,20 @@ describe('feeds', () => {
     expect(cutToJsonBytes('3 today', 100)).toBe('3 today');
     expect(cutToJsonBytes('😀😀😀', 12)).toBe('😀…');
   });
+
+  it('keeps the whole context under the hub cap with many hosts and logins too (review w04-6)', () => {
+    const long = (key: string): DashboardFeed => ({ ...feed, key, value: 'x'.repeat(6000) });
+    const keys = ['a', 'b', 'c', 'd', 'e'];
+    const all = Object.fromEntries(keys.map((k) => [k, long(k)]));
+    const many: FleetData = {
+      ...data,
+      hosts: Array.from({ length: 200 }, (_, i) => host(`host-number-${i}`, true, { load_1m: 1.2 })),
+    };
+    const c = summaryContext(['hosts', 'feeds'], many, all, keys, NOW);
+    expect(new TextEncoder().encode(JSON.stringify(c)).length).toBeLessThanOrEqual(24 * 1024);
+    const rows = (c.hosts as { rows: string[] }).rows;
+    expect(rows.length).toBeLessThan(200);
+    expect(rows[rows.length - 1]).toMatch(/^… and \d+ more$/);
+    expect((c.feeds as Record<string, { value: string }>).a.value.length).toBeGreaterThan(100);
+  });
 });

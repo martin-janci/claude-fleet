@@ -467,12 +467,17 @@ describe('TerminalView PTY death detection (F11/N8)', () => {
 
   it('re-attaches instead of rendering a stream the backend had to truncate (F6)', async () => {
     let overflowed = true;
+    let opens = 0;
     inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_open') opens += 1;
       if (cmd === 'pty_drain') {
         if (overflowed) {
           overflowed = false;
           return drained({ overflowed: true, data: 'garbage', bytes: 7 });
         }
+        // The overflowed attach keeps producing (the backend latch cleared):
+        // those bytes resume mid-sequence too (review w04-2).
+        if (opens === 1) return drained({ data: 'resumed', bytes: 7 });
         return drained();
       }
       return null;
@@ -484,6 +489,11 @@ describe('TerminalView PTY death detection (F11/N8)', () => {
     await settle();
     // Through the self-heal budget and its back-off (review w12-4).
     expect(calls('pty_open')).toHaveLength(1);
+    // The overflowed attach is let go of at once, not left draining.
+    expect(calls('pty_close')).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(300);
+    await settle();
+    expect(screen.getByTestId('terminal-host').textContent).not.toContain('resumed');
     await vi.advanceTimersByTimeAsync(700);
     await settle();
     expect(calls('pty_close')).toHaveLength(1);

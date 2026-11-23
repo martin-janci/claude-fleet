@@ -164,7 +164,12 @@ pub async fn ensure_clean(
 /// and `repo_commit_diff`.
 pub fn diff_from_bytes(raw: &[u8]) -> (String, bool, bool) {
     let text = String::from_utf8_lossy(raw);
-    let binary = text.contains("Binary files ") || text.contains("GIT binary patch");
+    // Only git's own header lines, which start at column 0: a hunk line
+    // always starts with ' ', '+', '-' or '\', so a text diff that merely
+    // mentions the phrase is not blanked (review w11-1).
+    let binary = text.lines().any(|l| {
+        (l.starts_with("Binary files ") && l.ends_with(" differ")) || l == "GIT binary patch"
+    });
     let truncated = raw.len() > MAX_DIFF_BYTES;
     let diff = if binary {
         String::new()
@@ -264,6 +269,16 @@ mod tests {
         assert!(bin);
         assert!(!trunc);
         assert_eq!(d, "");
+    }
+
+    #[test]
+    fn diff_from_bytes_keeps_a_text_diff_that_mentions_the_phrase() {
+        let raw =
+            b"@@ -1 +1 @@\n-old\n+diff_from_bytes(b\"Binary files a/x and b/x differ\\n\");\n \
+GIT binary patch\n";
+        let (d, bin, _) = diff_from_bytes(raw);
+        assert!(!bin, "a hunk line is not a header");
+        assert!(d.contains("+diff_from_bytes"));
     }
 
     #[test]

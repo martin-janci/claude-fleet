@@ -1,5 +1,5 @@
 import { derived, readable, writable, get, type Readable } from 'svelte/store';
-import { readPref, writePref } from './prefs';
+import { followPref, readPref, writePref } from './prefs';
 
 /**
  * Motion (redesign step 0.6). The Motion pref picks how much the UI moves;
@@ -63,5 +63,11 @@ export function durationMs(token: 'fast' | 'base' | 'slow'): number {
 
 /** Mirrors the effective level onto `<html data-motion>`; call once at startup. */
 export function initMotion(): () => void {
-  return effectiveMotion.subscribe((m) => document.documentElement.setAttribute('data-motion', m));
+  const unsub = effectiveMotion.subscribe((m) => document.documentElement.setAttribute('data-motion', m));
+  // A change made in another window (review w14-2).
+  const unfollow = followPref('ui.motion', motionPref, isMotionPref);
+  return () => {
+    unsub();
+    unfollow();
+  };
 }

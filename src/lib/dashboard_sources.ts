@@ -158,6 +158,15 @@ export function feedBy(f: DashboardFeed): string {
  *  keys and stamps keep the rest. */
 export const SUMMARY_FEEDS_MAX_BYTES = 20 * 1024;
 
+/** The hub's cap on a summary's whole context (`SUMMARY_CONTEXT_MAX_BYTES`
+ *  in drafts.rs), less a little slack for the object's own braces. */
+export const SUMMARY_CONTEXT_MAX_BYTES = 24 * 1024 - 64;
+
+/** The bytes of JSON each fleet source (hosts, accounts, sessions) may take:
+ *  a fleet of many hosts or logins must not crowd the feeds out, or put the
+ *  context over the hub's cap on its own (review w04-6). */
+export const SUMMARY_SOURCE_MAX_BYTES = 3 * 1024;
+
 const utf8 = new TextEncoder();
 const jsonBytes = (v: string) => utf8.encode(JSON.stringify(v)).length;
 
@@ -188,21 +197,42 @@ export function summaryContext(
   now: number = Math.floor(Date.now() / 1000),
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const s of sources ?? []) {
-    if (s === 'work') continue;
-    if (s === 'feeds') {
-      const named = [...new Set(feedKeys)].flatMap((k) => (feeds[k] ? [feeds[k]] : []));
-      // Each feed gets its share of the hub's cap, or a few long values
-      // (non-ASCII, escaped newlines) put the whole context over it and the
-      // hub refuses the summary for good (review w14-2).
-      const share = Math.floor(SUMMARY_FEEDS_MAX_BYTES / Math.max(1, named.length));
-      out.feeds = Object.fromEntries(
-        named.map((f) => [f.key, { value: cutToJsonBytes(f.value, share), by: feedBy(f), at: f.updated_at }]),
-      );
-      continue;
-    }
+  const wanted = sources ?? [];
+  // The fleet's own sources first, each within its own cap; the feeds then
+  // share what is left of the hub's cap on the whole context, so the hub
+  // never refuses it for good (reviews w14-2, w04-6).
+  for (const s of wanted) {
+    if (s === 'work' || s === 'feeds') continue;
     const f = fleetFacts(s, d, now);
-    out[s] = { summary: `${f.value} ${f.note}`, rows: f.rows.map((r) => `${r.label}: ${r.value}`) };
+    const summary = `${f.value} ${f.note}`;
+    out[s] = { summary, rows: capRows(summary, f.rows.map((r) => `${r.label}: ${r.value}`)) };
+  }
+  if (wanted.includes('feeds')) {
+    const named = [...new Set(feedKeys)].flatMap((k) => (feeds[k] ? [feeds[k]] : []));
+    const empty = Object.fromEntries(named.map((f) => [f.key, { value: '', by: feedBy(f), at: f.updated_at }]));
+    const left = SUMMARY_CONTEXT_MAX_BYTES - objBytes({ ...out, feeds: empty });
+    // Each feed gets its share, or a few long values (non-ASCII, escaped
+    // newlines) put the whole context over the cap.
+    const budget = Math.max(0, Math.min(SUMMARY_FEEDS_MAX_BYTES, left));
+    const share = Math.max(2, Math.floor(budget / Math.max(1, named.length)));
+    out.feeds = Object.fromEntries(
+      named.map((f) => [f.key, { value: cutToJsonBytes(f.value, share), by: feedBy(f), at: f.updated_at }]),
+    );
   }
   return out;
+}
+
+const objBytes = (v: unknown) => utf8.encode(JSON.stringify(v)).length;
+
+/** `rows`, as many as fit in [`SUMMARY_SOURCE_MAX_BYTES`] next to
+ *  `summary`, the rest named by their count. */
+function capRows(summary: string, rows: string[]): string[] {
+  if (objBytes({ summary, rows }) <= SUMMARY_SOURCE_MAX_BYTES) return rows;
+  const kept: string[] = [];
+  for (const r of rows) {
+    const more = `… and ${rows.length - kept.length - 1} more`;
+    if (objBytes({ summary, rows: [...kept, r, more] }) > SUMMARY_SOURCE_MAX_BYTES) break;
+    kept.push(r);
+  }
+  return [...kept, `… and ${rows.length - kept.length} more`];
 }
