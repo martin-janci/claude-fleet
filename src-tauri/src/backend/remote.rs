@@ -539,6 +539,10 @@ impl HubBackend {
     /// headers, so the token cannot appear here — it is scrubbed anyway,
     /// because "cannot" is a claim about code on the other side of a network.
     fn tool_error(&self, tool: &str, result: &Value) -> IpcError {
+        hub_origin(self.tool_error_inner(tool, result))
+    }
+
+    fn tool_error_inner(&self, tool: &str, result: &Value) -> IpcError {
         let text = &self.redact(
             result
                 .get("content")
@@ -717,6 +721,24 @@ fn first_text(result: &Value) -> String {
 
 /// `E_` followed by upper-case ASCII, digits or `_` — the shape every code in
 /// `fleet_core::ipc_error::codes` has.
+/// Mark the codes whose sentence names who failed (`E_LOCK`: "must
+/// restart", `E_SQLITE`: "the database") as the hub's (review w15-4): a
+/// poisoned lock or a failed query on the hub is not this app's, and
+/// restarting the desktop does nothing for it. `details.origin = "hub"`,
+/// which `error_copy.ts` reads.
+fn hub_origin(err: IpcError) -> IpcError {
+    if err.code != codes::E_LOCK && err.code != codes::E_SQLITE {
+        return err;
+    }
+    let mut details = match err.details.clone() {
+        Some(Value::Object(m)) => m,
+        None | Some(Value::Null) => serde_json::Map::new(),
+        Some(_) => return err,
+    };
+    details.insert("origin".into(), Value::String("hub".into()));
+    err.with_details(Value::Object(details))
+}
+
 fn is_error_code(s: &str) -> bool {
     s.starts_with("E_")
         && s.len() > 2

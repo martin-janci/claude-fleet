@@ -935,6 +935,13 @@ impl Store {
                 "UPDATE session_grants SET revoked_at = ?3                   WHERE session_id = ?1 AND person_id = ?2 AND revoked_at IS NULL",
                 rusqlite::params![id, person, now],
             )?;
+            // The ask for review the share came with closes with it, as the
+            // owner's revoke closes it (review w08-5).
+            tx.execute(
+                "UPDATE review_requests SET done_at = ?3 \
+                  WHERE session_id = ?1 AND to_person_id = ?2 AND done_at IS NULL",
+                rusqlite::params![id, person, now],
+            )?;
         }
         tx.commit()?;
         if n > 0 {
@@ -1060,10 +1067,22 @@ impl Store {
             }
             Some(GRANT_WATCH)
         } else {
-            self.conn.execute(
+            let now = now_unix();
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute(
                 "UPDATE session_grants SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL",
-                rusqlite::params![grant_id, now_unix()],
+                rusqlite::params![grant_id, now],
             )?;
+            // The ask for review the share came with closes with it, as the
+            // owner's revoke closes it (review w08-5).
+            if let GrantRecipient::Person(p) = to {
+                tx.execute(
+                    "UPDATE review_requests SET done_at = ?3 \
+                      WHERE session_id = ?1 AND to_person_id = ?2 AND done_at IS NULL",
+                    rusqlite::params![g.session_id, p, now],
+                )?;
+            }
+            tx.commit()?;
             None
         };
         bump_grant_generation();
@@ -1844,6 +1863,45 @@ mod tests {
         assert_eq!(s.person_grants_in_org(b, org).unwrap(), (0, 0, 0));
         assert_eq!(granted_level(&s, session, b), None);
         assert_eq!(granted_level(&s, other, b).as_deref(), Some(GRANT_DRIVE));
+    }
+
+    /// Review w08-5: an org admin's revoke closes the ask for review the
+    /// share came with, both the sweep over a member and one share alone, as
+    /// the owner's revoke does. A re-share must not bring the old ask back.
+    #[test]
+    fn an_org_admins_revoke_closes_the_review_ask() {
+        let (s, a, b, session) = shared_fixture();
+        let org = s.add_org("platform", None, false).expect("org").id;
+        s.conn
+            .execute("UPDATE hosts SET org_id = ?1 WHERE alias = 'h'", [org])
+            .unwrap();
+        let open = |s: &Store| s.review_requests_for(b, false, 100).unwrap().len();
+
+        s.grant_session(session, GrantRecipient::Person(b), GRANT_DRIVE, a)
+            .unwrap();
+        s.ask_for_review(session, a, b, GRANT_DRIVE, Some("look"), 10)
+            .unwrap();
+        assert_eq!(open(&s), 1);
+        assert_eq!(s.revoke_person_grants_in_org(b, org).unwrap(), 1);
+        s.grant_session(session, GrantRecipient::Person(b), GRANT_WATCH, a)
+            .unwrap();
+        assert_eq!(open(&s), 0, "the sweep closed the ask");
+
+        s.ask_for_review(session, a, b, GRANT_WATCH, Some("again"), 20)
+            .unwrap();
+        assert_eq!(open(&s), 1);
+        let grant = s
+            .live_grants_in_org(org)
+            .unwrap()
+            .into_iter()
+            .find(|(g, _)| g.person_id == Some(b))
+            .expect("live share")
+            .0
+            .id;
+        s.org_admin_change_grant(grant, org, false).unwrap();
+        s.grant_session(session, GrantRecipient::Person(b), GRANT_WATCH, a)
+            .unwrap();
+        assert_eq!(open(&s), 0, "the one-share revoke closed the ask");
     }
 
     /// A level is `watch` or `drive`, and `own` is not a level at all —

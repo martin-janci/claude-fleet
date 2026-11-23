@@ -915,6 +915,14 @@ pub fn run() {
                         if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
                             pty::close_all_ptys(pty.inner());
                         }
+                        // The pop-outs go with it, or the app keeps running
+                        // with no main window to come back to (review w14-1).
+                        let open = window.app_handle().webview_windows();
+                        for label in commands::windows::popouts_to_close(open.keys().map(String::as_str)) {
+                            if let Some(w) = open.get(label) {
+                                let _ = w.destroy();
+                            }
+                        }
                     }
                     OnDestroyed::Nothing => {}
                 }

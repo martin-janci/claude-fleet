@@ -66,6 +66,14 @@ pub fn on_destroyed(label: &str) -> OnDestroyed {
     }
 }
 
+/// The windows to close when the main window goes away: every pop-out.
+/// Tauri exits only after the last window closes, and a pop-out left open
+/// would keep a headless app running with its connections already shut and
+/// nothing to bring the main window back (review w14-1).
+pub fn popouts_to_close<'a>(labels: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    labels.into_iter().filter(|l| is_popout_label(l)).collect()
+}
+
 fn clean_title(title: &str) -> String {
     let one_line: String = title
         .chars()
@@ -146,6 +154,16 @@ mod tests {
         );
         assert_eq!(on_destroyed("settings"), OnDestroyed::Nothing);
         assert_eq!(on_destroyed(""), OnDestroyed::Nothing);
+    }
+
+    #[test]
+    fn the_main_window_going_away_closes_every_popout_and_nothing_else() {
+        let a = popout_label(4, None);
+        let b = popout_label(9, Some(1));
+        assert_eq!(
+            popouts_to_close(["main", a.as_str(), "settings", b.as_str()]),
+            vec![a.as_str(), b.as_str()]
+        );
     }
 
     /// The config's one window takes Tauri's default label, `main`; a label
