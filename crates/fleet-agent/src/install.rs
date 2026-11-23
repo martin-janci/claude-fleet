@@ -327,6 +327,92 @@ pub fn install(
     Ok(())
 }
 
+/// Remove `path` if it is there; `true` when it was.
+pub(crate) fn remove_if_there(path: &Path) -> Result<bool, String> {
+    let gone = if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    match gone {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// The `systemctl` calls `uninstall` makes before it removes the files:
+/// stop and disable the update timer, its path unit and the agent. Each
+/// may fail (a unit that was never installed, or `install --no-start`).
+pub fn uninstall_calls(scope: &Scope) -> Vec<Vec<String>> {
+    [
+        crate::update::UPDATE_TIMER,
+        crate::update::UPDATE_PATH,
+        UNIT_NAME,
+    ]
+    .into_iter()
+    .map(|unit| {
+        let mut v = Vec::new();
+        if *scope == Scope::User {
+            v.push("--user".to_string());
+        }
+        v.extend(["disable", "--now", unit].iter().map(|a| a.to_string()));
+        v
+    })
+    .collect()
+}
+
+/// `fleet-agent uninstall`: stop and disable the units, then remove them,
+/// the config (this host's token) and the updater's state, and reload
+/// systemd. What the agent started (tmux servers, Claude sessions) keeps
+/// running (`KillMode=process`); the binaries under the update layout stay,
+/// and `out` names them. A file already gone is not an error.
+pub fn uninstall(
+    scope: &Scope,
+    layout: &Layout,
+    state_dir: &Path,
+    systemctl: &mut dyn Systemctl,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    for call in uninstall_calls(scope) {
+        let _ = writeln!(out, "systemctl {}", call.join(" "));
+        let _ = systemctl.run(&call);
+    }
+    let unit_dir = layout.unit_path.parent().unwrap_or(Path::new("/"));
+    let mut paths = vec![layout.unit_path.clone()];
+    for name in [
+        crate::update::UPDATE_SERVICE,
+        crate::update::UPDATE_TIMER,
+        crate::update::UPDATE_PATH,
+    ] {
+        paths.push(unit_dir.join(name));
+    }
+    paths.push(layout.config_path.clone());
+    paths.push(state_dir.to_path_buf());
+    for p in &paths {
+        if remove_if_there(p)? {
+            let _ = writeln!(out, "removed {}", p.display());
+        }
+    }
+    // The config's own directory, when nothing else is in it.
+    if let Some(dir) = layout.config_path.parent() {
+        let _ = std::fs::remove_dir(dir);
+    }
+    let mut reload = Vec::new();
+    if *scope == Scope::User {
+        reload.push("--user".to_string());
+    }
+    reload.push("daemon-reload".to_string());
+    let _ = writeln!(out, "systemctl {}", reload.join(" "));
+    let _ = systemctl.run(&reload);
+    let _ = writeln!(
+        out,
+        "the agent is uninstalled; the sessions it started keep running. \
+         Remove the host on the hub too (fleet-hub host remove, or Hosts in the app)"
+    );
+    Ok(())
+}
+
 /// What `systemctl show` says about the unit.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ServiceState {
@@ -588,6 +674,57 @@ mod tests {
             "{said}"
         );
         assert!(!said.contains(TOKEN), "{said}");
+    }
+
+    #[test]
+    fn uninstall_stops_the_units_and_removes_them_the_config_and_the_update_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut plan = plan_in(dir.path(), true);
+        plan.auto_update = true;
+        let mut systemctl = Recorder::default();
+        install(&plan, &mut systemctl, &mut Vec::new()).unwrap();
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("state.json"), "{}").unwrap();
+        let unit_dir = plan.layout.unit_path.parent().unwrap().to_path_buf();
+        assert!(unit_dir.join(crate::update::UPDATE_TIMER).exists());
+
+        let mut systemctl = Recorder::default();
+        let mut out = Vec::new();
+        uninstall(
+            &Scope::User,
+            &plan.layout,
+            &state_dir,
+            &mut systemctl,
+            &mut out,
+        )
+        .unwrap();
+        for gone in [
+            plan.layout.unit_path.clone(),
+            plan.layout.config_path.clone(),
+            unit_dir.join(crate::update::UPDATE_SERVICE),
+            unit_dir.join(crate::update::UPDATE_TIMER),
+            unit_dir.join(crate::update::UPDATE_PATH),
+            state_dir.clone(),
+        ] {
+            assert!(!gone.exists(), "{} is still there", gone.display());
+        }
+        let mut want = uninstall_calls(&Scope::User);
+        want.push(vec!["--user".into(), "daemon-reload".into()]);
+        assert_eq!(systemctl.calls, want);
+        assert!(want.iter().all(|c| c[0] == "--user"));
+        let said = String::from_utf8(out).unwrap();
+        assert!(!said.contains(TOKEN), "{said}");
+
+        // Again, with nothing left: not an error.
+        uninstall(
+            &Scope::User,
+            &plan.layout,
+            &state_dir,
+            &mut Recorder::default(),
+            &mut Vec::new(),
+        )
+        .unwrap();
     }
 
     /// The system scope's layout, rendered into a directory the test owns:

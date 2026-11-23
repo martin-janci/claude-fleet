@@ -598,6 +598,40 @@ async fn a_candidate_that_keeps_dying_under_validation_is_rolled_back() {
     assert!(failed.contains("while being validated"), "{failed}");
 }
 
+/// Review w03-4: the designed resume (the `exec`) and two interruptions
+/// still validate; and an interruption long after the previous resume (a
+/// reboot an hour later) starts the count again instead of rolling a good
+/// build back and bad-listing it.
+#[tokio::test]
+async fn only_resumes_close_together_count_towards_the_cap() {
+    let mut r = rig(Behaviour::Good, Component::Agent);
+    let (o, _) = r.u.tick().await;
+    assert_eq!(o, Outcome::Updated(Version::new(0, 5, 4)));
+    let cand = Candidate {
+        version: Version::new(0, 5, 4),
+        sha256: sha256_hex(&tarball("0.5.4")),
+        schema_to: None,
+    };
+    let resume = |r: &mut Rig| {
+        r.u.state.phase = UpdatePhase::Validating;
+        r.u.state.candidate = Some(cand.clone());
+    };
+    // The exec, then two interruptions.
+    for _ in 0..3 {
+        resume(&mut r);
+        let (o, _) = r.u.tick().await;
+        assert_eq!(o, Outcome::Updated(Version::new(0, 5, 4)));
+    }
+    assert_eq!(r.u.state.resumes, MAX_RESUMES);
+    // The next one comes an hour after the last: not a crash loop.
+    r.u.state.resumed_at = r.u.state.resumed_at.map(|t| t - 3600);
+    resume(&mut r);
+    let (o, _) = r.u.tick().await;
+    assert_eq!(o, Outcome::Updated(Version::new(0, 5, 4)), "{o:?}");
+    assert_eq!(r.u.state.resumes, 1);
+    assert!(!r.u.state.bad.is_bad(&cand.version, Some(&cand.sha256)));
+}
+
 #[test]
 fn old_releases_are_pruned_but_never_the_running_or_previous_one() {
     let mut r = rig(Behaviour::Good, Component::Agent);

@@ -54,6 +54,12 @@ pub struct SelfUpdate {
     pub args: Vec<OsString>,
     /// Where the hub's `update_now` drops `update-now`.
     pub poke_dir: PathBuf,
+    /// The real path of the build this process runs, taken at start-up
+    /// before anything can re-point `link` (`main` fills it). On macOS
+    /// `current_exe` is the path the process was exec'd as, i.e. `link`
+    /// itself, so resolving it later follows `link` to whatever it points
+    /// at NOW (review w03-1).
+    pub started_as: Option<PathBuf>,
 }
 
 /// Whether this process runs the pass itself, and with what. `None` when an
@@ -94,6 +100,7 @@ pub fn plan(
         paths,
         link,
         args: argv[1..].to_vec(),
+        started_as: None,
     })
 }
 
@@ -134,16 +141,26 @@ impl SelfUpdate {
             link = %self.link.display(),
             "[agent] self-update on (no fleet-agent-update.timer here)"
         );
+        let mut failures = 0u32;
         loop {
             let (outcome, wait) = updater.tick().await;
+            let pass_end = tokio::time::Instant::now();
             // A refusal wakes the pass at every redial (~60 s). After an
             // attempt that failed before anything ran (a download or an
             // unpacked build that will not run), that would download the
-            // same tarball again every minute (review w09-4): such a pass
-            // waits its normal interval, and only `update-now` cuts it short.
-            let heed_refusals = !matches!(outcome, Outcome::Failed(_));
+            // same tarball again every minute (review w09-4). But waiting the
+            // full interval (6 h on stable) leaves a refused agent offline
+            // for that long after one passing download failure (review
+            // w03-3 / w18-3): while refused, a failed pass is retried on a
+            // short ladder instead, and only `update-now` cuts it shorter.
+            failures = if matches!(outcome, Outcome::Failed(_)) {
+                failures.saturating_add(1)
+            } else {
+                0
+            };
+            let retry_when_refused = refused_retry(failures);
             let poke = self.poke_dir.join("update-now");
-            let deadline = tokio::time::Instant::now() + wait;
+            let mut deadline = pass_end + wait;
             loop {
                 let step = deadline
                     .saturating_duration_since(tokio::time::Instant::now())
@@ -154,9 +171,19 @@ impl SelfUpdate {
                 tokio::select! {
                     () = tokio::time::sleep(step) => {}
                     () = link.refused.notified() => {
-                        if heed_refusals {
-                            tracing::info!("[agent] the hub refused this agent's protocol: checking for an update now");
-                            break;
+                        match retry_when_refused {
+                            None => {
+                                tracing::info!("[agent] the hub refused this agent's protocol: checking for an update now");
+                                break;
+                            }
+                            Some(back) if pass_end + back < deadline => {
+                                deadline = pass_end + back;
+                                tracing::info!(
+                                    "[agent] the hub refused this agent's protocol: retrying the failed update in {} s",
+                                    back.as_secs()
+                                );
+                            }
+                            Some(_) => {}
                         }
                     }
                 }
@@ -194,6 +221,7 @@ impl SelfUpdate {
             },
             link: self.link.clone(),
             args: self.args.clone(),
+            started_as: self.started_as.clone().or_else(started_as),
             status: link,
             running: own_version()?,
         };
@@ -213,6 +241,24 @@ impl SelfUpdate {
     }
 }
 
+/// After `failures` failed passes in a row, how soon a refused agent tries
+/// again: `None` (no failure) heeds every refusal at once; otherwise a short
+/// ladder, so a passing download failure costs minutes, not the interval,
+/// and a build that keeps failing is not fetched every minute.
+fn refused_retry(failures: u32) -> Option<Duration> {
+    const LADDER_MIN: [u64; 4] = [2, 5, 15, 30];
+    let i = usize::try_from(failures.checked_sub(1)?).unwrap_or(usize::MAX);
+    Some(Duration::from_secs(
+        60 * LADDER_MIN[i.min(LADDER_MIN.len() - 1)],
+    ))
+}
+
+/// The resolved path of the running binary. Call it at start-up: on macOS
+/// `current_exe` names the symlink the process was started through.
+pub fn started_as() -> Option<PathBuf> {
+    std::env::current_exe().and_then(std::fs::canonicalize).ok()
+}
+
 fn own_version() -> Result<Version, String> {
     parse_version_output(env!("CARGO_PKG_VERSION"))
 }
@@ -223,6 +269,8 @@ pub struct ExecHost {
     files: SystemdHost,
     link: PathBuf,
     args: Vec<OsString>,
+    /// The build this process runs, resolved at start-up ([`started_as`]).
+    started_as: Option<PathBuf>,
     status: Arc<LinkStatus>,
     running: Version,
 }
@@ -231,14 +279,13 @@ impl ExecHost {
     /// Whether `link` already resolves to the build this process runs. After
     /// an `exec` the new process resumes the attempt and "restarts" again on
     /// the way through: that must be a no-op, not an endless `exec`.
-    /// `current_exe` rather than `/proc/self/exe`: macOS has no `/proc`, and
-    /// there the check was always false, so a rollback `exec`'d forever.
+    /// Compared with the path resolved at start-up, not `current_exe` now:
+    /// on macOS that is `link` itself, so it always matched and `restart`
+    /// never exec'd the new build (review w03-1); macOS also has no `/proc`
+    /// (review w09-1, the endless rollback `exec`).
     fn runs_link(&self) -> bool {
-        match (
-            std::fs::canonicalize(&self.link),
-            std::env::current_exe().and_then(std::fs::canonicalize),
-        ) {
-            (Ok(a), Ok(b)) => a == b,
+        match (std::fs::canonicalize(&self.link), self.started_as.as_ref()) {
+            (Ok(a), Some(b)) => &a == b,
             _ => false,
         }
     }
@@ -425,6 +472,18 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_agent_retries_a_failed_update_on_a_short_ladder() {
+        assert_eq!(refused_retry(0), None);
+        let mins = |n| refused_retry(n).map(|d| d.as_secs() / 60);
+        assert_eq!(mins(1), Some(2));
+        assert_eq!(mins(2), Some(5));
+        assert_eq!(mins(3), Some(15));
+        assert_eq!(mins(4), Some(30));
+        assert_eq!(mins(40), Some(30));
+        assert_eq!(mins(u32::MAX), Some(30));
+    }
+
+    #[test]
     fn its_own_version_parses() {
         assert!(own_version().is_ok());
     }
@@ -443,6 +502,7 @@ mod tests {
             },
             link: PathBuf::from("/nonexistent"),
             args: vec![],
+            started_as: started_as(),
             status: notifier.link(),
             running: own_version().unwrap(),
         };
@@ -467,13 +527,17 @@ mod tests {
     }
 
     /// The rollback loop guard: a link that resolves to this very binary is
-    /// "already running", on every OS (macOS has no `/proc/self/exe`).
+    /// "already running", on every OS (macOS has no `/proc/self/exe`). And
+    /// once the link is re-pointed at another build (an install, a
+    /// rollback) it is not, even though the process was started through
+    /// that very link (macOS's `current_exe` names the link: review w03-1).
     #[cfg(unix)]
     #[test]
     fn a_link_to_this_very_binary_is_already_running() {
         let dir = tempfile::tempdir().unwrap();
         let link = dir.path().join("current");
-        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &link).unwrap();
+        let me = std::env::current_exe().unwrap();
+        std::os::unix::fs::symlink(&me, &link).unwrap();
         let host = ExecHost {
             files: SystemdHost {
                 unit: "x".into(),
@@ -483,13 +547,24 @@ mod tests {
                 git: GitFetch::new(None).unwrap(),
                 mirror: None,
             },
-            link,
+            link: link.clone(),
             args: vec![],
+            // As macOS hands it over: the link itself, resolved at start-up.
+            started_as: std::fs::canonicalize(&link).ok(),
             status: crate::conn::Notifier::at(None).link(),
             running: own_version().unwrap(),
         };
         assert!(host.runs_link());
         // So `restart` is a no-op rather than an `exec`.
         assert!(host.restart().is_ok());
+
+        // An install re-points the link at the new build: it is no longer
+        // what runs, so `restart` must exec it (not checked here: it would
+        // replace the test process).
+        let other = dir.path().join("fleet-agent-new");
+        std::fs::write(&other, b"").unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&other, &link).unwrap();
+        assert!(!host.runs_link());
     }
 }

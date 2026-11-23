@@ -251,6 +251,40 @@ pub fn install(
     Ok(())
 }
 
+/// `fleet-agent uninstall` on macOS: boot the job out of the GUI domain
+/// (allowed to fail: it may not be loaded), then remove the plist, the
+/// config (this host's token) and the updater's state. The sessions the
+/// agent started keep running (`AbandonProcessGroup`); the log stays.
+pub fn uninstall(
+    uid: u32,
+    layout: &Layout,
+    state_dir: &Path,
+    launchctl: &mut dyn Launchctl,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    let call = vec!["bootout".to_string(), service_target(uid)];
+    let _ = writeln!(out, "launchctl {}", call.join(" "));
+    let _ = launchctl.run(&call);
+    for p in [
+        layout.plist_path.as_path(),
+        layout.config_path.as_path(),
+        state_dir,
+    ] {
+        if crate::install::remove_if_there(p)? {
+            let _ = writeln!(out, "removed {}", p.display());
+        }
+    }
+    if let Some(dir) = layout.config_path.parent() {
+        let _ = std::fs::remove_dir(dir);
+    }
+    let _ = writeln!(
+        out,
+        "the agent is uninstalled; the sessions it started keep running. \
+         Remove the host on the hub too (fleet-hub host remove, or Hosts in the app)"
+    );
+    Ok(())
+}
+
 /// The arguments `status` passes to `launchctl`.
 pub fn print_args(uid: u32) -> Vec<String> {
     vec!["print".into(), service_target(uid)]
@@ -405,6 +439,35 @@ mod tests {
         install(&plan, &mut rec, &mut Vec::new()).unwrap();
         assert!(rec.calls.is_empty());
         assert!(plan.layout.plist_path.is_file());
+    }
+
+    #[test]
+    fn uninstall_boots_the_job_out_and_removes_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = plan_in(dir.path(), true);
+        install(&plan, &mut Recorder::default(), &mut Vec::new()).unwrap();
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        // Not loaded: the bootout fails, and that is fine.
+        let mut launchctl = Recorder {
+            fail_on: Some("bootout"),
+            ..Default::default()
+        };
+        uninstall(
+            plan.uid,
+            &plan.layout,
+            &state_dir,
+            &mut launchctl,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            launchctl.calls,
+            vec![vec!["bootout".to_string(), service_target(plan.uid)]]
+        );
+        assert!(!plan.layout.plist_path.exists());
+        assert!(!plan.layout.config_path.exists());
+        assert!(!state_dir.exists());
     }
 
     #[test]

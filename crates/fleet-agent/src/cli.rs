@@ -1,4 +1,4 @@
-//! The command line: `run`, `install`, `status`.
+//! The command line: `run`, `install`, `status`, `update`, `uninstall`.
 //!
 //! Parsing and the decisions that follow from the flags are here and are pure;
 //! `main.rs` supplies the environment (who is running, where the binary is)
@@ -40,6 +40,21 @@ pub enum Command {
     /// release, restarted, and rolled back when it does not reconnect.
     /// `install --auto-update` runs it from a timer.
     Update(UpdateArgs),
+    /// Stop the service and remove what `install` wrote: the unit (and the
+    /// update timer), or the LaunchAgent on macOS, the config holding this
+    /// host's token, and the updater's state. The sessions the agent
+    /// started keep running; the binaries stay.
+    Uninstall(UninstallArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct UninstallArgs {
+    /// The user unit instead of the system one (which needs root).
+    #[arg(long)]
+    pub user: bool,
+    /// The config to remove, when `install --config` put it elsewhere.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -409,6 +424,17 @@ mod tests {
 
     fn uid_1000(_: &str) -> Result<(u32, u32), String> {
         Ok((1000, 1000))
+    }
+
+    #[test]
+    fn uninstall_parses_its_scope() {
+        match parse(&["fleet-agent", "uninstall", "--user"])
+            .unwrap()
+            .command
+        {
+            Command::Uninstall(a) => assert!(a.user && a.config.is_none()),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

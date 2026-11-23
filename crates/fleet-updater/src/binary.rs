@@ -52,6 +52,15 @@ pub const STATE_FILE: &str = "state.json";
 /// candidate); every further one is the candidate dying under validation.
 pub const MAX_RESUMES: u32 = 3;
 
+/// The seconds within which a resume follows the previous one when the
+/// candidate is dying under validation: its ready timeout plus its soak,
+/// and at least a minute.
+fn resume_window(validation: Duration) -> i64 {
+    i64::try_from(validation.as_secs().saturating_add(1))
+        .unwrap_or(i64::MAX)
+        .max(60)
+}
+
 #[derive(Debug, Clone)]
 pub struct BinaryConfig {
     /// `agent` or `hub`.
@@ -198,6 +207,11 @@ pub struct BinState {
     /// caught here (review w09-2).
     #[serde(default)]
     pub resumes: u32,
+    /// When the last counted resume happened (unix seconds). A resume that
+    /// comes after a whole validation window ([`resume_window`]) is not
+    /// part of a crash loop: the count starts again (review w03-4).
+    #[serde(default)]
+    pub resumed_at: Option<i64>,
 }
 
 impl BinState {
@@ -662,6 +676,7 @@ impl<H: Host> BinaryUpdater<H> {
             .clone()
             .expect("prepare set the candidate");
         self.state.resumes = 0;
+        self.state.resumed_at = None;
         self.report(UpdatePhase::Installing, &installed, Value::Null, None)
             .await;
         let switched = point(
@@ -978,7 +993,15 @@ impl<H: Host> BinaryUpdater<H> {
             }
             Installing | Validating => {
                 let cand = self.state.candidate.clone()?;
-                self.state.resumes = self.state.resumes.saturating_add(1);
+                let now = now_unix();
+                let window = resume_window(self.cfg.ready_timeout + self.cfg.soak);
+                self.state.resumes = match self.state.resumed_at {
+                    // The previous process outlived a whole validation: it
+                    // did not die under it (a reboot, a restart much later).
+                    Some(at) if now.saturating_sub(at) > window => 1,
+                    _ => self.state.resumes.saturating_add(1),
+                };
+                self.state.resumed_at = Some(now);
                 self.save();
                 if self.state.resumes > MAX_RESUMES {
                     let n = self.state.resumes - 1;
