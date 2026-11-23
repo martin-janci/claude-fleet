@@ -1879,6 +1879,30 @@ pub const READ_ACTIONS: &[(&str, &[&str])] = &[
     ("review_notes", &["list"]),
 ];
 
+/// Read actions of mixed tools that clients POLL (the phone's Needs-you
+/// watcher, Control's bars and boards). [`is_quiet_call`] writes no audit
+/// row for them (review w19-1: one phone and one desktop came to ~13k
+/// `mcp_call` rows a day on the controller's timeline, pruning its real
+/// events within hours). Unlike [`READ_ACTIONS`], this opens nothing to a
+/// readonly device.
+pub const QUIET_ACTIONS: &[(&str, &[&str])] = &[
+    ("routines", &["list", "get", "failing", "budget", "runs"]),
+    ("debug_devices", &["list"]),
+    ("control_auto_continue", &["status"]),
+];
+
+/// Whether `action` of `tool` only reads, on [`READ_ACTIONS`] or
+/// [`QUIET_ACTIONS`]: such a call leaves no audit row.
+pub fn is_quiet_call(tool: &str, action: Option<&str>) -> bool {
+    let Some(action) = action else {
+        return false;
+    };
+    READ_ACTIONS
+        .iter()
+        .chain(QUIET_ACTIONS)
+        .any(|(t, reads)| *t == tool && reads.contains(&action))
+}
+
 /// May a token in `mode` call `tool` at all (the readonly and answer-only
 /// half of `enforce_mode`)?
 pub fn mode_allows_tool(mode: crate::mcp::auth::TokenMode, tool: &str) -> bool {

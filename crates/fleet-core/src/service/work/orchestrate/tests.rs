@@ -2063,3 +2063,37 @@ async fn a_tick_books_its_waits_and_a_pause_waits_on_a_person() {
     // person's wait is that, not the 30 s after the resume.
     assert!(w.get("person").copied().unwrap_or(0) <= 1, "{w:?}");
 }
+
+/// Review w19-2: `work { missions, waiting: true }` answers only the
+/// missions that wait on a person, with the same `waiting_on` the full list
+/// carries.
+#[test]
+fn the_waiting_list_holds_only_missions_that_wait_on_a_person() {
+    let fx = fixture();
+    let full = missions::missions(&fx.deps.store, &fx.me).unwrap();
+    let waiting = missions::waiting_missions(&fx.deps.store, &fx.me).unwrap();
+    // Active at level 2 with no grant: it waits for one to be signed.
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0].id, fx.m.id);
+    let in_full = full.iter().find(|m| m.id == fx.m.id).unwrap();
+    assert!(in_full.waiting_on.is_some());
+    assert_eq!(waiting[0].waiting_on, in_full.waiting_on);
+    lock(&fx.deps.store)
+        .unwrap()
+        .add_grant(
+            fx.m.id,
+            &crate::store::NewGrant {
+                level: 2,
+                granted_by: "me",
+                hosts: None,
+                budget_micros: None,
+                max_parallel: None,
+                profile: None,
+                expires_at: now_unix() + 3600,
+            },
+        )
+        .unwrap();
+    assert!(missions::waiting_missions(&fx.deps.store, &fx.me)
+        .unwrap()
+        .is_empty());
+}

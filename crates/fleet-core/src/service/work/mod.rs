@@ -156,6 +156,12 @@ pub struct WorkArgs {
     /// mission: older events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_event: Option<i64>,
+    /// missions: only those waiting on a person (the phone's watcher). A
+    /// client's knob, kept out of the served schema, as `sections`; a hub
+    /// that predates it ignores it and answers every mission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub waiting: Option<bool>,
     /// attachment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_id: Option<i64>,
