@@ -1,8 +1,8 @@
 //! What a fleet-own action does once a person approved it (`work_task`,
 //! `fix_session`, `setting`, `session_recover`; `actions::FleetOp`). Each
 //! goes through the same service a person's own button uses, so it is held
-//! to the same checks: a setting through the settings review (an agent may
-//! not touch a key whose `AiPolicy` is `Never`), a session through
+//! to the same checks: a setting as the settings review writes it (an agent
+//! may not touch a key whose `AiPolicy` is `Never`), a session through
 //! `restore_host_sessions` / `restart_session`, a start through
 //! `start_work`.
 
@@ -139,18 +139,65 @@ async fn fix_session(
     Ok(format!("started {} on {}", row.tmux_name, row.host_alias))
 }
 
+/// Write the approved value. A key an agent may not touch (`AiPolicy::Never`,
+/// or one a process flag owns) is refused, as the settings review refuses
+/// it. The write is the approving person's, straight through `set_by`
+/// (w15-3): no proposal of its own, so it neither supersedes a pending
+/// proposal for the key nor counts against the review's cap.
 fn setting(store: &Mutex<Store>, p: &SettingPayload) -> Result<String, String> {
+    use crate::service::settings::{self, AiPolicy};
     let s = lock(store).map_err(|e| e.message)?;
-    let why = Some(p.why.as_str()).filter(|w| !w.is_empty());
-    let proposal =
-        crate::service::settings_review::propose(&s, &p.key, &p.value, why, Actor::Agent(PROPOSER))
-            .map_err(|e| e.message)?;
-    let done = crate::service::settings_review::decide_as(&s, &[proposal.id], &[], Actor::Person)
-        .map_err(|e| e.message)?;
-    match done.failed.first() {
-        Some(f) => Err(format!("{}: {}", p.key, f.error)),
-        None => Ok(format!("{} = {}", p.key, p.value)),
+    let Some(spec) = settings::spec(&p.key) else {
+        return Err(format!("{} is not a registered setting", p.key));
+    };
+    if spec.ai == AiPolicy::Never || spec.owned_by.is_some() {
+        return Err(format!(
+            "{} ({}) is changed only by a person, in Settings",
+            p.key, spec.label
+        ));
     }
+    if let Some(why) = setting_moved(&s, p) {
+        return Err(why);
+    }
+    settings::set_by(&s, &p.key, &p.value, Actor::Person, None).map_err(|e| e.message)?;
+    Ok(format!("{} = {}", p.key, p.value))
+}
+
+/// Why an approved `setting` no longer applies: its key moved since the
+/// value the card showed as "from" (w15-3). `None` when it still holds.
+pub fn setting_moved(s: &Store, p: &SettingPayload) -> Option<String> {
+    let now = crate::service::settings::effective_value(s, &p.key).unwrap_or_default();
+    (!p.was.is_empty() && now.trim() != p.was.trim()).then(|| {
+        format!(
+            "{} is now {now}, not {} as proposed: propose it again",
+            p.key, p.was
+        )
+    })
+}
+
+/// Why an approved `session_recover` proposed at `proposed_at` no longer
+/// applies (w15-4): the session finished a turn or was started again since,
+/// or it is working and not stuck. A lost session is still restored.
+pub fn recover_moot(s: &Store, p: &RecoverPayload, proposed_at: i64) -> Option<String> {
+    let rows = s
+        .find_sessions_by_tmux_name(&p.session, p.host.as_deref())
+        .ok()?;
+    let [row] = rows.as_slice() else {
+        return None;
+    };
+    if row.lost_at.is_some() {
+        return None;
+    }
+    let since = |at: Option<i64>| at.is_some_and(|at| at > proposed_at);
+    if since(row.last_turn_at) || since(row.started_at) {
+        return Some(format!(
+            "{} finished a turn or was started again since this was proposed",
+            p.session
+        ));
+    }
+    let stuck = row.stuck_kind.as_deref().is_some_and(|k| !k.is_empty());
+    (row.claude_status.as_deref() == Some("working") && !stuck)
+        .then(|| format!("{} is working now", p.session))
 }
 
 /// PURE: what restoring session `id` came to. `restore_host_sessions`
@@ -279,6 +326,84 @@ mod tests {
             ..p
         };
         assert!(setting(&store, &p).is_err());
+    }
+
+    /// w15-3: a value that moved since the action was proposed is not
+    /// overwritten, and a pending proposal for another key is left alone.
+    #[test]
+    fn a_setting_that_moved_since_the_proposal_is_not_overwritten() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let mut open = SPECS
+            .iter()
+            .filter(|sp| sp.ai != AiPolicy::Never && sp.owned_by.is_none() && sp.default == "true");
+        let (one, two) = (open.next().unwrap(), open.next().unwrap());
+        let s = store.lock().unwrap();
+        let other =
+            crate::service::settings_review::propose(&s, two.key, "false", None, Actor::Agent("x"))
+                .unwrap();
+        settings::set(&s, one.key, "false").unwrap();
+        drop(s);
+        let p = SettingPayload {
+            action: "tune".into(),
+            key: one.key.into(),
+            value: "true".into(),
+            was: "maybe".into(),
+            why: String::new(),
+            body: String::new(),
+        };
+        let e = setting(&store, &p).unwrap_err();
+        assert!(e.contains("is now false"), "{e}");
+        let p = SettingPayload {
+            was: "false".into(),
+            ..p
+        };
+        setting(&store, &p).unwrap();
+        let s = store.lock().unwrap();
+        assert_eq!(
+            settings::effective_value(&s, one.key).as_deref(),
+            Some("true")
+        );
+        assert!(s
+            .pending_setting_proposals()
+            .unwrap()
+            .iter()
+            .any(|p| p.id == other.id));
+    }
+
+    /// w15-4: a recover approved after the session came back, or while it
+    /// works, is moot; a stuck one still recovers.
+    #[test]
+    fn a_recover_of_a_session_that_came_back_is_moot() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("mercury").unwrap();
+        let id = store
+            .upsert_session("api-fix", "mercury", None, None, 0, 0, "running", None)
+            .unwrap();
+        let set = |status: &str, stuck: Option<&str>, turn: Option<i64>| {
+            store
+                .conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_status = ?1, stuck_kind = ?2, last_turn_at = ?3 \
+                     WHERE id = ?4",
+                    rusqlite::params![status, stuck, turn, id],
+                )
+                .unwrap();
+        };
+        let p = RecoverPayload {
+            action: "recover".into(),
+            session: "api-fix".into(),
+            host: Some("mercury".into()),
+            why: String::new(),
+            body: String::new(),
+        };
+        set("working", Some("wedged"), Some(50));
+        assert_eq!(recover_moot(&store, &p, 100), None, "still stuck");
+        set("working", None, Some(50));
+        assert!(recover_moot(&store, &p, 100).unwrap().contains("working"));
+        set("idle", None, Some(150));
+        assert!(recover_moot(&store, &p, 100)
+            .unwrap()
+            .contains("finished a turn"));
     }
 
     #[test]

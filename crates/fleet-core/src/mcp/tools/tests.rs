@@ -9930,27 +9930,57 @@ async fn the_operator_never_passes_a_trusted_device_gate() {
         .unwrap_err();
     assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
 
-    // `agents`: a grant is refused, a run reaches the service (and fails
-    // there: there is no rule 99).
-    let agents = |action: &str| {
+    // `agents`: a grant is refused; a run reaches the service only for a
+    // rule of /debug's or /propose's definition (w15-5).
+    let rule = |definition: &str, scope: &str| {
+        t.store
+            .lock()
+            .unwrap()
+            .grant_agent_rule(&crate::store::NewAgentRule {
+                agent: "fleet".into(),
+                scope: scope.into(),
+                level: "act".into(),
+                host_alias: "box".into(),
+                project_id: None,
+                config: "{}".into(),
+                granted_by: "t".into(),
+                granted_at: 0,
+                expires_at: None,
+                definition: Some(definition.into()),
+                bindings: "[]".into(),
+            })
+            .unwrap()
+    };
+    let debug = rule("self-debug", "fleet:debug");
+    let other = rule("simplify", "fleet:simplify");
+    let agents = |action: &str, id: i64| {
         let t = t.clone();
         let op = op.clone();
         let args =
-            serde_json::from_value(serde_json::json!({ "action": action, "id": 99 })).unwrap();
+            serde_json::from_value(serde_json::json!({ "action": action, "id": id })).unwrap();
         async move { t.agents(Extension(op), Parameters(args)).await }
     };
-    let e = agents("revoke").await.unwrap_err();
+    let e = agents("revoke", debug).await.unwrap_err();
     assert!(
         e.message.starts_with("E_FORBIDDEN") && e.message.contains("trusts it"),
         "{}",
         e.message
     );
-    let e = agents("run").await.unwrap_err();
-    assert!(
-        !e.message.starts_with("E_FORBIDDEN"),
-        "the operator runs an existing rule: {}",
-        e.message
-    );
+    if let Err(e) = agents("run", debug).await {
+        assert!(
+            !e.message.starts_with("E_FORBIDDEN"),
+            "the operator runs /debug's rule: {}",
+            e.message
+        );
+    }
+    for id in [other, 99] {
+        let e = agents("run", id).await.unwrap_err();
+        assert!(
+            e.message.starts_with("E_FORBIDDEN") && e.message.contains("a person starts"),
+            "{}",
+            e.message
+        );
+    }
 }
 
 /// sec-access-3: a person's account ban change lands in the admin log.
@@ -21192,6 +21222,56 @@ async fn a_pane_the_reconcile_pass_rewrote_proves_nothing_next_request() {
 
 // ---- the behavioural half: sharing ----------------------------------------
 
+/// sec-access-5 (D3=b): Control may share the owner's session, but only a
+/// person's approval on a card lets it through; nothing is granted before.
+#[tokio::test]
+async fn the_operators_share_of_the_owners_session_waits_on_a_card() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    let owner = s.personal_owner_id().unwrap().expect("096 mints one");
+    assert_eq!(owner, OWNER_PERSON);
+    s.create_person("bob", None).unwrap();
+    let row = s
+        .upsert_session("a-dev", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.claim_if_unclaimed(row, Some(owner)).unwrap();
+    let t = guarded_tools(s, true);
+    let share = |nonce: Option<String>| {
+        t.session_share(
+            Extension(production_operator()),
+            Parameters(SessionShareParams {
+                session_id: row,
+                person: "bob".into(),
+                org: None,
+                level: "drive".into(),
+                confirm_nonce: nonce,
+            }),
+        )
+    };
+    let nonce = confirm_nonce_of(&share(None).await.unwrap_err());
+    let grants = || {
+        crate::service::sessions::session_access(&t.store.lock().unwrap(), row)
+            .unwrap()
+            .len()
+    };
+    assert_eq!(grants(), 0, "nothing shared before a person says so");
+    let card = t
+        .guards
+        .confirms
+        .pending()
+        .into_iter()
+        .find(|r| r.nonce == nonce)
+        .expect("a card");
+    assert!(
+        card.summary.contains("bob") && card.summary.contains("drive"),
+        "{}",
+        card.summary
+    );
+    assert!(t.guards.confirms.resolve(&nonce, true));
+    share(Some(nonce)).await.expect("approved");
+    assert_eq!(grants(), 1);
+}
+
 #[tokio::test]
 async fn sharing_is_the_owners_alone_and_a_grantee_cannot_share_on() {
     let f = shared_fixture();
@@ -21204,6 +21284,7 @@ async fn sharing_is_the_owners_alone_and_a_grantee_cannot_share_on() {
                 person,
                 org: None,
                 level,
+                confirm_nonce: None,
             }),
         )
     };
@@ -21241,6 +21322,7 @@ async fn an_ask_reaches_the_owner_alone_and_its_id_is_no_oracle() {
             person: "bob".into(),
             org: None,
             level: "watch".into(),
+            confirm_nonce: None,
         }),
     )
     .await
@@ -21263,6 +21345,7 @@ async fn an_ask_reaches_the_owner_alone_and_its_id_is_no_oracle() {
                 action: Some("grant".into()),
                 session_id: None,
                 id: Some(id),
+                confirm_nonce: None,
             }),
         )
     };
@@ -21295,6 +21378,7 @@ async fn a_level_outside_watch_and_drive_is_refused() {
                     person: "bob".into(),
                     org: None,
                     level: bad.into(),
+                    confirm_nonce: None,
                 }),
             )
             .await
@@ -21310,6 +21394,7 @@ async fn a_level_outside_watch_and_drive_is_refused() {
                 person: "bob".into(),
                 org: None,
                 level: "own".into(),
+                confirm_nonce: None,
             }),
         )
         .await
@@ -21337,6 +21422,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
             person: "bob".into(),
             org: None,
             level: "drive".into(),
+            confirm_nonce: None,
         }),
     )
     .await
@@ -21359,6 +21445,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
                 person: "carol".into(),
                 org: None,
                 level: "watch".into(),
+                confirm_nonce: None,
             }),
         )
         .await
@@ -21401,6 +21488,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
                 session_id: f.a_row,
                 person: "bob".into(),
                 org: None,
+                confirm_nonce: None,
             }),
         )
         .await
@@ -21427,6 +21515,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
                 person: "bob".into(),
                 org: None,
                 level: "drive".into(),
+                confirm_nonce: None,
             }),
         )
         .await
@@ -21440,6 +21529,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
             session_id: f.a_row,
             person: "bob".into(),
             org: None,
+            confirm_nonce: None,
         }),
     )
     .await
@@ -21470,6 +21560,7 @@ async fn my_grants_answers_the_callers_own_person_and_nobody_elses() {
             person: "bob".into(),
             org: None,
             level: "watch".into(),
+            confirm_nonce: None,
         }),
     )
     .await

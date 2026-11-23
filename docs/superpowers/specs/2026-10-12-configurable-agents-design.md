@@ -323,7 +323,9 @@ instances with `run.max_parallel`.
 
 An action turns the validated answer into one `agent_actions` row, queued the
 way the reviewer's and the support agent's are: kept at `watch`, waiting for a
-person at `propose`, run at `act` when `auto` is true.
+person at `propose`, run at `act` when `auto` is true. A `record` with `auto`
+runs at `propose` too: it writes only fleet's own store, so it is not a second
+Inbox card beside the proposal it remembers (w08-11).
 
 | `do` | payload | executor |
 |---|---|---|

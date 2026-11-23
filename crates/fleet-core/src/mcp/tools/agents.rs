@@ -5,6 +5,7 @@
 //! sees this tool. A write also needs a trusted full device.
 
 use super::*;
+use crate::ipc_error::lock;
 use crate::service::agents::admin::{self, AgentsArgs};
 
 #[tool_router(router = agents_router, vis = "pub(super)")]
@@ -47,6 +48,9 @@ impl FleetTools {
         );
         if !args.is_read() {
             agents_writer(&caller, &args.action)?;
+            if caller.is_operator() {
+                operator_may_run(&self.store, args.id)?;
+            }
         }
         let by = caller
             .client
@@ -86,6 +90,36 @@ impl FleetTools {
                 .map_err(to_mcp_err)?,
         )
     }
+}
+
+/// The definitions Control's `/debug` and `/propose` commands run
+/// (`operator.rs`): the only rules the operator may `run` (w15-5).
+pub(crate) const OPERATOR_RUNS: &[&str] = &["self-debug", "proposer"];
+
+/// The operator's `run` names a rule of one of [`OPERATOR_RUNS`]; any other
+/// (a manual agent at `act` with auto writes, a scheduled one) is a
+/// person's to start.
+fn operator_may_run(store: &Mutex<Store>, id: Option<i64>) -> Result<(), McpError> {
+    let def = match id {
+        Some(id) => lock(store)
+            .map_err(to_mcp_err)?
+            .agent_rule(id)
+            .map_err(|e| to_mcp_err(IpcError::from(e)))?
+            .and_then(|r| r.definition),
+        None => None,
+    };
+    if def.as_deref().is_some_and(|d| OPERATOR_RUNS.contains(&d)) {
+        return Ok(());
+    }
+    Err(mcp_err(
+        "E_FORBIDDEN",
+        format!(
+            "Control runs only the {} agents (/debug, /propose); a person starts any \
+             other rule, under Automation, Agents",
+            OPERATOR_RUNS.join(" and ")
+        ),
+        None,
+    ))
 }
 
 /// A rule lets an agent read and write outside fleet on its own, and an
