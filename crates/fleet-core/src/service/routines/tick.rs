@@ -32,6 +32,14 @@ use std::time::Duration;
 pub const TICK_EVERY: Duration = Duration::from_secs(20);
 /// A run whose session finished no turn in this long is failed.
 pub const RUN_STALE_SECS: i64 = 6 * 3600;
+/// Past this, a run is failed and its turn stopped even while its session
+/// reads `working` (review 23b w02-1): a Claude stuck in an API retry loop
+/// keeps its spinner moving, and the run would hold `overlap: skip` for good.
+pub const RUN_STALE_HARD_SECS: i64 = 24 * 3600;
+/// A `working` status counts only when a reconcile pass saw the session
+/// this recently: a host that went offline mid-turn keeps the row's last
+/// status, and its run must fail so `fallback_host` can take the next fire.
+pub const RUN_WORKING_FRESH_SECS: i64 = 600;
 
 /// How long a run's prompt may stay untyped before the run fails as
 /// undelivered. Typing gives up well inside it (90 s, plus 15 min for a
@@ -983,15 +991,16 @@ fn settle_run(
         // Retired with the run, as `undelivered` does: after it, so a
         // run that failed to close keeps them for the next pass.
         s.mark_handovers_delivered(&untyped, None)?;
-    } else if now - run.started_at > RUN_STALE_SECS && !session_working(&row) {
-        fail(
-            s,
-            run.id,
-            E_RUN_STALE,
-            "no turn finished in 6 hours",
-            cost,
-            now,
-        )?;
+    } else if now - run.started_at > RUN_STALE_SECS
+        && (now - run.started_at > RUN_STALE_HARD_SECS
+            || !session_working(&row, s.session_reconciled_at(sid)?, now))
+    {
+        let why = if now - run.started_at > RUN_STALE_HARD_SECS {
+            "it was still at its turn after 24 hours; its turn was stopped"
+        } else {
+            "no turn finished in 6 hours"
+        };
+        fail(s, run.id, E_RUN_STALE, why, cost, now)?;
         // w06-3: closed, the run no longer holds `overlap: skip` off its
         // checkout, so its session must not go on in it either.
         stop.push((row.host_alias.clone(), row.tmux_name.clone()));
@@ -1003,9 +1012,13 @@ fn settle_run(
 
 /// Whether `row`'s Claude reads as still at its turn: a run past
 /// [`RUN_STALE_SECS`] whose session is working stays open (w06-3), so the
-/// next fire's `overlap: skip` still sees it.
-fn session_working(row: &crate::store::SessionRow) -> bool {
-    row.claude_status.as_deref() == Some("working") && row.idle_since.is_none()
+/// next fire's `overlap: skip` still sees it. Only on a status a reconcile
+/// pass confirmed in the last [`RUN_WORKING_FRESH_SECS`] (`reconciled_at`):
+/// an unreachable host's rows keep their last status (review 23b w02-1).
+fn session_working(row: &crate::store::SessionRow, reconciled_at: Option<i64>, now: i64) -> bool {
+    row.claude_status.as_deref() == Some("working")
+        && row.idle_since.is_none()
+        && reconciled_at.is_some_and(|t| t > now - RUN_WORKING_FRESH_SECS)
 }
 
 /// Start each failed run of a `retry_once` routine again, once (G3.8): the

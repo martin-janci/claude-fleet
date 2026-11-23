@@ -70,20 +70,11 @@ pub fn prompt_block(items: &[RoutineSeenRow]) -> String {
     } else {
         // Whole lines, the last seen first, up to the list's size: the
         // fence would otherwise cut the list mid-line (w06-5).
-        let mut list = String::new();
-        let mut chars = 0;
-        for i in items {
-            let line = format!("{} | {}", i.item, i.state);
-            let add = line.chars().count() + usize::from(!list.is_empty());
-            if chars + add > LIST_MAX_CHARS {
-                break;
-            }
-            if !list.is_empty() {
-                list.push('\n');
-            }
-            list.push_str(&line);
-            chars += add;
-        }
+        let list = items[..lines_that_fit(items)]
+            .iter()
+            .map(line_of)
+            .collect::<Vec<_>>()
+            .join("\n");
         let fenced =
             crate::mcp::guard::fence_untrusted(&list, "routine seen items", LIST_MAX_CHARS);
         out.push_str(&format!(
@@ -100,6 +91,25 @@ pub fn prompt_block(items: &[RoutineSeenRow]) -> String {
          An empty block says there was nothing to look at."
     ));
     out
+}
+
+/// PURE: an item's line in the prompt's list.
+fn line_of(i: &RoutineSeenRow) -> String {
+    format!("{} | {}", i.item, i.state)
+}
+
+/// PURE: how many of `items`, from the first, fit the prompt's list
+/// ([`LIST_MAX_CHARS`]) as whole lines.
+pub fn lines_that_fit(items: &[RoutineSeenRow]) -> usize {
+    let mut chars = 0;
+    for (n, i) in items.iter().enumerate() {
+        let add = line_of(i).chars().count() + usize::from(n > 0);
+        if chars + add > LIST_MAX_CHARS {
+            return n;
+        }
+        chars += add;
+    }
+    items.len()
 }
 
 /// The block of a run of `r`'s prompt that lists what it was shown
@@ -247,6 +257,11 @@ pub fn apply(
         }
     }
     s.prune_routine_seen(r.id, now - KEEP_SECS, MAX_ITEMS)?;
+    // Keep only what the next prompt can show (review 23b w02-3): an item
+    // kept but cut from the list looks new to the next run, which reviews
+    // and reports it again, and its `Same` pushes others out in turn.
+    let fit = lines_that_fit(&s.routine_seen(r.id, SHOWN_MAX)?);
+    s.prune_routine_seen(r.id, i64::MIN, fit as i64)?;
     trace::write_one(
         s,
         run.id,
@@ -408,6 +423,12 @@ mod tests {
         let p = prompt_block(&many);
         assert!(p.contains(&format!("pr o/r#0 | {}", "x".repeat(STATE_MAX_CHARS))));
         assert!(!p.contains(&format!("pr o/r#{} |", SHOWN_MAX - 1)), "{p}");
+        // What the list shows is what a routine keeps (review 23b w02-3).
+        let fit = lines_that_fit(&many);
+        assert!(fit > 0 && fit < many.len(), "{fit}");
+        assert!(p.contains(&format!("pr o/r#{} |", fit - 1)), "{p}");
+        assert!(!p.contains(&format!("pr o/r#{} |", fit)), "{p}");
+        assert_eq!(lines_that_fit(&many[..3]), 3);
         let empty = prompt_block(&[]);
         assert!(empty.contains("None yet."), "{empty}");
         assert!(!empty.contains("Skip an item"), "{empty}");

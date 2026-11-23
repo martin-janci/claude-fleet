@@ -721,6 +721,18 @@ async fn a_stale_run_stays_open_while_its_session_works() {
             )
             .unwrap();
     };
+    // A reconcile pass saw it at `at` (review 23b w02-1: only a fresh
+    // `working` holds the run open).
+    let seen = |at: i64| {
+        lock(&f.store)
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET last_reconciled_at = ?1 WHERE id = ?2",
+                rusqlite::params![at, sid],
+            )
+            .unwrap();
+    };
     let state = || {
         lock(&f.store)
             .unwrap()
@@ -729,6 +741,7 @@ async fn a_stale_run_stays_open_while_its_session_works() {
             .unwrap()
     };
     status("working", None);
+    seen(OCT8 + RUN_STALE_SECS);
     tick_once(&f.deps, OCT8 + RUN_STALE_SECS + 1).await;
     assert_eq!(
         state().state,
@@ -747,6 +760,59 @@ async fn a_stale_run_stays_open_while_its_session_works() {
         1,
         "its turn is stopped"
     );
+}
+
+/// Review 23b w02-1: the w06-3 exemption is bounded. A `working` status no
+/// reconcile pass confirmed lately (the host went offline mid-turn) does not
+/// hold the run open, and past 24 hours nothing does.
+#[tokio::test]
+async fn a_stale_runs_working_session_holds_it_only_while_seen_and_never_past_a_day() {
+    use super::tick::{RUN_STALE_HARD_SECS, RUN_WORKING_FRESH_SECS};
+    for (seen_at, at) in [
+        // Last seen long ago: the host is gone, its status is old.
+        (
+            OCT8 + 60,
+            OCT8 + RUN_STALE_SECS + RUN_WORKING_FRESH_SECS + 120,
+        ),
+        // Seen a moment ago, but a whole day at one turn.
+        (OCT8 + RUN_STALE_HARD_SECS, OCT8 + RUN_STALE_HARD_SECS + 1),
+    ] {
+        let f = fx();
+        let r = new_routine(&f, input(&f));
+        let ana = person(&f.store, None, f.ana);
+        let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
+        let sid = run.session_id.unwrap();
+        {
+            let s = lock(&f.store).unwrap();
+            let ids: Vec<i64> = s
+                .undelivered_handovers(sid)
+                .unwrap()
+                .iter()
+                .map(|h| h.id)
+                .collect();
+            s.mark_handovers_delivered(&ids, None).unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
+                     last_reconciled_at = ?1 WHERE id = ?2",
+                    rusqlite::params![seen_at, sid],
+                )
+                .unwrap();
+        }
+        tick_once(&f.deps, at).await;
+        let failed = lock(&f.store)
+            .unwrap()
+            .get_routine_run(run.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.state, "failed", "seen {seen_at}, now {at}");
+        assert_eq!(failed.error_code.as_deref(), Some(fix::E_RUN_STALE));
+        assert_eq!(
+            f.fake.stopped.lock().unwrap().len(),
+            1,
+            "its turn is stopped"
+        );
+    }
 }
 
 /// w06-8: a finished run's session is closed after twelve hours idle, but
@@ -835,6 +901,68 @@ async fn a_finished_runs_idle_session_is_closed_unless_kept() {
         .list_session_events(sids[4].0, 50)
         .unwrap();
     assert!(events.iter().any(|e| e.kind == "gc_killed"), "{events:?}");
+}
+
+/// Review 23b w02-2: a failed run's session is closed too, after a day
+/// idle rather than twelve hours, so a routine whose runs keep failing does
+/// not leave a live Claude per run.
+#[tokio::test]
+async fn a_failed_runs_idle_session_is_closed_after_a_day() {
+    use super::tick::RUN_SESSION_IDLE_SECS;
+    use crate::store::FAILED_RUN_EXTRA_IDLE_SECS;
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    let mut sids = Vec::new();
+    for n in 0..4 {
+        let at = OCT8 + n * 600;
+        let run = run_now(&f.deps, &ana, r.id, at).await.unwrap();
+        let sid = run.session_id.unwrap();
+        let s = lock(&f.store).unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE routine_runs SET state = 'failed', finished_at = ?1, \
+                 error_code = 'E_RUN_TIME_CAP' WHERE id = ?2",
+                rusqlite::params![at + 300, run.id],
+            )
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'idle', idle_since = ?1, \
+                 last_activity_at = ?1 WHERE id = ?2",
+                rusqlite::params![at + 300, sid],
+            )
+            .unwrap();
+        sids.push(sid);
+    }
+    lock(&f.store)
+        .unwrap()
+        .conn_ref()
+        .execute("UPDATE hosts SET reachable = 1 WHERE alias = 'mac'", [])
+        .unwrap();
+    // Twelve hours idle closes a done run's session, not a failed one's.
+    tick_once(&f.deps, OCT8 + 300 + RUN_SESSION_IDLE_SECS + 60).await;
+    assert!(f.fake.closed.lock().unwrap().is_empty());
+    tick_once(
+        &f.deps,
+        OCT8 + 300 + RUN_SESSION_IDLE_SECS + FAILED_RUN_EXTRA_IDLE_SECS + 60,
+    )
+    .await;
+    let closed: Vec<String> = f
+        .fake
+        .closed
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, t)| t.clone())
+        .collect();
+    let name = lock(&f.store)
+        .unwrap()
+        .get_session_by_id(sids[0])
+        .unwrap()
+        .unwrap()
+        .tmux_name;
+    assert_eq!(closed, vec![name], "the oldest goes; the three newest stay");
 }
 
 #[tokio::test]
