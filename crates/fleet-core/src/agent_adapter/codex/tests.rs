@@ -429,7 +429,9 @@ fn the_rollout_lookup_finds_each_panes_newest_rollout_for_its_cwd() {
 
 /// Review w20-3: before a new Codex pane's first prompt, the newest rollout
 /// for its cwd belongs to an older conversation (a killed session's on the
-/// same worktree): one last written before the pane was created is not its.
+/// same worktree, or a `codex` the person keeps running there). One STARTED
+/// before the pane was created is not its, however recently it was written
+/// (review 23b w01-3); the scan goes on past it to the pane's own.
 #[cfg(unix)]
 #[test]
 fn a_rollout_older_than_the_pane_is_not_its_conversation() {
@@ -437,11 +439,11 @@ fn a_rollout_older_than_the_pane_is_not_its_conversation() {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let created = std::time::SystemTime::now()
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs()
-        - 60;
+        .as_secs() as i64;
+    let created = now - 60;
     // Every pane is `/work/dev-a`, created a minute ago.
     std::fs::write(
         bin.join("tmux"),
@@ -451,20 +453,30 @@ fn a_rollout_older_than_the_pane_is_not_its_conversation() {
     std::fs::set_permissions(bin.join("tmux"), std::fs::Permissions::from_mode(0o755)).unwrap();
     let day = dir.path().join("codex/sessions/2026/10/08");
     std::fs::create_dir_all(&day).unwrap();
-    let id = "01a11dac-0000-7000-8000-000000000001";
-    let f = day.join(format!("rollout-2026-10-08T22-40-00-{id}.jsonl"));
-    std::fs::write(
-        &f,
-        format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"/work/dev-a\"}}}}\n"),
-    )
-    .unwrap();
-    let age = |secs: u64| {
+    // The name carries the start in local time; the script runs under UTC.
+    let stamp = |secs: i64| {
+        jiff::Timestamp::from_second(secs)
+            .unwrap()
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .strftime("%Y-%m-%dT%H-%M-%S")
+            .to_string()
+    };
+    let write = |id: &str, started: i64, written_ago: u64| {
+        let f = day.join(format!("rollout-{}-{id}.jsonl", stamp(started)));
+        std::fs::write(
+            &f,
+            format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"/work/dev-a\"}}}}\n"),
+        )
+        .unwrap();
         std::fs::File::options()
             .write(true)
             .open(&f)
             .unwrap()
-            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(secs))
+            .set_modified(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(written_ago),
+            )
             .unwrap();
+        f
     };
     let run = || {
         let script = super::rollouts_script(&["dev-a"]).unwrap();
@@ -476,12 +488,20 @@ fn a_rollout_older_than_the_pane_is_not_its_conversation() {
                 format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
             )
             .env("CODEX_HOME", dir.path().join("codex"))
+            .env("TZ", "UTC")
             .output()
             .unwrap();
         super::parse_rollouts(&String::from_utf8_lossy(&out.stdout))
     };
-    age(300);
-    assert!(run().is_empty(), "an older conversation is not the pane's");
-    age(10);
-    assert_eq!(run()["dev-a"].id, id, "written since: the pane's own");
+    // The person's conversation: started an hour ago, written a second ago.
+    let theirs = "01a11dac-0000-7000-8000-000000000001";
+    write(theirs, now - 3600, 1);
+    assert!(
+        run().is_empty(),
+        "a conversation started before the pane is not its"
+    );
+    // The pane's own, started after it, written less recently than theirs.
+    let own = "01a11dac-0000-7000-8000-000000000002";
+    write(own, now - 30, 20);
+    assert_eq!(run()["dev-a"].id, own, "the scan goes past the older one");
 }

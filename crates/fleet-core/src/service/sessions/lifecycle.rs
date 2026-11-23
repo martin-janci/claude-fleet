@@ -1553,7 +1553,7 @@ pub(super) async fn new_session_inner(
             .as_deref()
             .filter(|a| *a != crate::store::AGENT_CLAUDE && !is_shell)
         {
-            s.set_session_agent(row.id, agent)?;
+            s.set_new_session_agent(row.id, agent)?;
         }
         finalize_new_session(
             &s,
