@@ -893,6 +893,58 @@ pub fn has_identity_beyond(s: &Store, person: i64, org: i64) -> Result<bool, Ipc
     Ok(devices || elsewhere)
 }
 
+/// Whether `me`, under fleet authority, may make a device belong to the
+/// person named `name` (`pair_device`, `set_device_person`). The operator
+/// (no person) and the hub's personal owner may name anybody. A fleet admin
+/// who is somebody else names themselves, a new name, or a person who has
+/// no identity yet: no device, no login, no membership, neither a fleet
+/// admin nor the owner. Anything more would be a device that IS that
+/// person, their private sessions included (review w07-1).
+pub fn require_may_hand_a_device_to(s: &Store, me: Me<'_>, name: &str) -> Result<(), IpcError> {
+    let Some(mine) = me.person else {
+        return Ok(());
+    };
+    if !matches!(me.authority, Authority::Fleet) {
+        return Ok(());
+    }
+    let owner = s.personal_owner_id()?;
+    if owner == Some(mine) {
+        return Ok(());
+    }
+    let Some(target) = s.get_person_by_name(name.trim())? else {
+        return Ok(());
+    };
+    if target.id == mine {
+        return Ok(());
+    }
+    let refuse = |why: &str| {
+        Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            format!(
+                "{:?} {why}: a device of theirs would read their private sessions. \
+                 The hub owner pairs it (or they pair it themselves)",
+                target.name
+            ),
+        ))
+    };
+    if owner == Some(target.id) {
+        return refuse("is the hub's owner");
+    }
+    if s.is_fleet_admin(target.id)? {
+        return refuse("is a fleet admin");
+    }
+    let has_device = s
+        .list_client_tokens(true)?
+        .iter()
+        .any(|c| c.person_id == Some(target.id));
+    let has_login = !s.list_identities(target.id)?.is_empty();
+    let member = s.memberships_of(target.id)?.iter().any(|m| m.is_live());
+    if has_device || has_login || member {
+        return refuse("already has a device, a login or an org");
+    }
+    Ok(())
+}
+
 /// A person named in `args` (`person_id`, else `person` by name). `create`:
 /// a new name becomes a person (an admin inviting a colleague).
 fn person_of(s: &Store, args: &OrgAdminArgs, create: bool) -> Result<i64, IpcError> {
@@ -1614,6 +1666,7 @@ fn run_action(
             {
                 Some(p) => {
                     let p = crate::store::validate_person_name(p)?;
+                    require_may_hand_a_device_to(s, me, &p)?;
                     Some(match s.get_person_by_name(&p)? {
                         Some(existing) => existing,
                         None => s.create_person(&p, None)?,

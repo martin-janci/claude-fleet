@@ -1640,6 +1640,14 @@ impl FleetTools {
                 Some(org)
             }
         };
+        // A fleet admin who is not the owner pairs for themselves or for
+        // somebody with no identity yet (review w07-1, decision a). An
+        // empty person is the caller (`mint_pairing`).
+        if let Some(person) = args.person.as_deref().filter(|p| !p.trim().is_empty()) {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            crate::service::org_admin::require_may_hand_a_device_to(&s, me, person)
+                .map_err(to_mcp_err)?;
+        }
         let name = args
             .device
             .clone()

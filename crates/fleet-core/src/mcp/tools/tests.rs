@@ -22335,6 +22335,88 @@ async fn pair_device_with_no_person_is_for_the_caller_not_the_owner() {
     assert_eq!(v["person"], owner_name.as_str(), "{v}");
 }
 
+/// Review w07-1, decision (a): a fleet admin who is not the hub's owner
+/// pairs or hands over a device only to themselves, a new name, or a person
+/// with no identity yet; never to the owner, another fleet admin, or
+/// somebody who already has a device. The owner's own device may.
+#[tokio::test]
+async fn a_non_owner_fleet_admin_hands_devices_only_to_people_with_no_identity() {
+    let (tools, _guards, store) = client_tools();
+    let (ada, _) = non_owner_fleet_admin(&store, "ada");
+    let (_bob, _) = non_owner_fleet_admin(&store, "bob");
+    let owner_name = {
+        let s = store.lock().unwrap();
+        let id = s.personal_owner_id().unwrap().unwrap();
+        // Dave already has a device; Erin exists with nothing yet.
+        let dave = s.create_person("dave", None).unwrap().id;
+        s.insert_client_token("dave-phone", "digest-dave", "full")
+            .unwrap();
+        s.set_client_person("dave-phone", Some(dave)).unwrap();
+        s.create_person("erin", None).unwrap();
+        s.insert_client_token("spare", "digest-spare", "full")
+            .unwrap();
+        s.get_person(id).unwrap().unwrap().name
+    };
+    let pair = |device: &str, person: &str| {
+        let mut a = org_admin_args("pair_device");
+        a.device = Some(device.into());
+        a.person = Some(person.into());
+        a
+    };
+    let code = |r: Result<CallToolResult, McpError>| -> String {
+        match r {
+            Ok(_) => "ok".into(),
+            Err(e) => e.data.as_ref().unwrap()["code"].as_str().unwrap().into(),
+        }
+    };
+    for (i, (who, want)) in [
+        (owner_name.as_str(), "E_FORBIDDEN"),
+        ("bob", "E_FORBIDDEN"),
+        ("dave", "E_FORBIDDEN"),
+        ("ada", "ok"),
+        ("erin", "ok"),
+        ("carol", "ok"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let got = code(
+            tools
+                .org_admin(
+                    Extension(ada.clone()),
+                    Parameters(pair(&format!("pair-{i}"), who)),
+                )
+                .await,
+        );
+        assert_eq!(got, want, "pair_device for {who}");
+    }
+    let hand = |person: &str| {
+        let mut a = org_admin_args("set_device_person");
+        a.device = Some("spare".into());
+        a.person = Some(person.into());
+        a
+    };
+    for (who, want) in [
+        (owner_name.as_str(), "E_FORBIDDEN"),
+        ("bob", "E_FORBIDDEN"),
+        ("dave", "E_FORBIDDEN"),
+        ("frank", "ok"),
+    ] {
+        let got = code(
+            tools
+                .org_admin(Extension(ada.clone()), Parameters(hand(who)))
+                .await,
+        );
+        assert_eq!(got, want, "set_device_person to {who}");
+    }
+    // The owner's own device names anybody.
+    let owner = trusted(client_caller("laptop", TokenMode::Full));
+    tools
+        .org_admin(Extension(owner), Parameters(pair("for-dave", "dave")))
+        .await
+        .expect("the owner pairs for anybody");
+}
+
 fn org_admin_args(action: &str) -> crate::service::org_admin::OrgAdminArgs {
     crate::service::org_admin::OrgAdminArgs::new(action)
 }
