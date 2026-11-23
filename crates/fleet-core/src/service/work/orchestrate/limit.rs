@@ -29,8 +29,23 @@ pub const SIGNED_OUT_EVENT: &str = "planner_signed_out";
 /// The planner's words on a mission: its runs, its waits, an answer after
 /// a wait and a refusal for signed-out logins. Only these are read, so a
 /// busy log never hides a wait.
+/// The mission event a planner ask that was made and then failed without an
+/// answer is (w05-2): the loop asks again after [`planner_retry_after`].
+pub const PLANNER_FAILED_EVENT: &str = "planner_failed";
+/// The first retry of a failed planner ask, doubled per failure in a row.
+const PLANNER_RETRY_SECS: i64 = 600;
+/// The longest a failed planner ask waits before the next try.
+const PLANNER_RETRY_MAX_SECS: i64 = 6 * 3600;
+
+/// How long the loop waits after `failures` failed planner asks in a row.
+pub fn planner_retry_after(failures: u32) -> i64 {
+    let doubled = PLANNER_RETRY_SECS.saturating_mul(1i64 << failures.saturating_sub(1).min(16));
+    doubled.min(PLANNER_RETRY_MAX_SECS)
+}
+
 const WORD_KINDS: &[&str] = &[
     "planned",
+    PLANNER_FAILED_EVENT,
     LIMIT_WAIT_EVENT,
     LIMIT_CLEARED_EVENT,
     SIGNED_OUT_EVENT,
@@ -264,6 +279,26 @@ impl Words {
     pub fn signed_out(&self) -> Option<String> {
         let e = self.0.first().filter(|e| e.kind == SIGNED_OUT_EVENT)?;
         Some(e.payload.as_ref()?.get("why")?.as_str()?.to_string())
+    }
+
+    /// When the planner's newest word is a failed ask: when it failed, and
+    /// how many asks in a row failed.
+    pub fn failed(&self) -> Option<(i64, u32)> {
+        let newest = self.0.first().filter(|e| e.kind == PLANNER_FAILED_EVENT)?;
+        let mut failures = 0u32;
+        let mut after_failure = false;
+        for e in &self.0 {
+            match e.kind.as_str() {
+                PLANNER_FAILED_EVENT => {
+                    failures += 1;
+                    after_failure = true;
+                }
+                // The ask a failure ended; one without a failure answered.
+                "planned" if after_failure => after_failure = false,
+                _ => break,
+            }
+        }
+        Some((newest.at, failures))
     }
 
     /// When the planner was last asked.

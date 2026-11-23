@@ -315,7 +315,7 @@ const SITES: &[Site] = &[
     },
     Site {
         file: "service/work/orchestrate/mod.rs",
-        signature: "pub async fn run_planner(",
+        signature: "async fn plan_once(",
         guards: &["limit::choose_in("],
     },
     Site {

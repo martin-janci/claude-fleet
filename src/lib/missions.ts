@@ -765,6 +765,9 @@ export function eventSentence(e: MissionEvent): string {
       // Every login the planner may use is signed out (review r10): the loop
       // asks again once one is signed in.
       return `The planner could not be asked: ${String(p.why ?? 'every login it may use is signed out')}`;
+    case 'planner_failed':
+      // The ask was made and got no answer (w05-2): the loop asks again later.
+      return `The planner gave no answer: ${String(p.why ?? '')}`;
     case 'card':
       return `Card ${String(p.card_id ?? '')} ${String(p.state ?? '')}`;
     case 'grant': {
@@ -1059,7 +1062,7 @@ export function plannerLimitWait(detail: Pick<MissionDetail, 'events' | 'limit_w
   }
   // `limit_cleared`: a later login of the same ask answered (review r8).
   // `planner_signed_out`: a later ask refused for signed-out logins (review r10).
-  const words = ['planned', 'limit_wait', 'limit_cleared', 'planner_signed_out'];
+  const words = ['planned', 'limit_wait', 'limit_cleared', 'planner_signed_out', 'planner_failed'];
   const last = (detail.events ?? []).find((e) => words.includes(e.kind));
   if (last?.kind !== 'limit_wait' || !last.payload) return null;
   const w = last.payload as unknown as LimitWait;
