@@ -62,7 +62,8 @@ Security -> Microphone. The microphone indicator turns off when you release.
 
 | Message | Meaning and fix |
 |---|---|
-| HTTP 409 | No claim for this session, or the microphone is busy. Switch 🎤 on for it (or off and on). |
+| HTTP 409 | No claim for this session. Switch 🎤 on for it (or off and on). |
+| HTTP 423 | This session is already recording (the last capture is still held). Try again in a moment. |
 | HTTP 403 "voice relay is off" | The relay is off. Turn on `voice.enabled`. |
 | HTTP 403 "only a host's recorder captures" | The bearer in `~/.claude/fleet-hook.headers` is not this host's own token (a person's or client's token was put there). Re-provision the host. |
 | HTTP 400 "bad tmux name" | The recorder's tmux session has a name fleet never gives a session (characters it refuses), so `claude` is running in a tmux session fleet does not manage. Use `/voice` in a fleet session. |

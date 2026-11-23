@@ -353,18 +353,8 @@ impl FleetTools {
                 // owner and the master read every author; anyone else the
                 // owner and themselves. A send still waiting is the owner's
                 // pending input, read at `drive` as `queued_prompts` is.
-                let me = caller_person(&s, &caller);
-                let owner = row.owner_person_id;
-                let sees_all = caller.is_master() || (me.is_some() && me == owner);
                 let drives = super::support::reaches_row(&s, &caller, &row, Reach::Drive)?;
-                let name_of = |id: Option<i64>| {
-                    id.and_then(|id| s.get_person(id).ok().flatten())
-                        .map(|p| p.display_name.unwrap_or(p.name))
-                };
-                let known: Vec<String> = [Some(author.clone()), name_of(me), name_of(owner)]
-                    .into_iter()
-                    .flatten()
-                    .collect();
+                let (me, owner, known, sees_all) = review_veil_basis(&s, &caller, &row, &author);
                 veil_review_notes(&mut rows, me, owner, &known, sees_all, drives);
                 ok_json(&rows)
             }
@@ -414,8 +404,8 @@ impl FleetTools {
                 let id = p
                     .note_id
                     .ok_or_else(|| mcp_err(codes::E_INVALID, "resolve needs note_id", None))?;
-                let out = lock(&self.store)
-                    .map_err(to_mcp_err)?
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                let out = s
                     .resolve_review_note(
                         row.id,
                         id,
@@ -431,7 +421,13 @@ impl FleetTools {
                             None,
                         )
                     })?;
-                ok_json(&out)
+                // The reply is the row `list` would show this caller: the
+                // same veil, or a resolve reads any co-grantee's name (w03-2).
+                // A resolve is a `drive` call, so nothing waiting is hidden.
+                let (me, owner, known, sees_all) = review_veil_basis(&s, &caller, &row, &author);
+                let mut rows = vec![out];
+                veil_review_notes(&mut rows, me, owner, &known, sees_all, true);
+                ok_json(&rows[0])
             }
             other => Err(mcp_err(
                 codes::E_INVALID,
@@ -1247,6 +1243,29 @@ pub(super) fn veil_authors<'a>(
 /// "name · device") reads the same. The bodies stay. Without `drives`, a
 /// send still `waiting` is left out: it is what the session is about to be
 /// typed, which `queued_prompts` keeps from a watcher.
+/// Who a review-note reader is, for [`veil_review_notes`]: their person,
+/// the session's owner, the names they may read, and whether they read
+/// every author (the owner and the master do).
+fn review_veil_basis(
+    s: &crate::store::Store,
+    caller: &Caller,
+    row: &crate::store::SessionRow,
+    author: &str,
+) -> (Option<i64>, Option<i64>, Vec<String>, bool) {
+    let me = caller_person(s, caller);
+    let owner = row.owner_person_id;
+    let sees_all = caller.is_master() || (me.is_some() && me == owner);
+    let name_of = |id: Option<i64>| {
+        id.and_then(|id| s.get_person(id).ok().flatten())
+            .map(|p| p.display_name.unwrap_or(p.name))
+    };
+    let known: Vec<String> = [Some(author.to_string()), name_of(me), name_of(owner)]
+        .into_iter()
+        .flatten()
+        .collect();
+    (me, owner, known, sees_all)
+}
+
 pub(super) fn veil_review_notes(
     rows: &mut Vec<crate::store::ReviewNoteRow>,
     me: Option<i64>,

@@ -157,6 +157,23 @@ describe('AutoContinueBar', () => {
     expect(screen.queryByTestId('auto-continue')).toBeNull();
   });
 
+  it('asks nothing while the window is hidden, and once when it shows (review w19-4)', async () => {
+    render(AutoContinueBar, { sessionId: 7, turnSeq: 4, edits: 0, onSend: vi.fn() });
+    await vi.advanceTimersByTimeAsync(0);
+    const vis = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    try {
+      const before = mocked.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(50_000);
+      expect(mocked.mock.calls.length).toBe(before);
+      vis.mockReturnValue('visible');
+      document.dispatchEvent(new Event('visibilitychange'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mocked.mock.calls.length).toBe(before + 1);
+    } finally {
+      vis.mockRestore();
+    }
+  });
+
   it('reads again 3 s after the card is due, so the bar clears', async () => {
     render(AutoContinueBar, { sessionId: 7, turnSeq: 4, edits: 0, onSend: vi.fn() });
     await vi.advanceTimersByTimeAsync(0);

@@ -958,6 +958,14 @@ fn the_gallery_is_the_seed_directory_and_every_entry_is_valid() {
         .collect();
     shipped.sort();
     assert_eq!(shipped, on_disk, "SEEDS lists the seed directory");
+    // And the catalog root's README names each one (review w20-6).
+    let readme = crate::repo_files::read("catalog-seed/README.md");
+    for name in &shipped {
+        assert!(
+            readme.contains(&format!("| `fleet-agents/{name}` |")),
+            "catalog-seed/README.md has no row for fleet-agents/{name}"
+        );
+    }
     for e in super::gallery::entries(|n| n == "proposer") {
         assert!(
             e.view.problems.is_empty(),

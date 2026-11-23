@@ -418,13 +418,15 @@ async fn a_blocking_source_start_does_not_stall_the_hub_and_its_failure_is_502()
 }
 
 #[tokio::test]
-async fn a_second_capture_of_the_session_is_409() {
+async fn a_second_capture_of_the_session_is_423() {
     let h = hub(true).await;
     registry().claim(h.session_id, "test", Arc::new(Pusher::new(9)));
     let mut first = get(h.addr, capture_path(), HOST_A).await;
     assert_eq!(first.status, 200);
     first.read_at_least(CHUNK).await;
-    assert_eq!(get(h.addr, capture_path(), HOST_A).await.status, 409);
+    // 423, not the 409 of "no claim": the stand-in tells them apart by the
+    // status alone (review w20-5).
+    assert_eq!(get(h.addr, capture_path(), HOST_A).await.status, 423);
 }
 
 #[tokio::test]

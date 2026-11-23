@@ -9831,6 +9831,56 @@ async fn the_operators_messages_and_review_notes_wait_for_a_person() {
     }
 }
 
+/// Review w03-2: a `resolve` answers the row `list` would show the caller,
+/// so a `drive` grantee who resolves a co-grantee's note does not read that
+/// person's name, device or id from the reply.
+#[tokio::test]
+async fn a_resolve_veils_a_co_grantees_note_as_list_does() {
+    let g = gate_fixture();
+    let (a_row, ada, bob) = (g.a_row, g.ada, g.bob);
+    let carol = g.store.create_person("carol", None).unwrap().id;
+    for who in [bob, carol] {
+        g.store
+            .grant_session(
+                a_row,
+                crate::store::GrantRecipient::Person(who),
+                crate::store::GRANT_DRIVE,
+                ada,
+            )
+            .unwrap();
+    }
+    let note = crate::store::NewReviewNote {
+        path: "a.rs".into(),
+        side: "new".into(),
+        body: "from carol".into(),
+        ..Default::default()
+    };
+    g.store
+        .insert_review_notes(a_row, "c", &[note], "Carol · pixel", Some(carol), 1)
+        .unwrap();
+    let id = g.store.review_notes(a_row).unwrap()[0].id;
+    let t = &test_tools(g.store);
+    let resolve = |who: i64| async move {
+        let p = serde_json::from_value::<ReviewNotesParams>(serde_json::json!({
+            "session_id": a_row, "action": "resolve", "note_id": id,
+        }))
+        .unwrap();
+        result_json(
+            &t.review_notes(Extension(device_of(who, ada)), Parameters(p))
+                .await
+                .expect("a drive grantee resolves"),
+        )
+    };
+    let bobs = resolve(bob).await;
+    assert_eq!(bobs["author"], "someone else", "{bobs}");
+    assert!(bobs["author_person_id"].is_null(), "{bobs}");
+    assert_eq!(bobs["body"], "from carol");
+    // The owner reads every author.
+    let adas = resolve(ada).await;
+    assert_eq!(adas["author"], "Carol · pixel", "{adas}");
+    assert_eq!(adas["author_person_id"], carol);
+}
+
 /// sec-access-1: the operator is bound to the owner, and the owner trusts
 /// their devices, yet the operator passes none of the trusted-device gates
 /// and its text is marked. `/debug` and `/propose` still run a rule.

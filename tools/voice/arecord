@@ -68,9 +68,13 @@ if [ -r "$ENV_FILE" ] && [ -r "$HEADERS" ]; then
       # The recording was cut part-way: it fails, never continues elsewhere.
       *) echo "arecord (claude-fleet): $reason" >&2; exit 1 ;;
     esac
+    # Only the status reaches here (--fail drops the body): 409 is "no
+    # claim", 423 "already recording"; 403 is either the relay being off or a
+    # token that is not this host's, so it names both.
     case "$reason" in
       *409*) reason="$reason — turn on 🎤 for this session in claude-fleet" ;;
-      *403*) reason="$reason — voice relay is off in claude-fleet settings" ;;
+      *423*) reason="$reason — this session is already recording; try again in a moment" ;;
+      *403*) reason="$reason — voice relay is off in claude-fleet settings, or this host needs provisioning again" ;;
     esac
   fi
 fi
