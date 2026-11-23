@@ -191,6 +191,25 @@ pub struct TicketPrefixRow {
 
 const SPACE_COLUMNS: &str = "id, scope, prefix, next_seq, former_prefixes";
 
+/// The scope a removed project's space is kept under (w05-3).
+const RETIRED_SCOPE: &str = "retired:";
+
+/// Detach a removed project's ticket space, inside the transaction that
+/// removes the project (w05-3). A project id is a reused rowid, so a space
+/// left on `project:<id>` would hand its prefix and counter to the next
+/// project that takes the id. The space is kept, under
+/// `retired:project:<id>:<space id>`, so its keys still resolve by prefix.
+pub(super) fn retire_project_ticket_space_in(
+    tx: &rusqlite::Connection,
+    project_id: i64,
+) -> rusqlite::Result<usize> {
+    tx.execute(
+        "UPDATE ticket_spaces SET scope = 'retired:' || scope || ':' || id \
+          WHERE scope = 'project:' || ?1",
+        rusqlite::params![project_id],
+    )
+}
+
 /// The ticket space a GitHub issue key draws on before any project claims
 /// its repository: `owner/repo#12` → `github:owner/repo`.
 fn github_scope(key: &str) -> Option<(String, String)> {
@@ -538,6 +557,13 @@ impl Store {
         }
         if let Some(repo) = scope.strip_prefix("github:") {
             return Ok((format!("GitHub {repo}"), None));
+        }
+        if let Some(id) = scope
+            .strip_prefix(RETIRED_SCOPE)
+            .and_then(|s| s.strip_prefix("project:"))
+            .and_then(|s| s.split(':').next())
+        {
+            return Ok((format!("project {id} (removed)"), None));
         }
         if let Some(id) = scope
             .strip_prefix("tracker:")

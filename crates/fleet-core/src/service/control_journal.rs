@@ -586,7 +586,9 @@ pub fn maybe_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) {
     }
     let store = Arc::clone(store);
     let ssh = Arc::clone(ssh);
-    crate::rt::spawn(async move {
+    // `kick`, not a raw spawn (w17-3): a panic in the pass is reported as
+    // this loop's error rather than leaving its health on its last "ok".
+    crate::service::loops::kick("control_journal", None, async move {
         let _flight = crate::rt::ClearOnDrop::of_static(&RUNNING);
         let exec = RealJournalExec {
             store: Arc::clone(&store),

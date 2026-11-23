@@ -260,6 +260,24 @@ impl Store {
         Ok(changed)
     }
 
+    /// Let go of the opener of every PR these sessions opened, in the
+    /// transaction that deletes their rows (w05-2). `session_id` has no FK
+    /// and a session id is reused once its row is gone, so a PR would
+    /// otherwise put its events on, and fire the routines of, whichever
+    /// session takes the id next. `session_name` stays as the snapshot, and
+    /// the next session seen on the PR becomes its opener.
+    pub(crate) fn release_pr_openers_in(
+        tx: &rusqlite::Connection,
+        session_ids: &[i64],
+    ) -> Result<()> {
+        let mut stmt =
+            tx.prepare_cached("UPDATE pull_requests SET session_id = NULL WHERE session_id = ?1")?;
+        for id in session_ids {
+            stmt.execute([id])?;
+        }
+        Ok(())
+    }
+
     /// Write [`pr_events`] of one change on the timeline of the session that
     /// opened the PR, or of the session that saw it when the opener's row
     /// is gone. Quiet: no bus frame, a routine's tick reads them.
@@ -438,6 +456,62 @@ mod tests {
         assert_eq!(r.ci_status.as_deref(), Some("passing"));
         assert_eq!((r.first_seen_at, r.updated_at), (100, 200));
         assert_eq!(r.merged_at, None);
+    }
+
+    /// w05-2: a deleted opener lets go of its PR, so a session that reuses
+    /// its id gets none of the PR's events; the next one seen on it does.
+    #[test]
+    fn a_deleted_opener_lets_go_of_its_pr() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("trn", None).unwrap();
+        let ana = s
+            .upsert_session("ana", "trn", None, None, 1, 1, "running", None)
+            .unwrap();
+        Store::upsert_pull_request_in_tx(
+            &s.conn,
+            URL,
+            None,
+            Some(&ev("OPEN")),
+            by(ana, "ana"),
+            100,
+        )
+        .unwrap();
+        s.delete_session(ana).unwrap();
+        let row = s.pull_request_by_url(URL).unwrap().unwrap();
+        assert_eq!(row.session_id, None);
+        assert_eq!(row.session_name.as_deref(), Some("ana"), "the name stays");
+        // Bob's session takes the id; Ana resumes in another one.
+        let bob = s
+            .upsert_session("bob", "trn", None, None, 1, 1, "running", None)
+            .unwrap();
+        assert_eq!(bob, ana, "the id is reused");
+        let resumed = s
+            .upsert_session("ana-2", "trn", None, None, 1, 1, "running", None)
+            .unwrap();
+        Store::upsert_pull_request_in_tx(
+            &s.conn,
+            URL,
+            Some("failing"),
+            Some(&ev("OPEN")),
+            by(resumed, "ana-2"),
+            200,
+        )
+        .unwrap();
+        assert_eq!(
+            s.pull_request_by_url(URL).unwrap().unwrap().session_id,
+            Some(resumed)
+        );
+        let on = |sid: i64| -> i64 {
+            s.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM session_events WHERE session_id = ?1 AND kind LIKE 'pr_%'",
+                    [sid],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(on(bob), 0, "nothing lands on the reused id");
+        assert!(on(resumed) > 0);
     }
 
     #[test]

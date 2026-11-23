@@ -391,6 +391,41 @@ mod tests {
         );
     }
 
+    /// w17-3: a detached pass that reports its loop's health goes through
+    /// [`kick`] (or catches its own panic), never a raw `rt::spawn`: a
+    /// panic there would unwind past its `report` and leave the loop on its
+    /// last "ok".
+    #[test]
+    fn a_reporting_pass_is_never_a_raw_spawn() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(
+            &crate::repo_files::path("crates/fleet-core/src/service"),
+            &mut files,
+        );
+        let mut raw = Vec::new();
+        for f in files {
+            let text = std::fs::read_to_string(&f).unwrap();
+            for (at, _) in text.match_indices("crate::rt::spawn(async move {") {
+                let body: String = text[at..].lines().take(40).collect::<Vec<_>>().join("\n");
+                let body = body.split("\n    });").next().unwrap_or(&body);
+                if body.contains("loops::report(") && !body.contains("caught") {
+                    raw.push(format!("{}", f.display()));
+                }
+            }
+        }
+        assert!(raw.is_empty(), "use loops::kick for these passes: {raw:?}");
+    }
+
     #[test]
     fn a_paused_pass_is_not_a_run() {
         let reg = Registry::new();

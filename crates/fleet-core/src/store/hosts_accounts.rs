@@ -8,6 +8,29 @@ use crate::ipc_error::codes;
 /// stored value. See `Store::upsert_account`.
 const LAST_SEEN_MATERIAL_DELTA_SECS: i64 = 600;
 
+/// The host-keyed tables `merge_host_alias` carries over (`host_alias`,
+/// and the other columns it copies). `delete_host` must remove each one
+/// (w05-4): `delete_host_covers_what_a_merge_moves` holds the two together.
+const HOST_MERGE_TABLES: &[(&str, &str)] = &[
+    (
+        "worktree_parent_fingerprints",
+        "wt_path, parent_fp, recorded_at",
+    ),
+    ("dismissed_agents", "claude_session_id, dismissed_at"),
+    (
+        "host_layers",
+        "catalog_id, layer_name, axis, position, active",
+    ),
+    ("host_catalogs", "catalog_id, admitted_at"),
+    ("catalog_secrets_host", "name, value, updated_at"),
+];
+
+/// The host-keyed tables no FK clears that `delete_host` deletes in one
+/// sweep (w05-4); `worktree_parent_fingerprints` and `host_layers` it
+/// deletes by name, before the hosts row.
+const HOST_KEYED_LEFTOVERS: &[&str] =
+    &["catalog_secrets_host", "dismissed_agents", "host_catalogs"];
+
 /// How often a host's `last_hook_at` is rewritten: a hook within this many
 /// seconds of the stored stamp leaves it alone. Its reader, the health
 /// check's `hooks_silent`, works in hours; minute freshness is plenty.
@@ -129,7 +152,7 @@ impl Store {
     /// Re-read `alias` after a write and announce it through `emit`
     /// (`EventBus::host_added` or `EventBus::host_probed`); nothing when the
     /// row is gone.
-    fn emit_host(
+    pub(super) fn emit_host(
         &self,
         alias: &str,
         emit: fn(&dyn EventBus, &HostRow),
@@ -501,9 +524,11 @@ impl Store {
 
     /// What will start a session under the login profile `profile` on
     /// `host` later, by name (review w03-4): routines, start rules that are
-    /// not dismissed, and live mission grants whose hosts include it (or
-    /// name none). Each as "routine <name>", "start rule <pattern>",
-    /// "mission <name>".
+    /// not dismissed, enabled placement rules (`work_rules`), and live
+    /// mission grants whose hosts include it (or name none). A rule counts
+    /// when it names the host, names none (it lands wherever the task's
+    /// host is), or falls back to it (w01-4). Each as "routine <name>",
+    /// "start rule <pattern>", "placement rule <name>", "mission <name>".
     pub fn login_profile_named_by(
         &self,
         host: &str,
@@ -515,7 +540,12 @@ impl Store {
               WHERE host_alias = ?1 AND profile = ?2 \
              UNION ALL \
              SELECT 'start rule ' || pattern FROM start_rules \
-              WHERE host_alias = ?1 AND profile = ?2 AND state <> 'dismissed' \
+              WHERE (host_alias = ?1 OR host_alias IS NULL OR fallback_host = ?1) \
+                AND profile = ?2 AND state <> 'dismissed' \
+             UNION ALL \
+             SELECT 'placement rule ' || name FROM work_rules \
+              WHERE enabled = 1 AND profile = ?2 \
+                AND (host_alias = ?1 OR host_alias IS NULL) \
              UNION ALL \
              SELECT 'mission ' || p.name FROM orchestration_grants g \
                JOIN orchestration_projects p ON p.id = g.orchestration_project_id \
@@ -685,7 +715,9 @@ impl Store {
     /// session row (`sessions.account_uuid` references the account). A
     /// session row keeps its account until reconcile drops the row; a later
     /// sweep takes the account then. Returns the uuids deleted, ascending.
-    /// No row event: the frontend drops them on the reply.
+    /// Each is announced as `account:removed` (w06-5): the reply reaches
+    /// only the client that asked, and every other one would keep listing
+    /// it until a restart.
     pub fn delete_unused_synthetic_accounts(
         &self,
         prefixes: &[&str],
@@ -723,6 +755,7 @@ impl Store {
             }
             self.conn
                 .execute("DELETE FROM accounts WHERE uuid = ?1", [&uuid])?;
+            self.bus.account_removed(&uuid);
             gone.push(uuid);
         }
         Ok(gone)
@@ -897,7 +930,10 @@ impl Store {
                 rusqlite::params![alias],
             )?;
         }
-        Ok(())
+        // The row's `provisioned`, `provisioned_at` and `provision_stale`
+        // moved: every client must learn it (w06-1). A probe cannot, as it
+        // diffs against the row this write already changed.
+        self.emit_host(alias, |bus, row| bus.host_probed(row))
     }
 
     /// Record how the last provisioning went, beyond "it ran".
@@ -933,10 +969,16 @@ impl Store {
                 rusqlite::params![alias],
             )?;
         }
-        self.conn.execute(
-            "UPDATE hosts SET provision_warning=?1 WHERE alias=?2",
-            rusqlite::params![warning, alias],
+        let n = self.conn.execute(
+            "UPDATE hosts SET provision_warning=?1 WHERE alias=?2 \
+               AND (provision_warning IS NOT ?1 OR ?3)",
+            rusqlite::params![warning, alias, owed_retry],
         )?;
+        // `provision_warning` (and with a retry owed, `provision_stale`) is
+        // on the row: announce it (w06-1).
+        if n > 0 {
+            self.emit_host(alias, |bus, row| bus.host_probed(row))?;
+        }
         Ok(())
     }
 
@@ -988,19 +1030,7 @@ impl Store {
             rusqlite::params![from, into],
         )?;
         tx.execute("DELETE FROM worktrees WHERE host_alias = ?1", [from])?;
-        for (table, cols) in [
-            (
-                "worktree_parent_fingerprints",
-                "wt_path, parent_fp, recorded_at",
-            ),
-            ("dismissed_agents", "claude_session_id, dismissed_at"),
-            (
-                "host_layers",
-                "catalog_id, layer_name, axis, position, active",
-            ),
-            ("host_catalogs", "catalog_id, admitted_at"),
-            ("catalog_secrets_host", "name, value, updated_at"),
-        ] {
+        for (table, cols) in HOST_MERGE_TABLES {
             tx.execute(
                 &format!(
                     "INSERT OR IGNORE INTO {table} (host_alias, {cols}) \
@@ -1065,6 +1095,7 @@ impl Store {
                  WHERE session_id = ?2 AND retired_at IS NULL",
                 rusqlite::params![now_unix(), id],
             )?;
+            Store::release_pr_openers_in(&tx, &[*id])?;
             tx.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
         }
         let moved: Vec<i64> = {
@@ -1179,6 +1210,12 @@ impl Store {
                 AND retired_at IS NULL",
             rusqlite::params![now_unix(), alias],
         )?;
+        // w05-2: no FK on pull_requests.session_id, and the ids are reused.
+        tx.execute(
+            "UPDATE pull_requests SET session_id = NULL \
+              WHERE session_id IN (SELECT id FROM sessions WHERE host_alias=?1)",
+            rusqlite::params![alias],
+        )?;
         tx.execute(
             "DELETE FROM sessions WHERE host_alias=?1",
             rusqlite::params![alias],
@@ -1243,11 +1280,42 @@ impl Store {
                updated_at = ?3 WHERE host_alias = ?1 AND enabled = 1",
             rusqlite::params![alias, super::routines::PAUSED_HOST_REMOVED, now_unix()],
         )?;
+        // What `merge_host_alias` carries over by alias and no FK removes
+        // (w05-4): a host added again under this alias must not inherit the
+        // old machine's per-host secrets, environment or dismissals
+        // (`host_catalogs` and `host_layers` go by FK / above). Held to
+        // `merge_host_alias`'s list by `delete_host_covers_what_a_merge_moves`.
+        for table in HOST_KEYED_LEFTOVERS {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE host_alias = ?1"),
+                rusqlite::params![alias],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM env_vars WHERE scope = 'host' AND scope_key = ?1",
+            rusqlite::params![alias],
+        )?;
+        // A local workspace synced from it stops (its files stay): the sync
+        // would keep reaching the alias, which may name another machine.
+        let paused_workspaces: Vec<i64> = {
+            let mut stmt = tx.prepare(
+                "UPDATE local_workspaces SET paused = 1, state = 'paused' \
+                  WHERE host_alias = ?1 AND paused = 0 RETURNING id",
+            )?;
+            let ids = stmt
+                .query_map(rusqlite::params![alias], |r| r.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            ids
+        };
         tx.commit()?;
         for killed in orphan_killed {
             self.bus.session_killed(killed);
         }
         self.emit_sessions_updated(&cleared);
+        for id in paused_workspaces {
+            self.bus
+                .emit(&crate::events::RowChange::LocalWorkspaceChanged(id));
+        }
         self.bus.host_removed(alias);
         Ok(())
     }
@@ -2820,5 +2888,175 @@ mod tests {
             .execute("UPDATE hosts SET harnesses='not json' WHERE alias='h'", [])
             .unwrap();
         assert_eq!(s.get_host_row("h").unwrap().unwrap().harnesses, None);
+    }
+
+    /// w01-4: a start rule that names no host or falls back to this one,
+    /// and an enabled placement rule, still start sessions under the
+    /// profile here; a dismissed rule, a disabled one, or one for another
+    /// host does not.
+    #[test]
+    fn rules_that_can_land_here_name_the_profile() {
+        let s = Store::open_in_memory().unwrap();
+        let p = s.upsert_project("acme", "web", "/src").unwrap();
+        for (pattern, host, fallback, state) in [
+            ("anywhere", None, None, "active"),
+            ("falls-back", Some("venus"), Some("mercury"), "active"),
+            ("elsewhere", Some("venus"), None, "active"),
+            ("dismissed", None, None, "dismissed"),
+        ] {
+            s.conn
+                .execute(
+                    "INSERT INTO start_rules (pattern, project_id, host_alias, fallback_host, \
+                       profile, state, created_at, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, 'ci', ?5, 0, 0)",
+                    rusqlite::params![pattern, p, host, fallback, state],
+                )
+                .unwrap();
+        }
+        for (name, host, enabled) in [
+            ("placed", Some("mercury"), 1),
+            ("any-host", None, 1),
+            ("off", Some("mercury"), 0),
+            ("other", Some("venus"), 1),
+        ] {
+            s.conn
+                .execute(
+                    "INSERT INTO work_rules (name, enabled, repo, group_label, host_alias, \
+                       profile, created_at, updated_at) \
+                     VALUES (?1, ?2, 'acme/web', 'g', ?3, 'ci', 0, 0)",
+                    rusqlite::params![name, enabled, host],
+                )
+                .unwrap();
+        }
+        let mut uses = s.login_profile_named_by("mercury", "ci", 0).unwrap();
+        uses.sort();
+        assert_eq!(
+            uses,
+            vec![
+                "placement rule any-host",
+                "placement rule placed",
+                "start rule anywhere",
+                "start rule falls-back",
+            ]
+        );
+        assert!(s
+            .login_profile_named_by("mercury", "work", 0)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// w05-4: what a merge carries over by alias, a removal deletes, so a
+    /// host added again under the alias inherits none of it.
+    #[test]
+    fn delete_host_covers_what_a_merge_moves() {
+        for (table, _) in HOST_MERGE_TABLES {
+            assert!(
+                HOST_KEYED_LEFTOVERS.contains(table)
+                    || ["worktree_parent_fingerprints", "host_layers"].contains(table),
+                "{table} is merged by alias but delete_host leaves it behind"
+            );
+        }
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("laptop", None).unwrap();
+        let c = s.conn_for_test();
+        c.execute(
+            "INSERT INTO catalog_secrets_host (host_alias, name, value, updated_at) \
+             VALUES ('laptop', 'GH_TOKEN', 'old', 1)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO env_vars (scope, scope_key, name, value, secret, updated_at) \
+             VALUES ('host', 'laptop', 'AWS_PROFILE', 'prod', 0, 1)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO dismissed_agents (host_alias, claude_session_id, dismissed_at) \
+             VALUES ('laptop', 'c1', 1)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO local_workspaces (host_alias, owner, repo, worktree_key, remote_path, \
+               local_path, created_at) VALUES ('laptop', 'o', 'r', 'main', '/r', '/l', 1)",
+            [],
+        )
+        .unwrap();
+        s.delete_host("laptop").unwrap();
+        s.insert_host("laptop", None).unwrap();
+        let count = |sql: &str| -> i64 { c.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("SELECT COUNT(*) FROM catalog_secrets_host"), 0);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM env_vars WHERE scope = 'host'"),
+            0
+        );
+        assert_eq!(count("SELECT COUNT(*) FROM dismissed_agents"), 0);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM local_workspaces WHERE paused = 1 AND state = 'paused'"),
+            1,
+            "the workspace link stops and stays"
+        );
+    }
+
+    /// w06-1: provisioning announces the host, so a client drops its
+    /// "provisioned with an older fleet" mark and shows the warning.
+    #[test]
+    fn provisioning_announces_the_host() {
+        let bus = std::sync::Arc::new(crate::events::BroadcastEventBus::new(64));
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        s.insert_host("h", None).unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE hosts SET provisioned = 1, provision_fingerprint = 'old' WHERE alias = 'h'",
+                [],
+            )
+            .unwrap();
+        assert!(s.get_host_row("h").unwrap().unwrap().provision_stale);
+        let mut rx = bus.subscribe();
+        let mut probed = || {
+            let mut out = Vec::new();
+            while let Ok(m) = rx.try_recv() {
+                if m.name == "host:probed" && m.payload["alias"] == "h" {
+                    out.push(m.payload.clone());
+                }
+            }
+            out
+        };
+        s.set_host_provisioned("h", true).unwrap();
+        let frames = probed();
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(frames[0]["provision_stale"], false);
+        s.record_host_provision_outcome("h", Some("ag missing"), true)
+            .unwrap();
+        let frames = probed();
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(frames[0]["provision_warning"], "ag missing");
+        assert_eq!(frames[0]["provision_stale"], true);
+        // The same clean outcome twice announces once.
+        s.record_host_provision_outcome("h", None, false).unwrap();
+        s.record_host_provision_outcome("h", None, false).unwrap();
+        assert_eq!(probed().len(), 1);
+    }
+
+    /// w06-5: a deleted made-up account is announced, so every client (not
+    /// only the one whose call removed it) drops it.
+    #[test]
+    fn a_deleted_synthetic_account_is_announced() {
+        let bus = Arc::new(crate::events::RecordingEventBus::new());
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        for uuid in ["setuptoken-1", "real-1"] {
+            s.upsert_account(&AccountRow {
+                uuid: uuid.into(),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        bus.take();
+        let gone = s
+            .delete_unused_synthetic_accounts(&["setuptoken-"])
+            .unwrap();
+        assert_eq!(gone, vec!["setuptoken-1".to_string()]);
+        assert_eq!(bus.take(), vec!["account:removed:setuptoken-1".to_string()]);
     }
 }

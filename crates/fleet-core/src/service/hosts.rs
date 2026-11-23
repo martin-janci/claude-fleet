@@ -545,14 +545,30 @@ pub async fn remove_host_with(
         None
     };
     let login_profiles = if args.delete_login_profiles && args.alias != "local" {
-        let names: Vec<String> = row
-            .claude_profiles
-            .iter()
-            .flatten()
-            .map(|p| p.name.clone())
-            .collect();
+        // A profile a live session still runs under stays: removing it
+        // would sign that session out mid-turn, as `remove` refuses to
+        // (w01-5). It is named in `error`, the rest go.
+        let mut names: Vec<String> = Vec::new();
+        let mut in_use: Vec<String> = Vec::new();
+        {
+            let s = lock(store)?;
+            for p in row.claude_profiles.iter().flatten() {
+                let live =
+                    crate::service::add_account::live_sessions_under(&s, &args.alias, &p.name)?;
+                if live.is_empty() {
+                    names.push(p.name.clone());
+                } else {
+                    in_use.push(format!("{}: in use by {}", p.name, live.join(", ")));
+                }
+            }
+        }
         let (removed, error) =
             crate::service::add_account::remove_login_profiles(tmux, &names).await;
+        let error = match (in_use.is_empty(), error) {
+            (true, error) => error,
+            (false, None) => Some(in_use.join("; ")),
+            (false, Some(e)) => Some(format!("{}; {e}", in_use.join("; "))),
+        };
         Some(LoginProfilesCleanup { removed, error })
     } else {
         None
@@ -600,7 +616,17 @@ pub fn merge_host(
             "local is this machine; merge it only on a hub with hub.local_host=false",
         ));
     }
-    let report = lock(store)?.merge_host_alias(&args.from, &args.into)?;
+    let report = {
+        let s = lock(store)?;
+        // The merge can move `into`'s own sessions to another org (from's
+        // org and rules become into's): announce them as the org tool does,
+        // a new generation first so a scoped stream re-reads (w06-3).
+        let before = s.session_orgs()?;
+        let report = s.merge_host_alias(&args.from, &args.into)?;
+        crate::service::orgs::bump_org_generation();
+        s.announce_org_moves(&before)?;
+        report
+    };
     // `from` is deleted: its tunnel goes with it, as `remove_host`'s does.
     tunnels.stop(&args.from);
     Ok(report)
@@ -2428,6 +2454,49 @@ mod tests {
         assert!(!tunnels.health().contains_key("gone"));
     }
 
+    /// w06-3: a merge that gives `into` the org of `from` moves into's own
+    /// sessions to that org; they are announced, with a new org generation.
+    #[tokio::test]
+    async fn a_merge_announces_into_s_sessions_that_changed_org() {
+        let tunnels = TunnelSupervisor::with_spawner(
+            Arc::new(|_argv| Box::pin(std::future::pending())),
+            Duration::from_secs(3600),
+        );
+        let bus = Arc::new(crate::events::RecordingEventBus::new());
+        let store = Mutex::new(Store::open_with_bus_in_memory(bus.clone()).unwrap());
+        let sid = {
+            let s = store.lock().unwrap();
+            s.upsert_host("mac").unwrap();
+            s.upsert_host("mac-old").unwrap();
+            let acme = s.add_org("Acme", None, false).unwrap();
+            s.set_host_org("mac-old", Some(acme.id)).unwrap();
+            s.upsert_session("dev", "mac", None, None, 1, 1, "running", None)
+                .unwrap()
+        };
+        let generation = crate::service::orgs::org_generation();
+        bus.take();
+        merge_host(
+            MergeHostArgs {
+                from: "mac-old".into(),
+                into: "mac".into(),
+                confirm_nonce: None,
+            },
+            &store,
+            &tunnels,
+        )
+        .unwrap();
+        assert!(crate::service::orgs::org_generation() > generation);
+        let seen = bus.take();
+        assert!(seen.contains(&format!("session:updated:{sid}")), "{seen:?}");
+        let row = store
+            .lock()
+            .unwrap()
+            .get_session_by_id(sid)
+            .unwrap()
+            .unwrap();
+        assert!(row.org_id.is_some());
+    }
+
     /// Review w11-7 (b): Remove host may also delete fleet's token and key
     /// files there, best effort: a host that does not answer is removed all
     /// the same and the result says so. The made-up accounts its logins
@@ -2592,5 +2661,69 @@ mod tests {
             "{scripts:?}"
         );
         assert!(store.lock().unwrap().get_host_row("mac").unwrap().is_none());
+    }
+
+    /// w01-5: a profile a live session still runs under is not removed with
+    /// the host (Remove login refuses it the same way); it is named in the
+    /// report and the rest go.
+    #[tokio::test]
+    async fn remove_host_keeps_a_login_profile_a_live_session_uses() {
+        use crate::ssh_fake::{FakeSsh, Match, Reply};
+        let tunnels = TunnelSupervisor::with_spawner(
+            Arc::new(|_argv| Box::pin(std::future::pending())),
+            Duration::from_secs(3600),
+        );
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("mac").unwrap();
+            let p = |name: &str| crate::store::HostProfileRow {
+                name: name.into(),
+                account_uuid: None,
+                email: None,
+                credential: None,
+            };
+            s.set_host_profiles("mac", &[p("work"), p("ci")]).unwrap();
+            let id = s
+                .upsert_session("dev-1", "mac", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.set_session_profile(id, Some("work")).unwrap();
+        }
+        let ssh = Arc::new(FakeSsh::new());
+        ssh.on_host(
+            "mac",
+            Match::script_contains(".claude-profiles/"),
+            Reply::ok("__fleet_ok__\n"),
+        );
+        let tmux = crate::tmux::RemoteTmux {
+            client: Arc::clone(&ssh),
+            host: "mac".into(),
+        };
+        let out = remove_host_with(
+            RemoveHostArgs {
+                alias: "mac".into(),
+                delete_credentials: false,
+                delete_login_profiles: true,
+            },
+            &store,
+            &tunnels,
+            &tmux,
+        )
+        .await
+        .unwrap();
+        let c = out.login_profiles.expect("reported");
+        assert_eq!(c.removed, vec!["ci".to_string()]);
+        assert_eq!(c.error.as_deref(), Some("work: in use by dev-1"));
+        let scripts: Vec<String> = ssh
+            .calls_for("mac")
+            .iter()
+            .filter_map(|c| c.script())
+            .collect();
+        assert!(
+            !scripts
+                .iter()
+                .any(|s| s.contains(".claude-profiles/\"'work'")),
+            "{scripts:?}"
+        );
     }
 }

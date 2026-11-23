@@ -393,6 +393,32 @@ fn org_admin_crud_refusals_and_row_announcements() {
         },
     )
     .unwrap();
+    // w05-5: an org that owns a catalog is refused in words, not with the
+    // foreign key's raw error at the end.
+    st.lock()
+        .unwrap()
+        .conn_for_test()
+        .execute(
+            "INSERT INTO catalogs (name, repo_path, org_id, created_at) \
+             VALUES ('acme-assets', '/c', ?1, 1)",
+            [oid],
+        )
+        .unwrap();
+    let e = run(
+        &st,
+        crate::service::trackers::admin::WorkAdminArgs {
+            org_id: Some(oid),
+            ..admin_args("remove_org")
+        },
+    )
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID_STATE);
+    assert!(e.message.contains("catalog acme-assets"), "{}", e.message);
+    st.lock()
+        .unwrap()
+        .conn_for_test()
+        .execute("DELETE FROM catalogs WHERE name = 'acme-assets'", [])
+        .unwrap();
     run(
         &st,
         crate::service::trackers::admin::WorkAdminArgs {

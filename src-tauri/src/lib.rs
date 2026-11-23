@@ -111,6 +111,18 @@ pub fn run() {
     let upload_allow = std::sync::Arc::new(commands::upload::UploadAllowList::new());
     let upload_allow_for_window = std::sync::Arc::clone(&upload_allow);
     let upload_allow_for_webview = std::sync::Arc::clone(&upload_allow);
+    // The app's exit cleanup, run once however the app leaves (w17-1): the
+    // main window going away, or `RunEvent::Exit` (tray Quit's
+    // `app.exit(0)`, an updater / poison-banner `app.restart()`, macOS ⌘Q),
+    // which destroys no window first.
+    let exit_cleanup = std::sync::Arc::new(ExitCleanup {
+        done: std::sync::Once::new(),
+        ssh: ssh_client_for_exit,
+        tunnels: tunnels_for_exit,
+        mirrors: mirrors_for_exit,
+        shutdown: shutdown_for_exit,
+    });
+    let exit_cleanup_for_window = std::sync::Arc::clone(&exit_cleanup);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -901,26 +913,51 @@ pub fn run() {
                             pty::close_pty(pty.inner(), window.label());
                         }
                     }
-                    OnDestroyed::ShutDown => {
-                        ssh_client_for_exit.shutdown_all();
-                        tunnels_for_exit.stop_all();
-                        mirrors_for_exit.kill_all();
-                        shutdown_for_exit.cancel();
-                        if let Some(runtime) =
-                            window.try_state::<Mutex<fleet_core::mcp::McpRuntime>>()
-                        {
-                            if let Ok(mut rt) = runtime.lock() {
-                                rt.stop();
-                            }
-                        }
-                        if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
-                            pty::close_all_ptys(pty.inner());
-                        }
-                    }
+                    OnDestroyed::ShutDown => exit_cleanup_for_window.run(window.app_handle()),
                     OnDestroyed::Nothing => {}
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(move |app, event| {
+            if let tauri::RunEvent::Exit = event {
+                exit_cleanup.run(app);
+            }
+        });
+}
+
+/// What the app tears down on its way out (w17-1). [`ExitCleanup::run`] is
+/// idempotent: the main window's `Destroyed` and `RunEvent::Exit` both call
+/// it, and a quit by the window reaches both.
+struct ExitCleanup {
+    done: std::sync::Once,
+    ssh: std::sync::Arc<fleet_core::ssh::SshClient>,
+    tunnels: std::sync::Arc<fleet_core::service::tunnel::TunnelSupervisor>,
+    mirrors: std::sync::Arc<fleet_core::service::device_mirror::Mirrors>,
+    shutdown: tokio_util::sync::CancellationToken,
+}
+
+impl ExitCleanup {
+    /// Close the ssh masters, the tunnels, the scrcpy mirrors, the hub event
+    /// bridge, the MCP server and every PTY, once, so nothing (a background
+    /// ssh, an `ssh -R`, a mirror window, an orphaned `tmux attach`)
+    /// outlives the app.
+    fn run(&self, app: &tauri::AppHandle) {
+        use tauri::Manager;
+        self.done.call_once(|| {
+            self.ssh.shutdown_all();
+            self.tunnels.stop_all();
+            self.mirrors.kill_all();
+            self.shutdown.cancel();
+            if let Some(runtime) = app.try_state::<Mutex<fleet_core::mcp::McpRuntime>>() {
+                if let Ok(mut rt) = runtime.lock() {
+                    rt.stop();
+                }
+            }
+            if let Some(pty) = app.try_state::<Mutex<PtyState>>() {
+                pty::close_all_ptys(pty.inner());
+            }
+        });
+    }
 }

@@ -696,9 +696,27 @@ fn remove_login_script(profile: &str) -> String {
     )
 }
 
+/// The live sessions on `host` that run under the login profile `profile`,
+/// by name: what removing the profile would sign out mid-turn.
+pub(crate) fn live_sessions_under(
+    s: &Store,
+    host: &str,
+    profile: &str,
+) -> Result<Vec<String>, IpcError> {
+    Ok(s.list_sessions_for_host(host)?
+        .into_iter()
+        .filter(|r| {
+            r.claude_profile.as_deref() == Some(profile)
+                && r.status != "ghost"
+                && r.lost_at.is_none()
+        })
+        .map(|r| r.friendly_name.unwrap_or(r.tmux_name))
+        .collect())
+}
+
 /// `remove`: take a login profile off a host. Refused while a live session
 /// runs under it (`E_INVALID_STATE`, naming them): they would lose their
-/// login mid-turn; and while a routine, start rule or live mission grant
+/// login mid-turn; and while a routine, start or placement rule, or live mission grant
 /// names it (`details.uses`). Then the host side ([`remove_login_script`]), then the
 /// store: the host's profile list, the profile's signed-out note and its
 /// fingerprints, and the made-up accounts no login uses any more.
@@ -707,16 +725,7 @@ async fn remove_login(
     store: &Mutex<Store>,
     tmux: &dyn TmuxExec,
 ) -> Result<LoginRemoved, IpcError> {
-    let live: Vec<String> = lock(store)?
-        .list_sessions_for_host(&args.host_alias)?
-        .into_iter()
-        .filter(|r| {
-            r.claude_profile.as_deref() == Some(args.profile.as_str())
-                && r.status != "ghost"
-                && r.lost_at.is_none()
-        })
-        .map(|r| r.friendly_name.unwrap_or(r.tmux_name))
-        .collect();
+    let live = live_sessions_under(&*lock(store)?, &args.host_alias, &args.profile)?;
     if !live.is_empty() {
         return Err(IpcError::new(
             codes::E_INVALID_STATE,

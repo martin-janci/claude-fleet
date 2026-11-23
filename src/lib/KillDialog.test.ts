@@ -105,9 +105,31 @@ describe('KillDialog', () => {
     expect(screen.getByTestId('kill-unknown').textContent).toContain('not a repository');
   });
 
+  // w10-2: a session in a project's main checkout has no tracked worktree,
+  // so the backend did not look. It is never shown as clean, and Clean up
+  // asks the agent to commit and push rather than just killing it.
+  it('a session with no tracked worktree in a project is not clean, and Clean up asks the agent', async () => {
+    inspections['api'] = { ...clean, has_worktree: false, worktree_path: null, branch: null };
+    const oncleaned = vi.fn();
+    const row = session('mac', 'api', { id: 4, project_id: 7 });
+    render(KillDialog, { targets: [row], mode: 'cleanup', onkill: vi.fn(), oncleaned, oncancel: vi.fn() });
+    await flush();
+    expect(screen.queryByTestId('kill-clean')).toBeNull();
+    expect(screen.getByTestId('kill-unknown').textContent).toContain('no tracked worktree');
+    await fireEvent.click(screen.getByTestId('kill-cleanup'));
+    await flush();
+    expect(calls('safe_kill_session')).toHaveLength(1);
+    expect(calls('discard_kill_session')).toHaveLength(0);
+  });
+
   it('words the summary', () => {
     expect(workLine({ state: 'dirty', files: [{ status: 'M', path: 'a' }], unpushed: 0, branch: null })).toBe('1 uncommitted file');
     expect(workLine({ state: 'dirty', files: [], unpushed: 1, branch: null })).toBe('1 commit not pushed');
+    // w10-3: no upstream yet (`-1`) is said, not an empty reason.
+    expect(workLine({ state: 'dirty', files: [], unpushed: -1, branch: 'fix-login' })).toBe('branch never pushed');
+    expect(workLine({ state: 'dirty', files: [{ status: 'M', path: 'a' }], unpushed: -1, branch: null })).toBe(
+      '1 uncommitted file and branch never pushed',
+    );
     expect(workLine({ state: 'clean' })).toBeNull();
   });
 });

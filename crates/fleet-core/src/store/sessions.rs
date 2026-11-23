@@ -1869,6 +1869,7 @@ impl Store {
                  WHERE session_id = ?2 AND retired_at IS NULL",
                 rusqlite::params![now_unix(), id],
             )?;
+            Store::release_pr_openers_in(&tx, &[id])?;
             tx.execute("DELETE FROM sessions WHERE id=?1", rusqlite::params![id])?;
         }
         let id: Option<i64> = tx
@@ -1927,6 +1928,7 @@ impl Store {
         // No FK on form_requests: a pending form would outlive its row
         // (review w13-2).
         super::forms::cancel_pending_forms_in(&tx, &[id], now_unix())?;
+        Store::release_pr_openers_in(&tx, &[id])?;
         tx.execute("DELETE FROM sessions WHERE id=?1", rusqlite::params![id])?;
         tx.commit()?;
         self.form_notify.notify_waiters();

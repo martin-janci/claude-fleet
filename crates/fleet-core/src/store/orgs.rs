@@ -632,10 +632,14 @@ impl Store {
     pub fn remove_org(&self, id: i64) -> Result<bool, IpcError> {
         let tx = self.conn.unchecked_transaction()?;
         // Explicit, not only the FK actions: they need `foreign_keys = ON`.
-        tx.execute(
-            "UPDATE hosts SET org_id = NULL WHERE org_id = ?1",
-            rusqlite::params![id],
-        )?;
+        // Each host is announced after the commit, so no client keeps the
+        // dead org on its row (w06-2).
+        let hosts: Vec<String> = {
+            let mut stmt =
+                tx.prepare("UPDATE hosts SET org_id = NULL WHERE org_id = ?1 RETURNING alias")?;
+            let rows = stmt.query_map(rusqlite::params![id], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
         tx.execute(
             "UPDATE work_links SET snap_org_id = NULL WHERE snap_org_id = ?1",
             rusqlite::params![id],
@@ -726,6 +730,9 @@ impl Store {
             super::session_grants::bump_grant_generation();
         }
         self.announce_accounts(&unblocked);
+        for alias in &hosts {
+            self.emit_host(alias, |bus, row| bus.host_probed(row))?;
+        }
         Ok(removed)
     }
 
@@ -734,6 +741,17 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare("SELECT id, name FROM trackers WHERE org_id = ?1 ORDER BY id")?;
+        let rows = stmt.query_map(rusqlite::params![id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The asset catalogs `id` owns, `(catalog id, name)`: `catalogs.org_id`
+    /// is `ON DELETE RESTRICT`, so the org cannot go while any is left
+    /// (w05-5).
+    pub fn catalogs_of_org(&self, id: i64) -> Result<Vec<(i64, String)>, IpcError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name FROM catalogs WHERE org_id = ?1 ORDER BY id")?;
         let rows = stmt.query_map(rusqlite::params![id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -804,6 +822,8 @@ impl Store {
                 format!("host {alias} not found"),
             ));
         }
+        // The row's `org_id` moved: announce it (w06-2).
+        self.emit_host(alias, |bus, row| bus.host_probed(row))?;
         Ok(())
     }
 

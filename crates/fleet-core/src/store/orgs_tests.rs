@@ -681,3 +681,19 @@ fn the_reply_consent_key_is_the_one_in_the_columns() {
     );
     assert!(s.set_org_jev_reply_allowed(org + 99, true).is_err());
 }
+
+/// w06-2: a host's org change, and an org's removal, announce the host, so
+/// no client keeps the old `org_id` on its row.
+#[test]
+fn an_org_change_announces_the_host() {
+    let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+    let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+    s.upsert_host("mac").unwrap();
+    let acme = s.add_org("Acme", None, false).unwrap();
+    bus.take();
+    s.set_host_org("mac", Some(acme.id)).unwrap();
+    assert!(bus.take().contains(&"host:probed:mac".to_string()));
+    s.remove_org(acme.id).unwrap();
+    assert!(bus.take().contains(&"host:probed:mac".to_string()));
+    assert_eq!(s.host_org("mac").unwrap(), None);
+}
