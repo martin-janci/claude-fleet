@@ -2056,11 +2056,47 @@ async fn a_reconnect_sends_the_last_frame_id_and_a_resumed_ready_skips_the_re_li
 #[test]
 fn the_events_request_carries_last_event_id_only_when_there_is_one() {
     let at = crate::backend::remote::Endpoint::parse("https://fleet.example.com/events").unwrap();
-    let with = crate::backend::events::events_request(&at, "cl_tok", Some("3-41"));
+    let with = crate::backend::events::events_request(&at, "cl_tok", Some("3-41"), None);
     assert!(with.contains("\r\nLast-Event-ID: 3-41\r\n"), "{with}");
     assert!(with.contains("Authorization: Bearer cl_tok"), "{with}");
-    let without = crate::backend::events::events_request(&at, "cl_tok", None);
+    assert!(with.starts_with("GET /events HTTP/1.1\r\n"), "{with}");
+    let without = crate::backend::events::events_request(&at, "cl_tok", None, None);
     assert!(!without.contains("Last-Event-ID"), "{without}");
+}
+
+/// Review w08-3: an extra fleet's bridge asks only for the kinds its view
+/// keeps, and re-lists only sessions and hosts.
+#[test]
+fn an_extra_fleets_stream_names_its_kinds() {
+    let at = crate::backend::remote::Endpoint::parse("https://fleet.example.com/events").unwrap();
+    let req = crate::backend::events::events_request(
+        &at,
+        "cl_tok",
+        None,
+        Some(crate::backend::fleets::EXTRA_FLEET_KINDS),
+    );
+    assert!(
+        req.starts_with("GET /events?kinds=session,host,project HTTP/1.1\r\n"),
+        "{req}"
+    );
+}
+
+#[tokio::test]
+async fn an_extra_fleets_resync_lists_sessions_and_hosts_only() {
+    let (resync, seen, table) = resync_over(&[
+        ("list_sessions", "[]"),
+        ("list_hosts", "[]"),
+        ("list_tasks", "[]"),
+        ("list_accounts", "[]"),
+    ]);
+    let resync = resync.rows_only();
+    resync.resync().await;
+    assert_eq!(table.asked(), ["list_sessions", "list_hosts"]);
+    assert_eq!(
+        seen.names(),
+        vec![crate::backend::events::RESYNCED_EVENT],
+        "no task, account or work:changed frame the window would drop"
+    );
 }
 
 #[tokio::test]

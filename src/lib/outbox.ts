@@ -33,8 +33,8 @@ import { sendPrompt, sessions } from './sessions';
 import { markNeedsReattach, type Attachment } from './attachments';
 import { withAttachments, tooLong } from './attach_prompt';
 import { recordAttachments } from './library';
-import { carriedCount, normalizePrompt, type Conversation } from './conversation';
-import { awayRow, fleetBlocked, fleetRows, keyTarget } from './fleets';
+import { carriedCount, normalizePrompt, rememberDraft, takeTray, type Conversation } from './conversation';
+import { awayRow, fleetBlocked, fleetRows, keyTarget, onFleetForgotten } from './fleets';
 import { errorText } from './error_copy';
 
 export type OutboxState = 'waiting' | 'sending' | 'sent' | 'queued' | 'received' | 'failed';
@@ -310,7 +310,7 @@ export function createOutbox(deps: OutboxDeps) {
         m.attachments.map((a) => a.path),
         target.fleet,
       );
-      if (mine !== epoch) return;
+      if (mine !== epoch || targets.get(sid) !== target) return;
       if (!up.ok) {
         // `upload_attachments` consumes each path's allow-list entry as it
         // clears the budget, so the same paths cannot be uploaded twice.
@@ -340,7 +340,7 @@ export function createOutbox(deps: OutboxDeps) {
     const before = deps.row(sid);
     patch(sid, id, { turnSeqAtSend: before?.turn_seq ?? null });
     const r = await deps.send(target.host_alias, target.tmux_name, body, target.fleet);
-    if (mine !== epoch) return;
+    if (mine !== epoch || targets.get(sid) !== target) return;
     if (!r.ok) {
       patch(sid, id, { state: 'failed', error: errorText(r.error), retryable: true, acked: false });
       return;
@@ -437,6 +437,16 @@ export function createOutbox(deps: OutboxDeps) {
     return { text: m.text, attachments: markNeedsReattach(m.attachments, ids) };
   }
 
+  /** Drop every message of `sid`, failed or waiting, and where it was
+   *  going: the session's key no longer names that target (an extra fleet
+   *  that was removed, review w08-4). A send in flight writes nothing back. */
+  function forget(sid: number) {
+    targets.delete(sid);
+    running.delete(sid);
+    lastSubmit.delete(sid);
+    if (sid in get(store).msgs) setList(sid, []);
+  }
+
   /** Forget everything, including sends still in flight. Tests only: the
    *  outbox is module state, and one test's messages must not bleed into
    *  the next. */
@@ -448,7 +458,7 @@ export function createOutbox(deps: OutboxDeps) {
     store.set({ msgs: {}, lastSent: {} });
   }
 
-  return { store, enqueue, retry, discard, edit, observeRow, settle, resetForTests };
+  return { store, enqueue, retry, discard, edit, observeRow, settle, forget, resetForTests };
 }
 
 export type Outbox = ReturnType<typeof createOutbox>;
@@ -514,5 +524,16 @@ fleetRows.subscribe(() => {
     if (id >= 0) continue;
     const row = awayRow(id);
     if (row) outbox.observeRow(id, row);
+  }
+});
+
+// A removed fleet's sessions keep nothing here: its slot id can be taken by
+// another hub, and a failed send's Retry, a draft or a tray must not carry
+// over to that hub's session of the same number (review w08-4).
+onFleetForgotten((_id, keys) => {
+  for (const key of keys) {
+    outbox.forget(key);
+    rememberDraft(key, '');
+    takeTray(key);
   }
 });

@@ -56,7 +56,12 @@ import {
   loadFleets,
   nextFleetColor,
   removeFleet,
+  retryFleet,
+  sessionKey,
+  keyTarget,
 } from './fleets';
+import { outbox } from './outbox';
+import { composerDrafts, rememberDraft } from './conversation';
 import type { SessionRow } from './sessions';
 import type { HostRow } from './hosts';
 import { fleetInfo } from './fleets_fixture';
@@ -598,6 +603,68 @@ describe('review w01: multi-hub gaps', () => {
     _setFleetsForTest([fleet(PRIMARY), fleet('company'), fleet('lab')]);
     onFleetEvent({ fleet: 'company', name: 'session:updated', payload: session(12) });
     expect(get(fleetRows).get('company')?.sessions.has(12)).toBe(true);
+  });
+
+  it('w08-4: a removed fleet\'s session keys, failed sends and drafts do not follow its slot', async () => {
+    _setFleetsForTest([fleet(PRIMARY), fleet('company')]);
+    const old = sessionKey({ id: 5, fleet: 'company' });
+    expect(keyTarget(old)).toEqual({ fleet: 'company', id: 5 });
+    rememberDraft(old, 'half typed');
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'send_prompt') throw { code: 'E_HUB_UNAVAILABLE', message: 'down' };
+      return cmd === 'fleets_list' ? [fleet(PRIMARY)] : null;
+    });
+    outbox.enqueue({ id: old, host_alias: 'mac', tmux_name: 's5', fleet: 'company' }, { kind: 'prompt', text: 'hi' });
+    await vi.waitFor(() => expect(get(outbox.store).msgs[old]?.[0]?.state).toBe('failed'));
+    expect((await removeFleet('company')).ok).toBe(true);
+    expect(get(outbox.store).msgs[old]).toBeUndefined();
+    expect(composerDrafts.has(old)).toBe(false);
+    expect(keyTarget(old)).toBeNull();
+    // Another hub that takes the label: its session 5 is a new key.
+    _setFleetsForTest([fleet(PRIMARY), fleet('company')]);
+    const fresh = sessionKey({ id: 5, fleet: 'company' });
+    expect(fresh).not.toBe(old);
+    expect(sessionKey({ id: 5, fleet: 'company' })).toBe(fresh);
+  });
+
+  it('w08-2: a Remove or Retry that failed still re-reads the list', async () => {
+    _setFleetsForTest([fleet(PRIMARY), fleet('company', { connection: { state: 'connected' } })]);
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'fleet_remove' || cmd === 'fleet_retry_now') throw { code: 'E_IO', message: 'keychain said no' };
+      return cmd === 'fleets_list'
+        ? [fleet(PRIMARY), fleet('company', { connection: null, unavailable: 'remove did not finish: keychain said no' })]
+        : null;
+    });
+    expect((await removeFleet('company')).ok).toBe(false);
+    expect(get(visibleExtraFleets)[0].fleet.unavailable).toContain('remove did not finish');
+    _setFleetsForTest([fleet(PRIMARY), fleet('company', { connection: { state: 'connected' } })]);
+    expect((await retryFleet('company')).ok).toBe(false);
+    expect(get(visibleExtraFleets)[0].fleet.unavailable).toContain('remove did not finish');
+  });
+
+  it("w08-3: an extra fleet's bridge subscribes to every kind the window keeps", () => {
+    const rs = readFileSync('src-tauri/src/backend/fleets.rs', 'utf8');
+    const kinds = /pub const EXTRA_FLEET_KINDS: &str = "([^"]+)";/.exec(rs)![1].split(',');
+    const ts = readFileSync('src/lib/fleets.ts', 'utf8');
+    const block = /const ROW_EVENTS = new Map<string, RowPart>\(\[(.*?)\]\);/s.exec(ts)![1];
+    const kept = new Set([...block.matchAll(/\['([a-z_]+):/g)].map((m) => m[1]));
+    expect(kept.size).toBeGreaterThan(0);
+    expect([...kept].sort()).toEqual([...kinds].sort());
+  });
+
+  it('w08-1: a fleet the backend added after the first list is listed again', async () => {
+    _setFleetsForTest([fleet(PRIMARY)]);
+    inv.mockImplementation(async (cmd: string) =>
+      cmd === 'fleets_list' ? [fleet(PRIMARY), fleet('late', { unavailable: 'cannot read the client token' })] : [],
+    );
+    onFleetEvent({ fleet: 'late', name: 'fleets:changed', payload: {} });
+    await vi.waitFor(() => expect(get(visibleExtraFleets).map((v) => v.fleet.id)).toEqual(['late']));
+    // An offline frame from a fleet the window has not listed lists them too.
+    _setFleetsForTest([fleet(PRIMARY)]);
+    inv.mockClear();
+    onFleetEvent({ fleet: 'late', name: 'hub:connection', payload: { state: 'offline', attempt: 1 } });
+    await vi.waitFor(() => expect(inv.mock.calls.filter(([cmd]) => cmd === 'fleets_list')).toHaveLength(1));
+    expect(inv.mock.calls.filter(([cmd]) => cmd === 'list_sessions')).toHaveLength(0);
   });
 
   it("w01-14: the Add form's colour is the one the backend would pick, from the same palette", () => {

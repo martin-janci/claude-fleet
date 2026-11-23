@@ -589,6 +589,28 @@ fn an_extra_fleets_events_reach_the_window_tagged_with_its_slot() {
     );
 }
 
+/// Review w08-1: the window may list the fleets before `load` (on its own
+/// thread, each connect bounded by the keychain) has added them all. Each
+/// added fleet, an unusable one included, tells the window to list again.
+#[test]
+fn loading_tells_the_window_each_fleet_it_added() {
+    let w = world(
+        &[
+            record("company", "https://fleet.papayapos.dev"),
+            record("lab", "https://lab.example.com"),
+        ],
+        // `lab` has no token: unusable, with no bridge and no status.
+        Tokens::with(&[("company", "cl_company")]),
+    );
+    let seen = w.sink.seen.lock().unwrap().clone();
+    let changed: Vec<&str> = seen
+        .iter()
+        .filter(|(name, p)| *name == FLEET_EVENT && p["name"] == FLEETS_CHANGED)
+        .filter_map(|(_, p)| p["fleet"].as_str())
+        .collect();
+    assert_eq!(changed, ["company", "lab"], "{seen:?}");
+}
+
 #[test]
 fn an_extra_fleets_connection_state_is_tagged_too() {
     let w = world(

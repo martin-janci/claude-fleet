@@ -305,6 +305,10 @@ function withFleet(row: SessionRow, fleet: string): SessionRow {
 
 const keyOfPair = new Map<string, number>();
 const pairOfKey = new Map<number, { fleet: string; id: number }>();
+// The last key handed out. A key is never handed out twice: a removed
+// fleet's pairs are forgotten, and the same (fleet, id) added again takes a
+// fresh key, so nothing keyed by the old one follows it (review w08-4).
+let lastKey = 0;
 
 /** The key a session is stored under in this window (see above). Stable
  *  for the life of the window; never sent to a hub. */
@@ -314,7 +318,7 @@ export function sessionKey(s: Pick<SessionRow, 'id' | 'fleet'>): number {
   const pair = `${fleet}\u0000${s.id}`;
   let key = keyOfPair.get(pair);
   if (key === undefined) {
-    key = -(keyOfPair.size + 1);
+    key = -++lastKey;
     keyOfPair.set(pair, key);
     pairOfKey.set(key, { fleet, id: s.id });
   }
@@ -511,8 +515,15 @@ export function onFleetEvent(e: FleetEvent): void {
     // never notify twice (review w01-3).
     if (isDuplicate(fleet)) return;
     patchRows(fleet, (rows) => applyFleetEvent(rows, e, fleet), [part]);
+  } else if (e.name === 'fleets:changed') {
+    // The backend added this fleet after the window listed them (its load
+    // runs on its own thread): list again, or an unusable or offline fleet
+    // never shows (review w08-1).
+    void loadFleets();
   } else if (e.name === 'hub:connection' && isObj(e.payload)) {
+    const known = get(fleetsStore).some((f) => f.id === fleet);
     setConnection(fleet, e.payload as unknown as HubConnection);
+    if (!known) void loadFleets();
     if ((e.payload as { state?: string }).state === 'connected') {
       // The ready frame that connected it also named its fleet id, which
       // only the list carries (and with it whether it is a duplicate). The
@@ -638,10 +649,11 @@ export async function addFleet(args: FleetAdd): Promise<Result<FleetInfo>> {
 /** Stop showing an extra fleet and forget its token here. Revokes nothing. */
 export async function removeFleet(id: string): Promise<Result<null>> {
   const r = await invokeCmd<null>('fleet_remove', { args: { id } });
-  if (r.ok) {
-    forgetFleet(id);
-    await loadFleets();
-  }
+  if (r.ok) forgetFleet(id);
+  // A remove that did not finish has still stopped the fleet's link (the
+  // backend keeps it as unusable): the list says so, the held "live" does
+  // not (review w08-2).
+  await loadFleets();
   return r;
 }
 
@@ -657,21 +669,29 @@ function forgetFleet(id: string): void {
   const map = readPref<Record<string, string>>(FLEET_BY_REPO_PREF, {}, isRepoMap);
   const kept = Object.fromEntries(Object.entries(map).filter(([, f]) => f !== id));
   if (Object.keys(kept).length !== Object.keys(map).length) writePref(FLEET_BY_REPO_PREF, kept);
-  for (const fn of forgetHooks) fn(id);
+  const keys = [...pairOfKey].filter(([, p]) => p.fleet === id).map(([k]) => k);
+  for (const fn of forgetHooks) fn(id, keys);
+  for (const k of keys) {
+    const p = pairOfKey.get(k)!;
+    pairOfKey.delete(k);
+    keyOfPair.delete(`${p.fleet}\u0000${p.id}`);
+  }
 }
 
 /** What other modules keep per fleet slot (the sidebar's Machine / Org
  *  picks and folds, `fleet_filters.ts`) forgets it here too. A hook rather
  *  than an import: those modules import this one. */
-const forgetHooks: ((id: string) => void)[] = [];
-export function onFleetForgotten(fn: (id: string) => void): void {
+/** `keys` are the `sessionKey`s the fleet's sessions had in this window,
+ *  still resolvable by `keyTarget` while the hook runs. */
+const forgetHooks: ((id: string, keys: number[]) => void)[] = [];
+export function onFleetForgotten(fn: (id: string, keys: number[]) => void): void {
   forgetHooks.push(fn);
 }
 
 /** An extra fleet's Retry. */
 export async function retryFleet(id: string): Promise<Result<null>> {
   const r = await invokeCmd<null>('fleet_retry_now', { args: { id } });
-  if (r.ok) await loadFleets();
+  await loadFleets();
   return r;
 }
 
