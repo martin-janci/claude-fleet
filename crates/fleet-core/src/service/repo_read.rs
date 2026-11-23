@@ -17,7 +17,7 @@
 use crate::ipc_error::{codes, IpcError};
 use crate::service::repo::{
     diff_from_bytes, repo_err, repo_script, run_git, run_in_repo, session_target, SessionIdArgs,
-    MAX_FILE_BYTES, MAX_TREE_ENTRIES,
+    MAX_DIFF_BYTES, MAX_FILE_BYTES, MAX_TREE_ENTRIES,
 };
 use crate::shell::quote;
 use crate::ssh::SshClient;
@@ -552,7 +552,21 @@ fn confine(final_link: bool) -> String {
          d=$(cd \"$(dirname -- \"$f\")\" 2>/dev/null && pwd -P) || d=\"$rr\"\n\
          case \"$d/\" in \"$rr\"/*) ;; *) echo {OUTSIDE_SENTINEL} >&2; exit 8;; esac\n{}",
         if final_link {
-            format!("if [ -L \"$f\" ]; then echo {OUTSIDE_SENTINEL} >&2; exit 8; fi\n")
+            // A link that stays in the worktree reads (`CLAUDE.md ->
+            // AGENTS.md`, review w11-3): follow it, at most 8 hops, and
+            // refuse only when its target's directory resolves outside.
+            format!(
+                "if [ -L \"$f\" ]; then\n\
+                 g=\"$f\"; n=0\n\
+                 while [ -L \"$g\" ]; do\n\
+                 n=$((n+1)); if [ \"$n\" -gt 8 ]; then echo {OUTSIDE_SENTINEL} >&2; exit 8; fi\n\
+                 t=$(readlink -- \"$g\") || {{ echo {OUTSIDE_SENTINEL} >&2; exit 8; }}\n\
+                 case \"$t\" in /*) g=\"$t\";; *) g=\"$(dirname -- \"$g\")/$t\";; esac\n\
+                 done\n\
+                 gd=$(cd \"$(dirname -- \"$g\")\" 2>/dev/null && pwd -P) || {{ echo {OUTSIDE_SENTINEL} >&2; exit 8; }}\n\
+                 case \"$gd/\" in \"$rr\"/*) ;; *) echo {OUTSIDE_SENTINEL} >&2; exit 8;; esac\n\
+                 fi\n"
+            )
         } else {
             String::new()
         }
@@ -591,10 +605,62 @@ fn untracked_diff_body(path: &str) -> String {
     format!(
         "f=\"$root\"/{quoted}\n{confine}\
          if [ -n \"$(git -C \"$root\" ls-tree --name-only HEAD -- {quoted} 2>/dev/null)\" ]; then exit 0; fi\n\
-         git -C \"$root\" diff --no-index -- /dev/null {quoted} || true",
+         {{ git -C \"$root\" diff --no-index -- /dev/null {quoted} || true; }} | head -c {cap}",
         quoted = quote(path),
         confine = confine(false),
+        cap = MAX_DIFF_BYTES + 1,
     )
+}
+
+/// `cmd` (one compound command) with its stdout cut on the host at
+/// `MAX_DIFF_BYTES + 1`, so a diff of a 150 MB fixture never crosses the
+/// link whole only to be cut here (review w11-4); `diff_from_bytes` still
+/// sees the extra byte and says `truncated`. `cmd`'s own exit status is
+/// kept (a SIGPIPE from the cut is not a failure): `set -e` would stop the
+/// pipeline's subshell before it could report it, so it is read with `||`.
+fn capped(cmd: &str) -> String {
+    format!(
+        "{{ cf_rc=$( {{ {{ {cmd} && cf=0 || cf=$?; echo \"$cf\" >&3; }} | head -c {cap} >&4; }} 3>&1 ); }} 4>&1\n\
+         case \"$cf_rc\" in 0|141) ;; *) exit \"$cf_rc\" ;; esac",
+        cap = MAX_DIFF_BYTES + 1,
+    )
+}
+
+/// One file's diff, paired with the path it was renamed from when `list`
+/// (a `--name-status -z` listing of the same range) names a rename to it,
+/// so git shows the rename and its edits rather than the whole file as new
+/// (review w11-2). `diff` is the diff command up to its pathspec.
+fn rename_aware(list: &str, diff: &str, path: &str) -> String {
+    let p = quote(path);
+    format!(
+        "{{ cf_old=$({list} -- 2>/dev/null | tr '\\000' '\\n' | P={p} awk \
+         '/^R[0-9]*$/ {{ getline o; getline n; if (n == ENVIRON[\"P\"]) {{ print o; exit }} }}'); \
+         if [ -n \"$cf_old\" ]; then {diff} -- \"$cf_old\" {p}; else {diff} -- {p}; fi; }}"
+    )
+}
+
+/// `repo_diff`'s tracked diff vs HEAD. A repo with no commits yet has no
+/// HEAD — `git diff HEAD` would abort with "bad revision", so it is skipped
+/// while HEAD is unborn and the untracked fallback renders the file.
+fn worktree_diff_body(path: &str) -> String {
+    capped(&format!(
+        "if git -C \"$root\" rev-parse --verify -q HEAD >/dev/null 2>&1; then {}; fi",
+        rename_aware(
+            "git -C \"$root\" diff HEAD -M --name-status -z",
+            "git -C \"$root\" diff HEAD -M",
+            path,
+        )
+    ))
+}
+
+/// `repo_commit_diff`'s body: one file within commit `hash`.
+fn commit_diff_body(hash: &str, path: &str) -> String {
+    let h = quote(hash);
+    capped(&rename_aware(
+        &format!("git -C \"$root\" show --first-parent -M --name-status -z --format= {h}"),
+        &format!("git -C \"$root\" show --first-parent -M --format= {h}"),
+        path,
+    ))
 }
 
 /// Read one worktree file's content (capped at `MAX_FILE_BYTES`).
@@ -662,22 +728,7 @@ pub async fn repo_diff(
 ) -> Result<FileDiff, IpcError> {
     crate::validate::repo_rel_path(&args.path)?;
     let (host, name) = session_target(store, args.session_id)?;
-    let quoted = quote(&args.path);
-
-    // Tracked diff vs HEAD. A repo with no commits yet has no HEAD — `git
-    // diff HEAD` would abort with "bad revision", so skip it when HEAD is
-    // unborn and let the untracked `--no-index` fallback below render the
-    // file as all-added.
-    let out = run_git(
-        ssh,
-        &host,
-        &name,
-        &format!(
-            "if git -C \"$root\" rev-parse --verify -q HEAD >/dev/null 2>&1; then \
-             git -C \"$root\" diff HEAD -- {quoted}; fi"
-        ),
-    )
-    .await?;
+    let out = run_git(ssh, &host, &name, &worktree_diff_body(&args.path)).await?;
     let mut raw = out.stdout;
 
     // Empty diff + an untracked file → show it as all-added via --no-index.
@@ -1004,12 +1055,7 @@ pub async fn repo_commit_diff(
     crate::validate::commit_hash(&args.hash)?;
     crate::validate::repo_rel_path(&args.path)?;
     let (host, name) = session_target(store, args.session_id)?;
-    let body = format!(
-        "git -C \"$root\" show --first-parent --format= {h} -- {p}",
-        h = quote(&args.hash),
-        p = quote(&args.path),
-    );
-    let out = run_git(ssh, &host, &name, &body).await?;
+    let out = run_git(ssh, &host, &name, &commit_diff_body(&args.hash, &args.path)).await?;
     let (diff, binary, truncated) = diff_from_bytes(&out.stdout);
     Ok(FileDiff {
         path: args.path,
@@ -1189,10 +1235,17 @@ fn range_diff_body(range: DiffRange, path: &str) -> String {
         DiffRange::Base => "$mb",
     };
     format!(
-        "{base}{range_sh}if [ -n \"{from}\" ]; then git -C \"$root\" diff \"{from}\" HEAD -- {p}; fi",
+        "{base}{range_sh}{body}",
         base = BASE_BRANCH_SH,
         range_sh = RANGE_SH,
-        p = quote(path),
+        body = capped(&format!(
+            "if [ -n \"{from}\" ]; then {}; fi",
+            rename_aware(
+                &format!("git -C \"$root\" diff -M --name-status -z \"{from}\" HEAD"),
+                &format!("git -C \"$root\" diff -M \"{from}\" HEAD"),
+                path,
+            )
+        )),
     )
 }
 
@@ -1601,11 +1654,84 @@ mod tests {
         let ok = run(file_body("a.txt"));
         assert!(ok.status.success(), "{ok:?}");
         assert_eq!(ok.stdout, b"a\n");
+        // A link that stays in the worktree reads, through a chain too
+        // (review w11-3).
+        std::os::unix::fs::symlink("a.txt", dir.join("AGENTS.md")).unwrap();
+        std::os::unix::fs::symlink("AGENTS.md", dir.join("CLAUDE.md")).unwrap();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::os::unix::fs::symlink("../a.txt", dir.join("sub/up.txt")).unwrap();
+        for link in ["AGENTS.md", "CLAUDE.md", "sub/up.txt"] {
+            let out = run(file_body(link));
+            assert!(out.status.success(), "{link}: {out:?}");
+            assert_eq!(out.stdout, b"a\n", "{link}");
+        }
+        // A chain that ends outside is still refused.
+        std::os::unix::fs::symlink("leak", dir.join("via")).unwrap();
+        let out = run(file_body("via"));
+        assert!(outside_err(&out).is_some(), "{out:?}");
         let diff = run(untracked_diff_body("new.txt"));
         assert!(
             String::from_utf8_lossy(&diff.stdout).contains("+fresh"),
             "{diff:?}"
         );
+    }
+
+    /// Review w11-2: a renamed file's diff pairs it with its old path, in
+    /// the worktree and in a commit, instead of showing it all as new.
+    #[cfg(unix)]
+    #[test]
+    fn a_renamed_file_diffs_against_its_old_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git_fixture::git(dir, &["init", "-q"]);
+        let body: String = (1..=300).map(|i| format!("{i}\n")).collect();
+        git_fixture::commit_file(dir, "a.ts", &body, "first");
+        git_fixture::git(dir, &["mv", "a.ts", "b c.ts"]);
+        std::fs::write(dir.join("b c.ts"), body.replace("\n150\n", "\nX\n")).unwrap();
+        git_fixture::git(dir, &["add", "-A"]);
+        let shown = |body: &str| {
+            let out = git_fixture::run_body(dir, body);
+            assert!(out.status.success(), "{out:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        let d = shown(&worktree_diff_body("b c.ts"));
+        assert!(d.contains("rename from a.ts"), "{d}");
+        assert!(d.contains("+X") && !d.contains("+299"), "{d}");
+        git_fixture::git(dir, &["commit", "-q", "-m", "mv"]);
+        let head = String::from_utf8(
+            crate::proc::std_command("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let d = shown(&commit_diff_body(head.trim(), "b c.ts"));
+        assert!(d.contains("rename from a.ts") && d.contains("+X"), "{d}");
+        // A file that was not renamed diffs as before.
+        assert!(shown(&commit_diff_body(head.trim(), "zz.ts")).is_empty());
+    }
+
+    /// Review w11-4: the host cuts a diff one byte past the cap, so it never
+    /// crosses the link whole; a git failure still fails the read.
+    #[cfg(unix)]
+    #[test]
+    fn a_huge_diff_is_cut_on_the_host_and_a_failure_still_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git_fixture::git(dir, &["init", "-q"]);
+        git_fixture::commit_file(dir, "a.txt", "a\n", "first");
+        let big: String = (0..300_000).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.join("a.txt"), big).unwrap();
+        let out = git_fixture::run_body(dir, &worktree_diff_body("a.txt"));
+        assert!(out.status.success(), "{:?}", out.status);
+        assert_eq!(out.stdout.len(), MAX_DIFF_BYTES + 1);
+        let (_, _, truncated) = diff_from_bytes(&out.stdout);
+        assert!(truncated);
+        let bad = git_fixture::run_body(dir, &commit_diff_body("deadbeef", "a.txt"));
+        assert!(!bad.status.success(), "{bad:?}");
     }
 
     /// A committed file whose change was staged and then reverted in the
