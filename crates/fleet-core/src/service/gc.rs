@@ -493,6 +493,9 @@ pub async fn sweep_with(
     report.swept_routine_runs = sweep_routine_runs(store, now);
     // Fleet-agent actions (same survey, decision B): the ones that ended
     // past `AGENT_ACTION_KEEP_DAYS`; bounded per tick, one batch per lock.
+    // Fleet-own proposals nobody answered within `FLEET_ACTION_TTL_SECS`
+    // end `expired`, so a stale card leaves the Inbox (w15-4).
+    expire_stale_fleet_actions(store, now);
     report.swept_agent_actions = sweep_agent_actions(store, now);
     // The admin audit log: `auth.audit_retention_days` (0 = forever). One
     // statement under one brief lock, like the decision record's.
@@ -530,6 +533,23 @@ fn sweep_routine_runs(store: &Mutex<Store>, now: i64) -> usize {
 /// expired) is kept. One still waiting for a person or for its run is kept
 /// whatever its age, and so is every job row.
 pub const AGENT_ACTION_KEEP_DAYS: i64 = 180;
+
+/// How long a fleet-own proposal (`work_task`, `fix_session`, `setting`,
+/// `session_recover`) waits for a person before it ends `expired`.
+pub const FLEET_ACTION_TTL_SECS: i64 = 86_400;
+
+/// Expire the fleet-own proposals older than [`FLEET_ACTION_TTL_SECS`].
+/// Errors are logged, never raised.
+fn expire_stale_fleet_actions(store: &Mutex<Store>, now: i64) {
+    let Ok(s) = store.lock() else {
+        return;
+    };
+    match s.expire_stale_fleet_actions(now - FLEET_ACTION_TTL_SECS, now) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(n, "[gc] expired unanswered fleet-own proposals"),
+        Err(e) => tracing::warn!(error = %e, "[gc] fleet-own proposal expiry failed"),
+    }
+}
 
 /// Ended fleet-agent actions past [`AGENT_ACTION_KEEP_DAYS`]; the number
 /// deleted.

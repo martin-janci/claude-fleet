@@ -681,7 +681,7 @@ Access: the master, a paired device or a per-host token · readonly tokens too �
 
 ### `provision_hosts`
 
-Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and this fleet's MCP server entry (per-host bearer token) into every reachable host's ~/.claude.json (a reverse SSH tunnel when the hub is loopback-only). Returns per-host status; each host must restart Claude to load it. host: one alias; content_only: skills, CLAUDE.md and hooks only, no token. The master, or a fleet admin's own device for content_only on one host only.
+Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and this fleet's MCP server entry (per-host bearer token) into every reachable host's ~/.claude.json (a reverse SSH tunnel when the hub is loopback-only). Returns per-host status; each host must restart Claude to load it. host: one alias; content_only: skills, CLAUDE.md and hooks only, no token. The master, or a fleet admin's own device for one host only: content_only, or the first full run of a host never provisioned.
 
 Access: the master or a fleet admin's own device · deadline 300 s.
 
@@ -697,11 +697,11 @@ Parameters (* required): `action`, `limit`, `project_id`, `state`
 
 ### `queue_prompt`
 
-Send a prompt as a new turn when the session is idle: typed now if it is, else kept and typed once its turn ends (never into a dialog). Send later: not_before (unix secs) holds it until then, until_limit_reset while the account is at its limit, skip_if_archived drops it if the session is archived first. Marked untrusted unless raw=true (master) or the caller is a trusted client. Returns { session_id, delivered, queued_id }.
+Send a prompt as a new turn when the session is idle: typed now if it is, else kept and typed once its turn ends (never into a dialog). Send later: not_before (unix secs) holds it until then, until_limit_reset while the account is at its limit, skip_if_archived drops it if the session is archived first. Marked untrusted unless raw=true (master) or the caller is a trusted client. client_msg_id makes a retry answer the first result instead of queueing twice. Returns { session_id, delivered, queued_id }.
 
 Access: the master, a paired device or a per-host token · deadline 60 s.
 
-Parameters (* required): `confirm_nonce`, `not_before`, `prompt`*, `raw`, `session_id`*, `skip_if_archived`, `until_limit_reset`
+Parameters (* required): `client_msg_id`, `confirm_nonce`, `not_before`, `prompt`*, `raw`, `session_id`*, `skip_if_archived`, `until_limit_reset`
 
 ### `queued_prompts`
 
@@ -1597,6 +1597,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::org_devices::add_person`
 - `commands::org_devices::rename_person`
 - `commands::org_devices::disable_person`
+- `commands::org_devices::enable_person`
 - `commands::sessions::session_history`
 - `commands::sessions::session_conversations`
 - `commands::sessions::session_conversation`

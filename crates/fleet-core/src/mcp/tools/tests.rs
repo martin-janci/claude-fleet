@@ -9479,6 +9479,47 @@ async fn within_the_brief_the_operators_prompt_to_its_own_session_is_pre_approve
     confirm_nonce_of(&other);
 }
 
+/// Review w17-3: a `queue_prompt` retried with the same `client_msg_id`
+/// (its first answer lost on a bad line) answers the first result and
+/// queues nothing more; another id queues another prompt.
+#[tokio::test]
+async fn a_queued_prompt_retried_with_its_client_msg_id_is_queued_once() {
+    let (s, _, on_b) = two_host_store();
+    let t = guarded_tools(s, true);
+    let later = crate::store::now_unix() + 3_600;
+    let queue = |id: &str| {
+        serde_json::from_value::<QueuePromptParams>(serde_json::json!({
+            "session_id": on_b, "prompt": "also check CI",
+            "not_before": later, "client_msg_id": id,
+        }))
+        .unwrap()
+    };
+    let first = t
+        .queue_prompt(Extension(Caller::master()), Parameters(queue("q-1")))
+        .await
+        .unwrap();
+    let again = t
+        .queue_prompt(Extension(Caller::master()), Parameters(queue("q-1")))
+        .await
+        .unwrap();
+    let a = result_json(&first);
+    assert_eq!(a, result_json(&again), "the retry answers the first result");
+    assert!(a["queued_id"].as_i64().is_some(), "{a}");
+    let waiting = |t: &FleetTools| {
+        crate::service::sessions::queued_prompts(
+            crate::service::sessions::QueuedPromptsArgs { session_id: on_b },
+            &t.store,
+        )
+        .unwrap()
+        .len()
+    };
+    assert_eq!(waiting(&t), 1);
+    t.queue_prompt(Extension(Caller::master()), Parameters(queue("q-2")))
+        .await
+        .unwrap();
+    assert_eq!(waiting(&t), 2);
+}
+
 /// Review w04-4: "within your brief" holds only while Control still follows
 /// the thread. Into a session it started that the person muted, whose pull
 /// request merged, or that went quiet, the operator's prompt asks again.

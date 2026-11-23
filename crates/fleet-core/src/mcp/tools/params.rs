@@ -389,6 +389,10 @@ pub struct QueuePromptParams {
     /// Drop it instead if the session is archived before it goes out.
     #[serde(default)]
     pub skip_if_archived: bool,
+    /// Idempotency key, as send_prompt's: a retry with the same id
+    /// answers the first call's result instead of queueing it again.
+    #[serde(default)]
+    pub client_msg_id: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

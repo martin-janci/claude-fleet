@@ -930,6 +930,28 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Retire the fleet-own proposals (`work_task`, `fix_session`,
+    /// `setting`, `session_recover`) still pending since before `cutoff`:
+    /// `expired`, decided by `timed out`. They are about the fleet as it
+    /// was when proposed, so a card nobody answered for a day leaves the
+    /// Inbox instead of acting on a stale picture once approved. Other
+    /// kinds (a PR review, a tracker comment) wait for their person as
+    /// before. The number expired.
+    pub fn expire_stale_fleet_actions(
+        &self,
+        cutoff: i64,
+        now: i64,
+    ) -> Result<usize, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE agent_actions SET state = 'expired', decided_by = 'timed out', \
+               decided_at = ?2, \
+               error = 'nobody answered it in time; the fleet has moved on since' \
+             WHERE state = 'pending' AND created_at < ?1 \
+               AND kind IN ('work_task', 'fix_session', 'setting', 'session_recover')",
+            params![cutoff, now],
+        )
+    }
+
     /// Retention: delete up to `limit` actions that reached an end state
     /// (`rejected`, `executed`, `failed`, `expired`) and were created before
     /// `cutoff`; the number deleted. A `pending` action still waits for a
@@ -1282,6 +1304,39 @@ mod tests {
             1,
             "the job stays"
         );
+    }
+
+    #[test]
+    fn a_fleet_own_proposal_nobody_answered_expires_after_its_ttl() {
+        let s = Store::open_in_memory().unwrap();
+        let rid = s.grant_agent_rule(&rule("review", "gh:o/r")).unwrap();
+        s.record_agent_poll(rid, 1000, None, &[job(rid, "gh:o/r#1", "k1")])
+            .unwrap();
+        let jid = s.list_agent_jobs(None, 1).unwrap()[0].id;
+        let add = |kind: &str, at: i64| s.insert_agent_action(jid, kind, "{}", at).unwrap();
+        let old_recover = add("session_recover", 10);
+        let old_setting = add("setting", 11);
+        let old_review = add("post_review", 12);
+        let fresh_task = add("work_task", 900);
+        let answered = add("fix_session", 13);
+        s.decide_agent_action(answered, true, "p", 20).unwrap();
+
+        assert_eq!(s.expire_stale_fleet_actions(500, 1000).unwrap(), 2);
+        let state = |id: i64| {
+            s.agent_actions_of_job(jid)
+                .unwrap()
+                .into_iter()
+                .find(|a| a.id == id)
+                .unwrap()
+        };
+        let r = state(old_recover);
+        assert_eq!(r.state, "expired");
+        assert_eq!(r.decided_by.as_deref(), Some("timed out"));
+        assert_eq!(state(old_setting).state, "expired");
+        assert_eq!(state(old_review).state, "pending", "not a fleet-own kind");
+        assert_eq!(state(fresh_task).state, "pending", "within its TTL");
+        assert_eq!(state(answered).state, "approved", "a person answered it");
+        assert_eq!(s.expire_stale_fleet_actions(500, 1001).unwrap(), 0);
     }
 
     #[test]
