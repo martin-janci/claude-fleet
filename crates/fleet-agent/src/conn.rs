@@ -2671,8 +2671,9 @@ mod tests {
             .await
         });
 
-        // Refused once: the backoff starts to grow.
-        fake.refuse(401, "unknown token").await;
+        // Refused once (a passing 503; a 401 means the hub forgot this host
+        // and jumps straight to the longest wait): the backoff starts to grow.
+        fake.refuse(503, "starting up").await;
         // Accepted, heard from (a ping), then dropped by the hub: that
         // connection was a success, so the backoff starts over.
         let (mut ws, _) = fake.accept().await;
@@ -2685,8 +2686,8 @@ mod tests {
         next_frame(&mut ws).await.expect("pong");
         drop(ws);
         // Refused twice: it grows again, from the bottom.
-        fake.refuse(401, "unknown token").await;
-        fake.refuse(401, "unknown token").await;
+        fake.refuse(503, "starting up").await;
+        fake.refuse(503, "starting up").await;
         // And accepted again.
         let (mut ws, _) = fake.accept().await;
         assert!(

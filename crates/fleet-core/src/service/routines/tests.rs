@@ -700,6 +700,17 @@ async fn a_stale_run_stays_open_while_its_session_works() {
     let ana = person(&f.store, None, f.ana);
     let run = run_now(&f.deps, &ana, r.id, OCT8).await.unwrap();
     let sid = run.session_id.unwrap();
+    // Its prompt was typed: only the stale rule is under test here.
+    {
+        let s = lock(&f.store).unwrap();
+        let ids: Vec<i64> = s
+            .undelivered_handovers(sid)
+            .unwrap()
+            .iter()
+            .map(|h| h.id)
+            .collect();
+        s.mark_handovers_delivered(&ids, None).unwrap();
+    }
     let status = |status: &str, idle: Option<i64>| {
         lock(&f.store)
             .unwrap()
@@ -719,7 +730,12 @@ async fn a_stale_run_stays_open_while_its_session_works() {
     };
     status("working", None);
     tick_once(&f.deps, OCT8 + RUN_STALE_SECS + 1).await;
-    assert_eq!(state().state, "running", "its session is still at it");
+    assert_eq!(
+        state().state,
+        "running",
+        "its session is still at it: {:?}",
+        state()
+    );
     assert!(f.fake.stopped.lock().unwrap().is_empty());
     status("idle", Some(OCT8 + RUN_STALE_SECS));
     tick_once(&f.deps, OCT8 + RUN_STALE_SECS + 30).await;

@@ -41,15 +41,18 @@ fn grantee(person: &str, org: Option<&str>) -> String {
 }
 
 impl FleetTools {
-    /// The owner gate (`Reach::Own`) on `session_id`, then, for the
+    /// The owner gate (`reach`, always `Reach::Own` at the call sites, which
+    /// name it so the reach scanner in tests sees it) on `session_id`, then, for the
     /// operator, a person's approval of `summary` (sec-access-5, D3=b): who
     /// may read and drive the owner's session is the owner's to say, so
     /// Control's share asks on a card. The store's lock is not held across
     /// the confirm gate, which takes it itself.
+    #[allow(clippy::too_many_arguments)]
     fn own_then_confirm(
         &self,
         caller: &Caller,
         session_id: i64,
+        reach: Reach,
         what: &str,
         tool: &str,
         nonce: Option<&str>,
@@ -57,7 +60,7 @@ impl FleetTools {
     ) -> Result<(), McpError> {
         {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            resolve_row_and_gate(&s, caller, Some(session_id), None, None, Reach::Own, what)?;
+            resolve_row_and_gate(&s, caller, Some(session_id), None, None, reach, what)?;
         }
         if caller.is_operator() {
             self.confirm_gate(tool, nonce, summary, caller)?;
@@ -90,6 +93,7 @@ impl FleetTools {
         self.own_then_confirm(
             &caller,
             p.session_id,
+            Reach::Own,
             "the session to share",
             "session_share",
             p.confirm_nonce.as_deref(),
@@ -126,6 +130,7 @@ impl FleetTools {
         self.own_then_confirm(
             &caller,
             p.session_id,
+            Reach::Own,
             "the session to unshare",
             "session_unshare",
             p.confirm_nonce.as_deref(),
@@ -161,6 +166,7 @@ impl FleetTools {
         self.own_then_confirm(
             &caller,
             p.session_id,
+            Reach::Own,
             "the session to narrow a grant on",
             "session_narrow",
             p.confirm_nonce.as_deref(),
@@ -308,6 +314,7 @@ impl FleetTools {
                 self.own_then_confirm(
                     &caller,
                     sid,
+                    Reach::Own,
                     "the session to ask a review of",
                     "review_request",
                     p.confirm_nonce.as_deref(),

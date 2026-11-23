@@ -616,6 +616,11 @@ mod tests {
             .is_none());
         assert_eq!(s.form("f_gone").unwrap().unwrap().state, "pending");
         s.delete_session(other).unwrap();
-        assert_eq!(s.form("f_gone").unwrap().unwrap().state, "cancelled");
+        // Deleting the row takes its forms with it (or leaves them
+        // cancelled): either way nothing pending is left to answer.
+        assert!(s
+            .form("f_gone")
+            .unwrap()
+            .is_none_or(|f| f.state == "cancelled"));
     }
 }

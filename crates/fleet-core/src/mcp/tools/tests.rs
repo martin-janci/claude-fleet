@@ -5498,7 +5498,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// parameter docs already trimmed) beside #1097's dashboard feeds
     /// measured the client full surface at 142,608 bytes for 162 tools (880
     /// a tool) and the master at 134,941 bytes for 158 tools (854 a tool).
-    const BYTES_PER_TOOL: usize = 890;
+    /// Raised to 901 on 2026-11-23: the second 20-wave review's confirm
+    /// nonces (sec-access-5, w15-1) and `waiting` measured the client full
+    /// surface at 145,259 bytes for 163 tools (891 a tool).
+    const BYTES_PER_TOOL: usize = 901;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -21090,8 +21093,8 @@ fn the_share_schema_offers_a_person_or_an_org_and_nothing_else() {
     names.sort();
     assert_eq!(
         names,
-        vec!["level", "org", "person", "session_id"],
-        "session_share's arguments are exactly these: a person or an org, and no \
+        vec!["confirm_nonce", "level", "org", "person", "session_id"],
+        "session_share's arguments are exactly these: a person or an org (plus the confirm card's nonce, sec-access-5), and no \
          `host_alias`/`tmux_name` pair (a tmux name is reused by the next \
          session on that host)"
     );
