@@ -218,13 +218,24 @@ static PEM_KEY_RE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("pem key regex")
 });
 /// An environment-style assignment of a secret-named variable
-/// (`LINEAR_API_KEY=…`, `export GITHUB_TOKEN="…"`): the value (group 3) is
-/// masked when it is token-shaped ([`is_token_shaped`]), whatever its shape.
+/// (`LINEAR_API_KEY=…`, `export GITHUB_TOKEN="…"`, and in lower case
+/// `api_key=…`, `client_secret=…`): the value (group 3) is masked when it
+/// is token-shaped ([`is_token_shaped`]) and not a plain number
+/// (`MAX_TOKENS=100000000` is a count, review w03-5).
 static SECRET_ASSIGN_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r#"\b((?:[A-Z][A-Z0-9_]*)?(?:TOKEN|SECRET|API_KEY|APIKEY|PASSWORD|PASSWD|ACCESS_KEY|PRIVATE_KEY)[A-Z0-9_]*=)("?)([^\s"']{8,})"#,
+        r#"\b((?:[A-Za-z][A-Za-z0-9_]*)?(?i:TOKEN|SECRET|API_KEY|APIKEY|PASSWORD|PASSWD|ACCESS_KEY|PRIVATE_KEY)[A-Za-z0-9_]*=)("?)([^\s"'&]{8,})"#,
     )
     .expect("secret assignment regex")
+});
+/// A JSON string field with a secret name (`"token":"…"`,
+/// `"client_secret": "…"`): the value (group 2) is masked, as the phone's
+/// `redactLog` does.
+static SECRET_JSON_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?i)("[A-Za-z_]*(?:token|secret|api_key|apikey|password|passwd)"\s*:\s*")((?:[^"\\]|\\.)+)"#,
+    )
+    .expect("secret json regex")
 });
 static QUERY_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)([?&](?:access_)?token=)[^&\s"'#]+"#).expect("query token regex")
@@ -322,8 +333,13 @@ pub fn redact(input: &str) -> Cow<'_, str> {
         out = Cow::Owned(s);
     }
     if let Cow::Owned(s) = mask_matches(&SECRET_ASSIGN_RE, &out, |c| {
-        (&c[3] != REDACTED && is_token_shaped(&c[3]))
+        (&c[3] != REDACTED && is_token_shaped(&c[3]) && !c[3].bytes().all(|b| b.is_ascii_digit()))
             .then(|| format!("{}{}{REDACTED}", &c[1], &c[2]))
+    }) {
+        out = Cow::Owned(s);
+    }
+    if let Cow::Owned(s) = mask_matches(&SECRET_JSON_RE, &out, |c| {
+        (&c[2] != REDACTED).then(|| format!("{}{REDACTED}", &c[1]))
     }) {
         out = Cow::Owned(s);
     }
@@ -931,12 +947,28 @@ mod tests {
             redact("export LINEAR_API_KEY=\"x9y8z7w6v5u4\" and DB_PASSWORD=hunter2025"),
             "export LINEAR_API_KEY=\"[REDACTED]\" and DB_PASSWORD=[REDACTED]"
         );
-        // Look-alikes that are not credentials survive.
+        // Lower case, and JSON fields (round-2 w18-1 rest).
+        assert_eq!(
+            redact("curl -d api_key=x9y8z7w6v5u4&page=2"),
+            "curl -d api_key=[REDACTED]&page=2"
+        );
+        assert_eq!(
+            redact(r#"{"token":"abc","client_secret": "s3cr\"et-val","kind":"token"}"#),
+            r#"{"token":"[REDACTED]","client_secret": "[REDACTED]","kind":"token"}"#
+        );
+        assert_eq!(redact(r#"{"token":""}"#), r#"{"token":""}"#);
+        // Look-alikes that are not credentials survive: counts and limits
+        // named after tokens are numbers (review w03-5).
         for text in [
             "a sk-some-long-hyphenated-css-class-name-without-digits",
             "MAX_TOKENS=4096",
+            "MAX_TOKENS=100000000",
+            "TOKEN_LIMIT_RESET_AT=1764000000",
+            "CONTEXT_TOKENS=12345678",
+            "max_tokens=100000000",
             "TOKEN_BUDGET=fine",
             "the ask-ant-farm",
+            r#"{"max_tokens": 4096, "tokens": "12"}"#,
         ] {
             assert_eq!(redact(text), text);
         }
