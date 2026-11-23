@@ -867,6 +867,13 @@ fn down_hosts() -> &'static DownHosts {
 /// Events are held until that commit and dropped on rollback. Every store
 /// helper reached from inside it is SAVEPOINT-based or a plain statement, so
 /// none of them opens a second `BEGIN`.
+/// PURE: whether a live tmux session observed with `observed_created` is
+/// not the one a row stored with `stored_created` tracked. `0` on either
+/// side is "not known" (review w13-3).
+fn recreated_since(stored_created: i64, observed_created: i64) -> bool {
+    stored_created > 0 && observed_created > 0 && stored_created != observed_created
+}
+
 pub(super) fn reconcile_write_one_host(
     s: &mut Store,
     probe: &HostProbe,
@@ -1009,7 +1016,19 @@ fn write_reachable_host(
         .iter()
         .map(|(name, r)| (name.clone(), r.claude_session_id.clone()))
         .collect();
-    let agents = pair_session_agents(live, agent_rows, &stored_ids, host.alias == "local");
+    // Only a Claude pane has a `claude agents` row: a Codex or Hermes pane
+    // in a checkout where some other Claude runs (the person's terminal)
+    // would take that conversation's id and status (review w20-2).
+    let claude_live: Vec<crate::tmux::TmuxSession> = live
+        .iter()
+        .filter(|sess| {
+            stored.get(&sess.name).is_none_or(|r| {
+                r.agent == crate::store::AGENT_CLAUDE || r.agent == crate::store::AGENT_SHELL
+            })
+        })
+        .cloned()
+        .collect();
+    let agents = pair_session_agents(&claude_live, agent_rows, &stored_ids, host.alias == "local");
     for sess in live {
         keep.push(sess.name.clone());
         let project_id = find_project_id_for_path(projects, &host.alias, &sess.path, &paths);
@@ -1197,7 +1216,19 @@ fn write_reachable_host(
         // `host_reboot` verdict marks an agent running NOW lost and
         // the agent pass revives it in the same call — leaving a
         // spurious permanent `lost` event behind.
-        let mut verdict_keep = keep.clone();
+        // A kept name is spared only while it is the tmux session the row
+        // tracked: one whose `session_created` is not the stored
+        // `created_at` was made anew since (tmux-resurrect, a person's
+        // `tmux new -s`) and runs no conversation (review w13-3).
+        let mut verdict_keep: Vec<String> = live
+            .iter()
+            .filter(|sess| {
+                stored
+                    .get(&sess.name)
+                    .is_none_or(|row| !recreated_since(row.created_at, sess.created))
+            })
+            .map(|sess| sess.name.clone())
+            .collect();
         verdict_keep.extend(live_agent_row_names(
             live,
             agent_rows,

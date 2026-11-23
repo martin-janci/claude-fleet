@@ -219,18 +219,21 @@ pub(super) async fn finalise_source(
                 tracing::warn!(session_id = a.source_row_id, error = %e, "[move_session] unpinning the source failed");
             }
         }
+        let mut reconcile_failed = false;
         let killed = match hooks
             .kill_tmux_session(store, a.source_host, a.source_tmux_name)
             .await
         {
             // The source IS gone; only the reconcile after the kill failed
             // (review r18 M4). The participant stays on the target and the
-            // move goes on; the next reconcile pass tidies the row.
+            // move goes on; its row is deleted below, as that reconcile
+            // would have.
             Err(e) if crate::service::sessions::kill_landed(&e) => {
                 warnings.push(format!(
-                    "the source {} on {} was killed, but the reconcile after the kill failed ({}: {}); the next reconcile pass tidies its row",
+                    "the source {} on {} was killed, but the reconcile after the kill failed ({}: {}); its row is removed here",
                     a.source_tmux_name, a.source_host, e.code, e.message
                 ));
+                reconcile_failed = true;
                 Ok(())
             }
             other => other,
@@ -290,6 +293,23 @@ pub(super) async fn finalise_source(
                         "move_session: carrying usage totals to {} failed: {e}",
                         a.target_row_id
                     );
+                }
+            }
+            // The kill landed but its reconcile failed: the source is known
+            // to be gone, so delete its row now (what that reconcile would
+            // have done) rather than leave it for a later pass, whose delete
+            // would write the spend onto its finished tasks after the drop
+            // below had been skipped (review w01-3).
+            if reconcile_failed {
+                if let Ok(Some(row)) = s.get_session_by_id(a.source_row_id) {
+                    if row.host_alias == a.source_host && row.tmux_name == a.source_tmux_name {
+                        if let Err(e) = s.delete_session(a.source_row_id) {
+                            tracing::warn!(
+                                "move_session: deleting the killed source row {} failed: {e}",
+                                a.source_row_id
+                            );
+                        }
+                    }
                 }
             }
             // A mission with a re-pointed task reads the carried spend live

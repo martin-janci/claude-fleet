@@ -64,6 +64,14 @@ pub(super) const PROCESS_DIED_CASE: &str = "CASE WHEN claude_session_id IS NOT N
      AND kind NOT IN ('shell', 'bg', 'external') AND agent != 'shell' \
      THEN 'process_died' ELSE 'missing' END";
 
+/// A ghost [`PROCESS_DIED_CASE`] left `missing` although it had live hooks
+/// and a conversation in an agent pane: it said `stopped` (SessionEnd), so
+/// its person ended it. A mass-loss verdict must not relabel it resumable
+/// (`Store::mark_host_sessions_lost`, review w13-1).
+pub(super) const PERSON_ENDED: &str = "claude_session_id IS NOT NULL \
+     AND last_hook_at IS NOT NULL \
+     AND kind NOT IN ('shell', 'bg', 'external') AND agent != 'shell'";
+
 /// How much of a failed probe's message the host row keeps.
 const PROBE_ERROR_CHARS: usize = 200;
 
@@ -560,7 +568,17 @@ impl Store {
         // live row (`lost_at IS NULL`) takes the branch exactly as before.
         // The INSERT path has the same guard against the remembered kill
         // (`killed_at` above), for the case where the row is already gone.
-        const NOT_STALE: &str = "lost_at IS NULL OR (?20 > 0 AND ?20 > lost_at)";
+        //
+        // A row lost to a reboot or a vanished tmux server is not revived by
+        // a tmux session of its name that is not the one it tracked (its
+        // `session_created` differs from the stored `created_at`): one that
+        // tmux-resurrect or a person's `tmux new -s` brought back runs a
+        // shell, not the conversation (review w13-3). The restore path
+        // clears `lost_at` itself.
+        const NOT_STALE: &str = "lost_at IS NULL OR (?20 > 0 AND ?20 > lost_at \
+             AND NOT (COALESCE(lost_reason, '') IN ('host_reboot', 'tmux_server_gone') \
+                      AND sessions.created_at > 0 AND excluded.created_at > 0 \
+                      AND sessions.created_at != excluded.created_at))";
         // Ownership (multi-user M1, T5, and its review). Reconcile NAMES NO
         // OWNER: every row it inserts is `owner_person_id = NULL` /
         // `unclaimed` (spec §4.3), and the `DO UPDATE` branch below touches
@@ -1025,6 +1043,8 @@ impl Store {
                 .query_map(params.as_slice(), |r| r.get(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
+        // A lost row's open form has nobody to answer it (review w13-2).
+        super::forms::cancel_pending_forms_in(tx, &ghost_ids, now)?;
         for id in &ghost_ids {
             if let Some(row) = fetch_session_by_id(tx, *id)? {
                 out.push(RowChange::SessionUpdated(row));
@@ -1036,6 +1056,9 @@ impl Store {
             // Their facts, before the `DELETE` below: `session:killed` is
             // fenced by them (`store::sessions::killed_payloads`).
             let killed = super::sessions::killed_payloads(tx, &pre_ghost_ids)?;
+            // No FK on form_requests either: a form left pending would
+            // outlive its row (and a reused rowid would inherit it).
+            super::forms::cancel_pending_forms_in(tx, &pre_ghost_ids, now)?;
             let phs = in_clause(pre_ghost_ids.len());
             // No FK cascade on session_events — delete them with the row or
             // they linger as orphans forever.

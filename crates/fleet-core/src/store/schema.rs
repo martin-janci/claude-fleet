@@ -2628,6 +2628,13 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/228_host_login_fingerprints.sql"),
         already_applied: Some(hosts_has_login_fingerprints),
     },
+    // `sessions.launch_model` joins the row-version trigger (re-issued;
+    // no column added).
+    Migration {
+        version: 229,
+        sql: include_str!("../../migrations/229_session_launch_model_row_version.sql"),
+        already_applied: None,
+    },
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration
@@ -7138,12 +7145,11 @@ mod tests {
     /// 080's stale-working veto memory — a `#[serde(skip)]` `SessionRow`
     /// field — and 081's pane spinner stamp). Every other column is
     /// watched, so a write that changes it bumps the counter.
-    const ROW_VERSION_UNWATCHED: [&str; 6] = [
+    const ROW_VERSION_UNWATCHED: [&str; 5] = [
         "row_version",
         "last_reconciled_at",
         "usage_backfill_until",
         "pane_working_at",
-        "launch_model",
         "stale_demoted_at",
     ];
 

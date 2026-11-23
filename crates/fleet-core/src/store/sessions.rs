@@ -422,10 +422,18 @@ impl Store {
             // Reclassify FIRST, while the rows the main mark is about to ghost
             // are still live: those get `reason` directly and must not be
             // counted twice. `lost_at` is deliberately left untouched.
+            // A `missing` ghost that had live hooks and a conversation was
+            // judged `missing` rather than `process_died` only because its
+            // agent said `stopped` (`PROCESS_DIED_CASE`; the stopped mark
+            // itself is gone, `LOSS_CLEARS` emptied it): its person ended
+            // it, and no later verdict makes it resumable (review w13-1:
+            // `/exit` in A, then the last session B ends and tmux exits).
+            let person_ended = super::reconcile::PERSON_ENDED;
             let reclassify_sql = format!(
                 "UPDATE sessions SET lost_reason=?1
                  WHERE host_alias=?2 AND status='ghost'
                    AND COALESCE(lost_reason, 'missing')='missing' AND {kind_filter}
+                   AND NOT ({person_ended})
                    AND COALESCE(last_reconciled_at, 0) < ?3{not_in}
                  RETURNING id"
             );
@@ -455,11 +463,16 @@ impl Store {
                 .prepare(&sql)?
                 .query_map(params.as_slice(), |r| r.get(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
+            // A lost row's open form has nobody to answer it (review w13-2).
+            super::forms::cancel_pending_forms_in(tx, &ids, now)?;
             Ok::<_, rusqlite::Error>(MarkedLost {
                 marked: fetch_all(&ids)?,
                 reclassified: fetch_all(&reclassified_ids)?,
             })
         })?;
+        if !out.marked.is_empty() {
+            self.form_notify.notify_waiters();
+        }
         for row in &out.reclassified {
             // `lost_reason` is on the wire now, so this IS a change the
             // frontend sees — emit it, re-reading the committed row the same
@@ -1886,8 +1899,12 @@ impl Store {
              WHERE session_id = ?2 AND retired_at IS NULL",
             rusqlite::params![now_unix(), id],
         )?;
+        // No FK on form_requests: a pending form would outlive its row
+        // (review w13-2).
+        super::forms::cancel_pending_forms_in(&tx, &[id], now_unix())?;
         tx.execute("DELETE FROM sessions WHERE id=?1", rusqlite::params![id])?;
         tx.commit()?;
+        self.form_notify.notify_waiters();
         self.bus.session_killed(killed);
         Ok(())
     }
@@ -3514,6 +3531,29 @@ mod tests {
         assert_eq!(lost_reason_of(&s, r), Some("host_reboot".to_string()));
         assert_eq!(s.get_session_by_id(r).unwrap().unwrap().lost_at, Some(300));
         assert_eq!(lost_reason_of(&s, f), Some("killed".to_string()));
+    }
+
+    /// Review w13-1: a `missing` ghost that had live hooks and a
+    /// conversation was left `missing` because its person ended it
+    /// (SessionEnd said `stopped`). A later verdict (the last session ends
+    /// and tmux exits) does not make it resumable.
+    #[test]
+    fn a_verdict_leaves_a_ghost_its_person_ended_missing() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let a = s
+            .upsert_session("a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(a, "cid-a").unwrap();
+        s.conn_ref()
+            .execute("UPDATE sessions SET last_hook_at = 100 WHERE id = ?1", [a])
+            .unwrap();
+        set_ghost(&s, a, 400, "missing");
+        let out = s
+            .mark_host_sessions_lost("h", "tmux_server_gone", &[], 500, 0)
+            .unwrap();
+        assert!(out.reclassified.is_empty(), "{out:?}");
+        assert_eq!(lost_reason_of(&s, a), Some("missing".to_string()));
     }
 
     #[test]
