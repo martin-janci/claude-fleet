@@ -488,10 +488,16 @@ impl Store {
     /// A run about a session changes what its row proposes
     /// ([`SessionRow::proposals`](super::SessionRow::proposals) is read from
     /// `decision_runs`, not stored on the row), so the row is re-emitted for
-    /// clients to merge. Nothing for any other subject.
+    /// clients to merge. Nothing for any other subject. The row's version
+    /// is bumped first, as `form_touched` does (w06-4): no column moved, and
+    /// an older reply at the same version would otherwise win the merge.
     fn emit_proposal_subject(&self, subject_kind: &str, subject_id: &str) -> Result<(), IpcError> {
         if subject_kind == super::PROPOSAL_SUBJECT_SESSION {
             if let Ok(id) = subject_id.parse::<i64>() {
+                self.conn.execute(
+                    "UPDATE sessions SET row_version = row_version + 1 WHERE id = ?1",
+                    [id],
+                )?;
                 self.emit_session(id)?;
             }
         }
@@ -986,9 +992,12 @@ mod tests {
         assert!(row(id).proposals.is_empty(), "no decision, no proposal");
 
         bus.take();
+        let version = row(id).row_version;
         let run_id = s
             .insert_decision_run(&assist(&id.to_string(), "turn_outcome", "finished", 0.82))
             .unwrap();
+        // w06-4: the merge guard sees it, so an older reply cannot undo it.
+        assert!(row(id).row_version > version);
         assert!(
             bus.take()
                 .iter()

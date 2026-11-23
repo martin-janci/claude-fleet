@@ -1076,6 +1076,7 @@ impl Store {
                 ),
                 params_then(rusqlite::params![now], &pre_ghost_ids).as_slice(),
             )?;
+            Store::release_pr_openers_in(tx, &pre_ghost_ids)?;
             tx.execute(
                 &format!("DELETE FROM sessions WHERE id IN ({phs})"),
                 rusqlite::params_from_iter(&pre_ghost_ids),

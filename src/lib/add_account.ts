@@ -182,7 +182,7 @@ export function removeLoginMessage(host: string, profile: string, kind: 'login' 
   const what = kind === 'api_key' ? 'its API key' : kind === 'setup_token' ? 'its setup token' : 'its sign-in';
   return (
     `Fleet closes any sign-in pane for ${profile}, deletes ${what} and the profile folder ~/.claude-profiles/${profile} on ${host}. ` +
-    'The host’s own login (~/.claude) is not touched. Refused while a session runs under this profile, or a routine, start rule or mission grant names it. ' +
+    'The host’s own login (~/.claude) is not touched. Refused while a session runs under this profile, or a routine, start rule, placement rule or mission grant names it. ' +
     'Using it again means adding it again.'
   );
 }

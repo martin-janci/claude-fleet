@@ -837,6 +837,64 @@ async fn a_finished_runs_idle_session_is_closed_unless_kept() {
     assert!(events.iter().any(|e| e.kind == "gc_killed"), "{events:?}");
 }
 
+/// w05-1: the auto-close reads a run's session by id, and an id is reused
+/// once its row is deleted. A row the routine did not start, or one a later
+/// run took, is another session and is never closed.
+#[tokio::test]
+async fn a_finished_runs_reused_session_id_is_never_closed() {
+    use super::tick::RUN_SESSION_IDLE_SECS;
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    let mut sids = Vec::new();
+    for n in 0..5 {
+        let at = OCT8 + n * 600;
+        let run = run_now(&f.deps, &ana, r.id, at).await.unwrap();
+        let sid = run.session_id.unwrap();
+        let s = lock(&f.store).unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE routine_runs SET state = 'done', finished_at = ?1, outcome = 'did_work' \
+                 WHERE id = ?2",
+                rusqlite::params![at + 300, run.id],
+            )
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'idle', idle_since = ?1, \
+                 last_activity_at = ?1 WHERE id = ?2",
+                rusqlite::params![at + 300, sid],
+            )
+            .unwrap();
+        sids.push(sid);
+    }
+    {
+        let s = lock(&f.store).unwrap();
+        s.conn_ref()
+            .execute("UPDATE hosts SET reachable = 1 WHERE alias = 'mac'", [])
+            .unwrap();
+        // Run 0's row now belongs to a person's session that took its id.
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET origin = NULL, origin_ref = NULL WHERE id = ?1",
+                [sids[0]],
+            )
+            .unwrap();
+        // Run 1's id was taken by a later run of the same routine (run 4).
+        s.conn_ref()
+            .execute(
+                "UPDATE routine_runs SET session_id = ?1 \
+                 WHERE id = (SELECT MAX(id) FROM routine_runs)",
+                [sids[1]],
+            )
+            .unwrap();
+    }
+    let later = OCT8 + 5 * 600 + RUN_SESSION_IDLE_SECS;
+    tick_once(&f.deps, later).await;
+    let closed = f.fake.closed.lock().unwrap().len();
+    assert_eq!(closed, 0, "neither reused row is closed");
+}
+
 #[tokio::test]
 async fn a_run_over_its_budget_fails_and_pauses_the_routine() {
     let f = fx();

@@ -67,6 +67,9 @@ pub enum RowChange {
     },
     HostRemoved(String),
     AccountUpserted(AccountRow),
+    /// An account row was deleted (w06-5): a made-up API-key or
+    /// setup-token account nothing names any more. Carries its uuid.
+    AccountRemoved(String),
     ProjectUpdated(ProjectRow),
     WorktreeUpdated(WorktreeRow),
     WorktreeRemoved(i64),
@@ -557,6 +560,7 @@ impl RowChange {
             RowChange::HostPinged { .. } => "host:pinged",
             RowChange::HostRemoved(_) => "host:removed",
             RowChange::AccountUpserted(_) => "account:upserted",
+            RowChange::AccountRemoved(_) => "account:removed",
             RowChange::ProjectUpdated(_) => "project:updated",
             RowChange::WorktreeUpdated(_) => "worktree:updated",
             RowChange::WorktreeRemoved(_) => "worktree:removed",
@@ -616,6 +620,7 @@ impl RowChange {
                 alias: alias.clone(),
             }),
             RowChange::AccountUpserted(r) => to_value(r),
+            RowChange::AccountRemoved(uuid) => serde_json::json!({ "uuid": uuid }),
             RowChange::ProjectUpdated(r) => to_value(r),
             RowChange::WorktreeUpdated(r) => to_value(r),
             RowChange::WorktreeRemoved(id) => to_value(&WorktreeRemovedPayload { id: *id }),
@@ -686,6 +691,10 @@ pub trait EventBus: Send + Sync {
     }
     fn account_upserted(&self, row: &AccountRow) {
         self.emit(&RowChange::AccountUpserted(row.clone()));
+    }
+    /// See [`RowChange::AccountRemoved`].
+    fn account_removed(&self, uuid: &str) {
+        self.emit(&RowChange::AccountRemoved(uuid.to_string()));
     }
     fn project_updated(&self, row: &ProjectRow) {
         self.emit(&RowChange::ProjectUpdated(row.clone()));
@@ -970,7 +979,7 @@ impl AttentionInputs {
 /// at COMPILE time: the match there is exhaustive, so a new variant does not
 /// build until it has an arm, and the arm's literal is const-checked against
 /// this list and [`EVENT_KINDS`].
-pub const EVENT_NAMES: [&str; 36] = [
+pub const EVENT_NAMES: [&str; 37] = [
     "session:created",
     "session:updated",
     "session:killed",
@@ -981,6 +990,7 @@ pub const EVENT_NAMES: [&str; 36] = [
     "host:pinged",
     "host:removed",
     "account:upserted",
+    "account:removed",
     "project:updated",
     "worktree:updated",
     "worktree:removed",
@@ -1336,6 +1346,7 @@ impl EventBus for RecordingEventBus {
             RowChange::HostPinged { alias, .. } => alias.clone(),
             RowChange::HostRemoved(alias) => alias.clone(),
             RowChange::AccountUpserted(r) => r.uuid.clone(),
+            RowChange::AccountRemoved(uuid) => uuid.clone(),
             RowChange::ProjectUpdated(r) => r.id.to_string(),
             RowChange::WorktreeUpdated(r) => r.id.to_string(),
             RowChange::TaskUpdated(r) => format!("{}:{}", r.id, r.state),
@@ -1450,6 +1461,7 @@ mod tests {
                 RowChange::AccountUpserted(AccountRow::default()),
                 "account:upserted",
             ),
+            (RowChange::AccountRemoved("u".into()), "account:removed"),
             (RowChange::WorktreeRemoved(1), "worktree:removed"),
             (
                 RowChange::AssetInventoryUpdated(AssetInventoryRow::default()),
@@ -1574,6 +1586,7 @@ mod tests {
                 RowChange::HostProbed(_) => pinned_name!("host:probed"),
                 RowChange::HostRemoved(_) => pinned_name!("host:removed"),
                 RowChange::AccountUpserted(_) => pinned_name!("account:upserted"),
+                RowChange::AccountRemoved(_) => pinned_name!("account:removed"),
                 RowChange::ProjectUpdated(_) => pinned_name!("project:updated"),
                 RowChange::WorktreeUpdated(_) => pinned_name!("worktree:updated"),
                 RowChange::WorktreeRemoved(_) => pinned_name!("worktree:removed"),
@@ -1609,6 +1622,7 @@ mod tests {
             RowChange::ConversationsChanged(1),
             RowChange::HostRemoved("h".into()),
             RowChange::AccountUpserted(AccountRow::default()),
+            RowChange::AccountRemoved("u".into()),
             RowChange::WorktreeRemoved(1),
             RowChange::TrackerRemoved(1),
             RowChange::AssetInventoryUpdated(AssetInventoryRow::default()),

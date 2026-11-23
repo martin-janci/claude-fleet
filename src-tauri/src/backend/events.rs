@@ -734,7 +734,7 @@ pub fn payload_fits(name: &str, payload: &Value) -> Result<(), String> {
         "grant:changed" => integer("session_id").and_then(|()| integer("person_id")),
         "settings:changed" => string("key"),
         "session:event" | "session:conversations" => integer("session_id"),
-        "account:upserted" => string("uuid"),
+        "account:upserted" | "account:removed" => string("uuid"),
         "account_usage:updated" => string("account_uuid"),
         "asset_inventory:cleared" => string("host_alias").and_then(|()| string("harness")),
         // The one event the frontend reads field by field rather than
@@ -772,6 +772,9 @@ pub fn payload_fits(name: &str, payload: &Value) -> Result<(), String> {
 struct Seen {
     sessions: Option<HashSet<i64>>,
     hosts: Option<HashSet<String>>,
+    /// Account uuids (w06-5): an account deleted during a gap is removed
+    /// by the next resync, as a host is.
+    accounts: Option<HashSet<String>>,
 }
 
 /// The real [`FleetResync`]: re-list the hub's rows and emit them as the
@@ -787,7 +790,7 @@ struct Seen {
 /// | `list_sessions` | `SessionRow` | `session:updated`, plus `session:killed` for ids that have gone |
 /// | `list_hosts` | `HostRow` | `host:probed`, plus `host:removed` for aliases that have gone |
 /// | `list_tasks` | `TaskRow` | `task:updated` (a task is never removed) |
-/// | `list_accounts` | `AccountRow` | `account:upserted` (an account is never removed here) |
+/// | `list_accounts` | `AccountRow` | `account:upserted`, plus `account:removed` for uuids that have gone |
 ///
 /// **Projects and worktrees are deliberately not re-listed here.**
 /// `list_projects` answers `ProjectTreeRow` and `list_worktrees` answers
@@ -872,6 +875,21 @@ impl FleetResync for HubResync {
                     set.remove(&alias);
                 }
             }
+            "account:upserted" => {
+                if let Some(uuid) = payload.get("uuid").and_then(Value::as_str) {
+                    seen.accounts
+                        .get_or_insert_with(HashSet::new)
+                        .insert(uuid.to_string());
+                }
+            }
+            "account:removed" => {
+                if let (Some(set), Some(uuid)) = (
+                    seen.accounts.as_mut(),
+                    payload.get("uuid").and_then(Value::as_str),
+                ) {
+                    set.remove(uuid);
+                }
+            }
             _ => {}
         }
     }
@@ -952,8 +970,18 @@ impl FleetResync for HubResync {
         match self.hub.list_accounts().await {
             Ok(rows) => {
                 reached = true;
+                let now: HashSet<String> = rows.iter().map(|r| r.uuid.clone()).collect();
                 for row in &rows {
                     self.emit_row("account:upserted", row);
+                }
+                let gone = {
+                    let mut seen = self.seen.lock().expect("resync state");
+                    let before = seen.accounts.replace(now.clone());
+                    before.map(|b| b.difference(&now).cloned().collect::<Vec<_>>())
+                };
+                for uuid in gone.unwrap_or_default() {
+                    self.sink
+                        .emit_remote("account:removed", serde_json::json!({ "uuid": uuid }));
                 }
             }
             Err(e) => tracing::warn!(

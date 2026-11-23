@@ -288,3 +288,49 @@ fn setting_a_projects_prefix_before_its_first_ticket_reserves_nothing_else() {
     let renamed = s.set_ticket_prefix(Some(space.id), None, "FLEET").unwrap();
     assert_eq!(renamed.former_prefixes, vec!["FLT".to_string()]);
 }
+
+/// w05-3: a project id is a reused rowid. A removed project's space is
+/// detached (its keys still resolve), so the next project to take the id
+/// draws its own prefix from 1, and its pull requests are no longer the
+/// new project's.
+#[test]
+fn a_project_that_reuses_a_removed_ones_id_gets_its_own_ticket_space() {
+    let s = Store::open_in_memory().unwrap();
+    let app = s.upsert_project("acme", "app", "/p/app").unwrap();
+    let old = task(&s, "First", Some(app), None);
+    assert_eq!(old.key.as_deref(), Some("APP-1"));
+    s.conn
+        .execute(
+            "INSERT INTO pull_requests (url, state, project_id, first_seen_at, updated_at) \
+             VALUES ('https://github.com/acme/app/pull/1', 'OPEN', ?1, 1, 1)",
+            [app],
+        )
+        .unwrap();
+    s.delete_project(app, &crate::store::FingerprintKeys::new())
+        .unwrap();
+    let backend = s.upsert_project("acme", "backend", "/p/backend").unwrap();
+    assert_eq!(backend, app, "the id is reused");
+    let new = task(&s, "Mine", Some(backend), None);
+    assert_eq!(new.key.as_deref(), Some("BAC-1"));
+    assert_eq!(
+        s.item_by_ticket_key("APP-1").unwrap().map(|i| i.id),
+        Some(old.id),
+        "the old key still resolves"
+    );
+    let left: Option<i64> = s
+        .conn
+        .query_row("SELECT project_id FROM pull_requests", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(left, None);
+    let labels: Vec<(String, Option<i64>)> = s
+        .ticket_prefix_overview()
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.prefix, r.project_id))
+        .collect();
+    assert!(labels.contains(&("APP".into(), None)), "{labels:?}");
+    assert!(
+        labels.contains(&("BAC".into(), Some(backend))),
+        "{labels:?}"
+    );
+}

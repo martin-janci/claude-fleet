@@ -57,6 +57,12 @@ fn map(row: &rusqlite::Row<'_>) -> rusqlite::Result<ParticipantRow> {
     })
 }
 
+/// `session_messages m`'s sender session as it is now, or NULL (w05-6).
+const SENDER_NOW: &str = "CASE WHEN m.from_participant_id IS NOT NULL \
+       THEN (SELECT p.session_id FROM participants p \
+              WHERE p.id = m.from_participant_id AND p.retired_at IS NULL) \
+     ELSE (SELECT s.id FROM sessions s WHERE s.id = m.from_session_id AND s.id <> 0) END";
+
 impl Store {
     /// The participant id for `session_id`, creating it when absent. The
     /// unique partial index on `participants(session_id)` makes a concurrent
@@ -258,6 +264,13 @@ impl Store {
     /// delivered (delivery resolves through the participant) or, without
     /// this clause, ever be swept either. Those are aged on `sent_at` since
     /// there is no participant to retire.
+    ///
+    /// The "never read" notice goes to the sender's session as it is NOW
+    /// (w05-6, as `fail_pending_locked` does for peers): its live
+    /// participant's session, which follows a move, and none when the
+    /// sender is gone. A session id is reused, so the raw `from_session_id`
+    /// may name someone else's session; it is used only for a pre-043 row
+    /// with no sender participant, and only while that row exists.
     pub fn sweep_retired_participants(
         &self,
         now: i64,
@@ -284,18 +297,18 @@ impl Store {
         )?;
 
         // Orphaned rows first: no participant to sweep by, only messages.
-        let orphans: Vec<(i64, i64, bool)> = {
-            let mut stmt = self.conn.prepare(
-                "SELECT id, from_session_id, read_at IS NULL FROM session_messages \
-                 WHERE to_participant_id IS NULL AND sent_at <= ?1",
-            )?;
+        let orphans: Vec<(i64, Option<i64>, bool)> = {
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT m.id, {SENDER_NOW}, m.read_at IS NULL FROM session_messages m \
+                 WHERE m.to_participant_id IS NULL AND m.sent_at <= ?1",
+            ))?;
             let rows = stmt.query_map(rusqlite::params![cutoff], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         for (mid, sender, unread) in &orphans {
-            if *unread && *sender != 0 {
+            if let (true, Some(sender)) = (*unread, sender) {
                 let _ = self.insert_session_event(
                     *sender,
                     "message_undeliverable",
@@ -320,17 +333,17 @@ impl Store {
         for pid in &ids {
             // Tell each sender about mail that was never read. A message
             // that WAS read is swept quietly — nothing went wrong there.
-            let unread: Vec<(i64, i64)> = {
-                let mut stmt = self.conn.prepare(
-                    "SELECT id, from_session_id FROM session_messages \
-                     WHERE to_participant_id = ?1 AND read_at IS NULL",
-                )?;
+            let unread: Vec<(i64, Option<i64>)> = {
+                let mut stmt = self.conn.prepare(&format!(
+                    "SELECT m.id, {SENDER_NOW} FROM session_messages m \
+                     WHERE m.to_participant_id = ?1 AND m.read_at IS NULL",
+                ))?;
                 let rows =
                     stmt.query_map(rusqlite::params![pid], |r| Ok((r.get(0)?, r.get(1)?)))?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
             for (mid, sender) in unread {
-                if sender != 0 {
+                if let Some(sender) = sender {
                     let _ = self.insert_session_event(
                         sender,
                         "message_undeliverable",
@@ -613,6 +626,34 @@ mod tests {
         assert!(
             ev.iter().any(|e| e.kind == "message_undeliverable"),
             "the SENDER must learn its message was never read: {ev:?}"
+        );
+    }
+
+    /// w05-6: the notice goes to the sender as it is now. A sender that is
+    /// gone is told nothing, and a session that reused its id is not told
+    /// about a message it never sent.
+    #[test]
+    fn a_reused_sender_id_is_not_told_about_mail_it_never_sent() {
+        let s = Store::open_in_memory().unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        let _m = s.insert_message(a, b, "pending", "message", None).unwrap();
+        s.delete_session(b).unwrap();
+        s.delete_session(a).unwrap();
+        let carol = seed(&s, "carol");
+        assert_eq!(carol, a, "the premise: carol's session took the id");
+        s.conn
+            .execute(
+                "UPDATE participants SET retired_at = retired_at - ?1 WHERE retired_at IS NOT NULL",
+                rusqlite::params![RETIRED_RETENTION_SECS + 60],
+            )
+            .unwrap();
+        s.sweep_retired_participants(now_unix(), RETIRED_RETENTION_SECS)
+            .unwrap();
+        let ev = s.list_session_events(carol, 10).unwrap();
+        assert!(
+            !ev.iter().any(|e| e.kind == "message_undeliverable"),
+            "{ev:?}"
         );
     }
 

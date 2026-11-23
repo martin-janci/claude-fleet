@@ -710,7 +710,9 @@ impl Store {
     /// Where shipped work came from (gap plan G3.2, Today's "from Morning
     /// PR sweep"): the routine whose newest run started the participant's
     /// session, else `mission <name>` when the item is a mission's task.
-    /// `None` for work a person started.
+    /// `None` for work a person started. The session row must still be the
+    /// routine's (its origin, w05-1): a session id is reused once its row
+    /// is deleted, and a person's session that took it is not the run's.
     pub fn shipped_from(
         &self,
         participant_id: Option<i64>,
@@ -723,8 +725,11 @@ impl Store {
                 .prepare_cached(
                     "SELECT COALESCE(r.name, rr.routine_name) FROM participants p \
                      JOIN routine_runs rr ON rr.session_id = p.session_id \
+                     JOIN sessions s ON s.id = p.session_id \
                      LEFT JOIN routines r ON r.id = rr.routine_id \
-                     WHERE p.id = ?1 ORDER BY rr.id DESC LIMIT 1",
+                     WHERE p.id = ?1 AND s.origin = 'routine' \
+                       AND s.origin_ref = CAST(rr.routine_id AS TEXT) \
+                     ORDER BY rr.id DESC LIMIT 1",
                 )?
                 .query_row([p], |r| r.get(0))
                 .optional()?;
@@ -2831,6 +2836,14 @@ mod shipped_from_tests {
                 |r| r.get(0),
             )
             .unwrap();
+        // w05-1: a row the routine did not start (a person's session that
+        // reused the run's session id) is not the routine's work.
+        assert_eq!(s.shipped_from(Some(pid), None).unwrap(), None);
+        c.execute(
+            "UPDATE sessions SET origin = 'routine', origin_ref = CAST(?1 AS TEXT) WHERE id = ?2",
+            rusqlite::params![rid, sid],
+        )
+        .unwrap();
         assert_eq!(
             s.shipped_from(Some(pid), None).unwrap().as_deref(),
             Some("Morning PR sweep")

@@ -807,6 +807,9 @@ impl Store {
     /// (`last_viewed_at` after the run started; a `nothing` run is stamped
     /// viewed when it is read as such, so for it only a look over an hour
     /// after it closed counts). Nor is one a safe-kill is under way for.
+    /// Nor a row that is no longer the run's (w05-1): a session id is
+    /// reused once its row is deleted, so a row this routine did not start,
+    /// or one a later run started, is another session (as `run_session`).
     pub fn routine_sessions_to_close(
         &self,
         idle_before: i64,
@@ -822,7 +825,10 @@ impl Store {
                       ROW_NUMBER() OVER (PARTITION BY rr.routine_id \
                                          ORDER BY rr.started_at DESC, rr.id DESC) AS newest \
                  FROM routine_runs rr JOIN sessions s ON s.id = rr.session_id \
-                WHERE s.status = 'running') \
+                WHERE s.status = 'running' \
+                  AND s.origin = 'routine' AND s.origin_ref = CAST(rr.routine_id AS TEXT) \
+                  AND NOT EXISTS (SELECT 1 FROM routine_runs o \
+                                   WHERE o.session_id = rr.session_id AND o.id > rr.id)) \
              SELECT l.sid, l.host_alias, l.tmux_name FROM live l \
                JOIN hosts h ON h.alias = l.host_alias AND h.reachable = 1 AND h.hidden = 0 \
               WHERE l.newest > ?2 \

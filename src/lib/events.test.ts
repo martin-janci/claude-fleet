@@ -25,6 +25,7 @@ import {
   type SessionRow,
 } from './sessions';
 import { hosts, applyHostEvents, resetTombstonesForTests as resetHostTombstones } from './hosts';
+import { accounts, applyAccountEvents, type AccountRow } from './accounts';
 
 function row(over: Partial<SessionRow> = {}): SessionRow {
   return {
@@ -209,6 +210,23 @@ describe('subscribeToRowEvents', () => {
       ['acct-1', 'never_fetched'],
       ['acct-1', 'ok'],
     ]);
+  });
+
+  // w06-5: a deleted account is announced to every window, which drops it
+  // (by default through `dropAccounts`, whenever accounts are wired).
+  it('delivers account:removed uuids, and drops them from the store by default', async () => {
+    const removed: string[][] = [];
+    await subscribeToRowEvents({ onAccountsRemoved: (uuids) => removed.push(uuids) });
+    fire('account:removed', { uuid: 'setuptoken-1' });
+    fire('account:removed', { uuid: 7 });
+    await flush();
+    expect(removed).toEqual([['setuptoken-1']]);
+
+    applyAccountEvents([{ uuid: 'setuptoken-2' } as AccountRow, { uuid: 'real' } as AccountRow]);
+    await subscribeToRowEvents({ onAccountEvents: applyAccountEvents });
+    fire('account:removed', { uuid: 'setuptoken-2' });
+    await flush();
+    expect(get(accounts).map((a) => a.uuid)).toEqual(['real']);
   });
 
   it('delivers session:event to onTimelineEvents as one batch, in order', async () => {
