@@ -991,6 +991,13 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         Ok(n) => tracing::info!("closed {n} stale move-wait(s) as hub_restarted at startup"),
         Err(e) => tracing::warn!("sweep_unresolved_waits at startup failed: {e}"),
     }
+    // w17-2: a run whose start prompt the previous process was still
+    // waiting to type is failed (the mission retries it) rather than left
+    // holding its slot with an idle worker; nothing here waits for it now.
+    match fleet_core::service::work::resume::sweep_undelivered_run_prompts(&store, &ssh) {
+        0 => {}
+        n => tracing::info!("failed {n} run(s) whose prompt a restart left untyped"),
+    }
 
     // Readers off the writer: read-only connections on the same file for the
     // token cache in `authorize` and the plain read tools. Opened here, after

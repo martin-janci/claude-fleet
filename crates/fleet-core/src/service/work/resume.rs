@@ -828,10 +828,13 @@ fn probe_target_for(s: &Store, plan: &ResumePlan) -> Option<handover::ProbeTarge
 }
 
 /// The worktree to open: the known one, else recreate it from the branch.
-/// The recreated worktree takes the BRANCH's name when that is a plain name,
-/// so the work stays on its branch (`worktree_add_script` checks an existing
-/// branch out when base == name); a `feat/x`-style branch keeps the old
-/// worktree name and forks from it instead.
+/// The recreated worktree takes the BRANCH's name whenever that is a name a
+/// new worktree may have, so the work stays on its branch
+/// (`worktree_add_script` checks an existing branch out when base == name,
+/// and flattens a `feat/x` into the directory `feat-x` itself). A slashed
+/// branch is such a name too (w10-4): forking it into `feat-x` would move
+/// the work off the branch its pull request follows. Only a branch that is
+/// not (`main`, or no branch known) keeps the old worktree name.
 fn worktree_choice(
     s: &Store,
     plan: &ResumePlan,
@@ -850,7 +853,8 @@ fn worktree_choice(
         return Ok((Some(row.id), None));
     }
     let plain = |b: &str| {
-        crate::validate::git_ref(b).is_ok() && !b.contains('/') && b != "main" && b != "master"
+        crate::validate::git_ref(b).is_ok()
+            && crate::service::sessions::validate_new_worktree_name(b).is_ok()
     };
     let name = match plan.branch.as_deref() {
         Some(b) if plain(b) => b.to_string(),
@@ -1339,6 +1343,17 @@ pub fn spawn_run_prompt(
     task_id: i64,
 ) {
     let row = row.clone();
+    // Persisted before the wait (w17-2): the wait lives only in this
+    // process, and a restart during it would otherwise leave the task
+    // `running` with an idle worker until its age limit.
+    if let Ok(s) = store.lock() {
+        let _ = s.insert_session_event_quietly(
+            row.id,
+            None,
+            RUN_PROMPT_PENDING,
+            Some(&task_id.to_string()),
+        );
+    }
     crate::rt::spawn(async move {
         let typed =
             sessions::seed::seed_background(&store, &ssh, &row, &prompt, sessions::seed::HANDOVER)
@@ -1349,21 +1364,91 @@ pub fn spawn_run_prompt(
         let Some((host_alias, name)) = run_prompt_undelivered(&store, task_id) else {
             return;
         };
-        if let Err(e) = sessions::kill_session(
-            sessions::KillSessionArgs {
-                host_alias: host_alias.clone(),
-                name: name.clone(),
-                force: false,
-            },
-            &store,
-            &ssh,
-        )
-        .await
-        {
-            tracing::warn!(host = %host_alias, session = %name, error = %e,
-                "[work] an undelivered run's worker was not stopped");
-        }
+        stop_undelivered_worker(&store, &ssh, host_alias, name).await;
     });
+}
+
+/// The timeline kind [`spawn_run_prompt`] writes before it waits for the
+/// REPL, its detail the task id (w17-2). The seed writes `repl_ready` (then
+/// types) once the REPL is up, so a pending mark with no `repl_ready` after
+/// it is a prompt that was never typed.
+pub const RUN_PROMPT_PENDING: &str = "run_prompt_pending";
+
+/// Stop the worker of a run whose prompt was not typed (see
+/// [`spawn_run_prompt`]).
+async fn stop_undelivered_worker(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
+    host_alias: String,
+    name: String,
+) {
+    if let Err(e) = sessions::kill_session(
+        sessions::KillSessionArgs {
+            host_alias: host_alias.clone(),
+            name: name.clone(),
+            force: false,
+        },
+        store,
+        ssh,
+    )
+    .await
+    {
+        tracing::warn!(host = %host_alias, session = %name, error = %e,
+            "[work] an undelivered run's worker was not stopped");
+    }
+}
+
+/// The open run tasks whose start prompt a previous process was still
+/// waiting to type when it stopped (w17-2): a [`RUN_PROMPT_PENDING`] mark
+/// on the worker's timeline with no `repl_ready` or `handover_started`
+/// after it. Nothing in this process is waiting for them.
+pub(crate) fn undelivered_run_tasks(s: &Store) -> Result<Vec<i64>, IpcError> {
+    let mut stmt = s.conn_ref().prepare(
+        "SELECT DISTINCT t.id FROM tasks t \
+           JOIN session_events e ON e.session_id = t.worker_session_id \
+            AND e.kind = ?1 AND e.detail = CAST(t.id AS TEXT) \
+          WHERE t.state IN ('queued', 'running') \
+            AND NOT EXISTS (SELECT 1 FROM session_events r \
+                             WHERE r.session_id = e.session_id AND r.id > e.id \
+                               AND r.kind IN (?2, ?3)) \
+          ORDER BY t.id",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![
+            RUN_PROMPT_PENDING,
+            sessions::seed::REPL_READY,
+            sessions::seed::HANDOVER.started
+        ],
+        |r| r.get(0),
+    )?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// At startup, before anything can start a new run (w17-2): fail each run
+/// whose prompt the previous process never typed ([`undelivered_run_tasks`],
+/// as its own wait would have on giving up), so the mission retries it
+/// rather than holding a parallel slot for a day, and stop its worker (in
+/// the background). Returns how many were failed. Never fatal.
+pub fn sweep_undelivered_run_prompts(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> usize {
+    let ids = match store.lock() {
+        Ok(s) => undelivered_run_tasks(&s).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "[work] reading undelivered runs at startup failed");
+            Vec::new()
+        }),
+        Err(_) => return 0,
+    };
+    let mut failed = 0;
+    for id in ids {
+        let worker = run_prompt_undelivered(store, id);
+        failed += 1;
+        if let Some((host_alias, name)) = worker {
+            let (store, ssh) = (Arc::clone(store), Arc::clone(ssh));
+            let _ = crate::rt::try_spawn(async move {
+                stop_undelivered_worker(&store, &ssh, host_alias, name).await;
+            });
+        }
+    }
+    failed
 }
 
 /// The failure branch of [`spawn_run_prompt`]: fails the task when it is
@@ -1615,6 +1700,17 @@ mod tests {
         assert_eq!(a.worktree_id, None);
         assert_eq!(a.new_worktree.as_deref(), Some("abc-1"));
         assert_eq!(a.base_branch.as_deref(), Some("abc-1"));
+        // w10-4: a slashed branch stays the branch, so pushes still reach
+        // its pull request; `main` never names a new worktree.
+        let mut slashed = p.clone();
+        slashed.branch = Some("feat/x".into());
+        let a = resume_session_args(&s, &slashed, "last", None).unwrap();
+        assert_eq!(a.new_worktree.as_deref(), Some("feat/x"));
+        assert_eq!(a.base_branch.as_deref(), Some("feat/x"));
+        let mut on_main = p.clone();
+        on_main.branch = Some("main".into());
+        let a = resume_session_args(&s, &on_main, "last", None).unwrap();
+        assert_ne!(a.new_worktree.as_deref(), Some("main"));
     }
 
     #[test]

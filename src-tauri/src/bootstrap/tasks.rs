@@ -81,6 +81,14 @@ impl FleetTasks for RealFleetTasks {
             Ok(n) => tracing::info!("closed {n} stale move-wait(s) as hub_restarted at startup"),
             Err(e) => tracing::warn!("sweep_unresolved_waits at startup failed: {e}"),
         }
+        // w17-2: the runs whose start prompt the last launch never typed.
+        match fleet_core::service::work::resume::sweep_undelivered_run_prompts(
+            &self.store,
+            &self.ssh,
+        ) {
+            0 => {}
+            n => tracing::info!("failed {n} run(s) whose prompt a restart left untyped"),
+        }
         maybe_start_mcp(
             &self.app,
             &self.store,

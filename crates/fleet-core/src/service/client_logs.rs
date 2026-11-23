@@ -257,7 +257,12 @@ impl LogPoller {
         ) else {
             return Poll::Retry;
         };
-        let lines = own_lines(self.dir.as_deref(), minutes, now);
+        // Off the async workers (w17-4): up to a day of log files read,
+        // filtered and redacted, as the hub's own route does.
+        let dir = self.dir.clone();
+        let lines = tokio::task::spawn_blocking(move || own_lines(dir.as_deref(), minutes, now))
+            .await
+            .unwrap_or_default();
         let n = lines.len();
         let body = json!({ "id": id, "lines": lines, "app": self.app }).to_string();
         match self.transport.post_json(&self.url, &self.token, body).await {
