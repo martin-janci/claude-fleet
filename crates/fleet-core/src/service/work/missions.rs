@@ -286,7 +286,13 @@ pub fn waiting_missions(
     let s = lock(store)?;
     let now = crate::store::now_unix();
     let mut out = Vec::new();
-    for mut m in s.list_active_missions()? {
+    // A paused mission waits too while a brake's question is open (review
+    // 23b w09-1).
+    for mut m in s
+        .list_missions()?
+        .into_iter()
+        .filter(|m| m.state == "active" || m.state == "paused")
+    {
         if sees_mission(&s, scope, &m)? || reads_as_worker(&s, scope, &m)? {
             super::orchestrate::fill_spend(&s, &mut m, now)?;
             if m.waiting_on.is_some() {

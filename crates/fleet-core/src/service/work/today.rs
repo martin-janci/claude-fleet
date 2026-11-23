@@ -540,7 +540,11 @@ fn waiting_missions(
 ) -> Result<Vec<TodayMission>, IpcError> {
     let mut out = Vec::new();
     for mut m in s.list_missions()? {
-        if m.state != "active" || !super::missions::sees_mission(s, view, &m)? {
+        // A paused mission waits while a brake's question is open (review
+        // 23b w09-1).
+        if !matches!(m.state.as_str(), "active" | "paused")
+            || !super::missions::sees_mission(s, view, &m)?
+        {
             continue;
         }
         super::orchestrate::fill_spend(s, &mut m, now)?;

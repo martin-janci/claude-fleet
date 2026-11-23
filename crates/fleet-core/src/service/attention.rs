@@ -652,21 +652,38 @@ pub struct MissionWait {
     pub open_cards: u32,
 }
 
-/// Whether an active mission waits on a person, and why. Only an `active`
-/// mission is asked: a draft is still being written, a paused one has its
-/// brake reason, a finished one waits on nobody. A question outranks the
-/// grant (only a person answers it, and signing does not), and the grant
-/// outranks plain confirmations (signing clears most of them at once).
+/// Whether a mission waits on a person, and why. An `active` mission is
+/// asked; a `paused` one only for an open question: a brake (budget, no
+/// progress, owner disabled) pauses it AND asks the person on an `ask`
+/// card, which must reach the Inbox and the badges like any question
+/// (review 23b w09-1). A person's own pause raises no card, so it stays
+/// silent. A draft is still being written, a finished one waits on nobody.
+/// A question outranks the grant (only a person answers it, and signing
+/// does not), and the grant outranks plain confirmations (signing clears
+/// most of them at once).
 pub fn mission_waiting(
     mission: &crate::store::MissionRow,
     live_grant: bool,
     open_cards: &[crate::store::CardRow],
 ) -> Option<MissionWait> {
-    if mission.state != "active" {
+    let paused = mission.state == "paused";
+    if mission.state != "active" && !paused {
         return None;
     }
     let open: Vec<&crate::store::CardRow> =
         open_cards.iter().filter(|c| c.state == "open").collect();
+    if paused {
+        let since = open
+            .iter()
+            .filter(|c| c.kind == "ask")
+            .map(|c| c.created_at)
+            .min()?;
+        return Some(MissionWait {
+            reason: MissionWaitReason::Question,
+            since,
+            open_cards: u32::try_from(open.len()).unwrap_or(u32::MAX),
+        });
+    }
     let oldest = |kind: Option<&str>| {
         open.iter()
             .filter(|c| kind.is_none_or(|k| c.kind == k))
@@ -876,13 +893,30 @@ mod tests {
             None,
             "level 0 asks for no grant, and a decided card waits on nobody"
         );
-        for state in ["draft", "paused", "completed"] {
+        for state in ["draft", "completed"] {
             assert_eq!(
                 mission_waiting(&mission(state, 2), false, &cards),
                 None,
                 "{state}"
             );
         }
+        // Review 23b w09-1: a brake pauses a mission and asks on an `ask`
+        // card; that question waits like any other. A paused mission with
+        // no open question (a person's pause) waits on nobody, grant or
+        // confirm queue aside.
+        assert_eq!(
+            mission_waiting(&mission("paused", 2), false, &cards),
+            Some(MissionWait {
+                reason: MissionWaitReason::Question,
+                since: 70,
+                open_cards: 2,
+            }),
+            "paused with an open ask waits"
+        );
+        assert_eq!(
+            mission_waiting(&mission("paused", 2), false, &cards[..1]),
+            None
+        );
         assert_eq!(
             serde_json::to_value(mission_waiting(&mission("active", 1), false, &[]).unwrap())
                 .unwrap(),

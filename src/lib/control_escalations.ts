@@ -196,7 +196,7 @@ export function controlMissionIds(
  * sign, a question, a step to OK (review w04-7) — minus those put off.
  * `scope`, when given, keeps only those missions (Control's); `null` is the
  * whole fleet. A card put off comes back when the mission waits on
- * something else.
+ * something else, or on the same kind of thing asked anew.
  */
 export function missionEscalations(
   missions: readonly Mission[],
@@ -208,7 +208,10 @@ export function missionEscalations(
     const reason = m.waiting_on?.reason;
     if (!reason || isFinal(m.state)) continue;
     if (scope && !scope.has(m.id)) continue;
-    const key = `mission:${m.id}:${reason}`;
+    // Keyed with when it started waiting (the oldest open card), as a
+    // session card is with its turn: Later puts off this ask, not the
+    // mission's next question (review 23b w09-4).
+    const key = `mission:${m.id}:${reason}:${m.waiting_on?.since ?? 0}`;
     if (later.has(key)) continue;
     out.push({ key, session: null, missionId: m.id, bucket: 'waiting', line: `${m.name} ${MISSION_WHY[reason] ?? 'waits on you'}`, detail: null });
   }
