@@ -68,7 +68,9 @@ fn token_minter(caller: &Caller) -> Result<Minter, IpcError> {
         && caller.is_trusted_client()
         && caller.mode == TokenMode::Full
     {
-        return Ok(Minter::OwnerDevice);
+        return Ok(Minter::OwnerDevice {
+            person: caller.person(),
+        });
     }
     Err(IpcError::new(
         codes::E_FORBIDDEN,

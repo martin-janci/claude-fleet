@@ -501,6 +501,15 @@ impl Store {
         // not that authority either — it narrows, it names no session, and it
         // is reached only by disabling the recipient.
         super::session_grants::revoke_live_grants_to_person(&tx, id, at)?;
+        // And every live named token a device of theirs created (migration
+        // 230, review w11-1): a named token speaks for the hub's owner, so
+        // one outliving its creator's departure is reach the operator
+        // believed they had removed.
+        tx.execute(
+            "UPDATE control_tokens SET revoked_at = ?2 \
+             WHERE created_by_person = ?1 AND revoked_at IS NULL",
+            rusqlite::params![id, at],
+        )?;
         // Their automation stops too (review R6): a routine of theirs would
         // keep starting sessions owned by a disabled person, on the fleet's
         // hosts and logins, that nobody else may see or stop. Each is

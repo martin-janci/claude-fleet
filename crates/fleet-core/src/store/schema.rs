@@ -1168,6 +1168,17 @@ fn work_items_has_held_at(conn: &Connection) -> rusqlite::Result<bool> {
 }
 
 /// `already_applied` guard of migration 228.
+/// `already_applied` guard of migration 230: both creator columns exist.
+fn rows_have_creators(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM pragma_table_info('pinned_dashboards') WHERE name = 'created_by')
+              + (SELECT COUNT(*) FROM pragma_table_info('control_tokens') WHERE name = 'created_by_person')",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n == 2)
+}
+
 fn hosts_has_login_fingerprints(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'login_fingerprints'",
@@ -2634,6 +2645,12 @@ const MIGRATIONS: &[Migration] = &[
         version: 229,
         sql: include_str!("../../migrations/229_session_launch_model_row_version.sql"),
         already_applied: None,
+    },
+    // Who made a pinned dashboard and a named token. ADD COLUMN, so guarded.
+    Migration {
+        version: 230,
+        sql: include_str!("../../migrations/230_row_creators.sql"),
+        already_applied: Some(rows_have_creators),
     },
 ];
 

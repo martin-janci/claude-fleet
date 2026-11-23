@@ -108,6 +108,9 @@ pub struct NewControlToken<'a> {
     pub scope: ApiScope,
     pub hosts: Option<&'a [String]>,
     pub expires_at: Option<i64>,
+    /// The person whose device creates it (migration 230); `None` for the
+    /// master token or the operator. Disabling them revokes it.
+    pub created_by_person: Option<i64>,
 }
 
 impl Store {
@@ -130,15 +133,17 @@ impl Store {
             .map(|h| serde_json::to_string(h).unwrap_or_else(|_| "[]".into()));
         self.conn
             .execute(
-                "INSERT INTO control_tokens (name, token_sha256, scope, hosts, expires_at, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO control_tokens \
+                   (name, token_sha256, scope, hosts, expires_at, created_at, created_by_person) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
                     name,
                     new.token_sha256,
                     new.scope.as_str(),
                     hosts,
                     new.expires_at,
-                    now_unix()
+                    now_unix(),
+                    new.created_by_person
                 ],
             )
             .map_err(|e| match e {
@@ -241,6 +246,7 @@ mod tests {
             scope,
             hosts,
             expires_at: None,
+            created_by_person: None,
         }
     }
 
