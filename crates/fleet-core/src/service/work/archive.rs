@@ -79,6 +79,22 @@ pub fn archive_item(
     })
 }
 
+/// Starting work on `item` brings it back from the archive (w10-14 (a)):
+/// it is worked on, so it belongs in My work and Sprint again. Best effort:
+/// the start itself is done.
+pub fn unarchive_on_start(s: &Store, item: i64) {
+    match s.set_item_archived(item, false) {
+        Ok(true) => s.emit_work_changed(WorkChanged {
+            what: "item".into(),
+            task_id: Some(format!("item:{item}")),
+            rule_id: None,
+            view_id: None,
+        }),
+        Ok(false) => {}
+        Err(e) => tracing::debug!(item, error = %e.message, "[work] not unarchived on start"),
+    }
+}
+
 /// A bare task's archive: its ended links, through [`super::ended`] (the
 /// caller's whole scope, the event, and `E_NOTFOUND` for a task with none).
 fn archive_bare(

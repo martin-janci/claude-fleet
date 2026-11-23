@@ -524,6 +524,21 @@ pub enum TrackerError {
 }
 
 impl TrackerError {
+    /// Whether a write that failed with this may still have landed at the
+    /// tracker (w07-1): the request went out and its answer was lost (it
+    /// timed out, the body was cut off, the read failed, curl got no
+    /// reply). A write that is not idempotent (a new ticket, a comment) is
+    /// not sent again after one, or the tracker gets two.
+    pub fn maybe_delivered(&self) -> bool {
+        let TrackerError::Unreachable(m) = self else {
+            return false;
+        };
+        m == TIMED_OUT
+            || m.starts_with(crate::net::https::TRUNCATED)
+            || m.starts_with("read from ")
+            || (m.starts_with("curl on ") && (m.contains("(exit 52)") || m.contains("(exit 56)")))
+    }
+
     /// The same error naming the call it came from (`createmeta for PD`),
     /// where a sentence carries a detail; the other kinds are unchanged.
     pub fn during(self, call: &str) -> Self {
@@ -1280,13 +1295,16 @@ pub(crate) enum CallKind {
     Other,
 }
 
+/// What [`map_transport`] says of a request that outlived its timeout.
+const TIMED_OUT: &str = "timed out";
+
 /// A transport failure → the tracker error it means.
 pub(crate) fn map_transport(e: crate::net::https::TransportError) -> TrackerError {
     use crate::net::https::TransportError as T;
     match e {
         T::Refused(m) => TrackerError::Refused(m),
         T::Connect(m) => TrackerError::Unreachable(m),
-        T::Timeout => TrackerError::Unreachable("timed out".into()),
+        T::Timeout => TrackerError::Unreachable(TIMED_OUT.into()),
         T::TooLarge(m) | T::Protocol(m) => TrackerError::Invalid(m),
     }
 }

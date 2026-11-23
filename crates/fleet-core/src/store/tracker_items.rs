@@ -554,6 +554,18 @@ impl Store {
                 };
                 let status_moved = old.status_category != after.status_category
                     || old.status_name != after.status_name;
+                // w10-14 (b): the tracker moved the ticket's work (its
+                // status, assignee or sprint) since it was archived: it is
+                // live again, so it comes back to the lists.
+                let (meta_was, meta_now) = (
+                    ItemMeta::parse(old.meta.as_deref()),
+                    ItemMeta::parse(after.meta.as_deref()),
+                );
+                let work_moved = status_moved
+                    || old.assignees != after.assignees
+                    || old.iteration != after.iteration
+                    || meta_was.assignee_id != meta_now.assignee_id
+                    || meta_was.iteration_active != meta_now.iteration_active;
                 if changed {
                     self.conn.execute(
                         "UPDATE work_items SET key = ?1, aliases = ?2, title = ?3, url = ?4, \
@@ -563,7 +575,8 @@ impl Store {
                            updated_at = ?16, unavailable_at = NULL, unavailable_reason = NULL, \
                            status_changed_at = CASE WHEN ?17 THEN ?16 ELSE status_changed_at END, \
                            due_at = ?19, priority = ?20, labels = ?21, estimate = ?22, \
-                           estimate_unit = ?23 \
+                           estimate_unit = ?23, \
+                           archived_at = CASE WHEN ?24 THEN NULL ELSE archived_at END \
                          WHERE id = ?18",
                         rusqlite::params![
                             after.key,
@@ -588,7 +601,8 @@ impl Store {
                             after.priority,
                             after.labels,
                             after.estimate.map(|e| e.0),
-                            after.estimate_unit
+                            after.estimate_unit,
+                            work_moved
                         ],
                     )?;
                 } else if touch_unchanged {

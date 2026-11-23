@@ -67,7 +67,10 @@ export async function promoteWorkItem(
 export function promotionLabel(p: PromotionView | null | undefined): string | null {
   if (!p) return null;
   const where = p.tracker || 'the tracker';
-  if (p.state === 'pending') return `Creating the ticket in ${where}…`;
+  if (p.state === 'pending') {
+    // A try already failed (w07-3): say why it is still trying.
+    return p.error ? `Still trying to create the ticket in ${where}: ${p.error}` : `Creating the ticket in ${where}…`;
+  }
   if (p.state === 'failed') return `Not created in ${where}: ${p.error ?? 'the tracker refused it'}`;
   return null;
 }

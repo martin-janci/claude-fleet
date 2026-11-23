@@ -1739,6 +1739,10 @@ where
         },
     };
     record_start_steps(store, plan, &outcome.row, outcome.queued);
+    // w10-14 (a): work started on an archived ticket brings it back.
+    if let (Some(item), Ok(s)) = (plan.item_id, lock(store)) {
+        crate::service::work::archive::unarchive_on_start(&s, item);
+    }
     Ok(outcome)
 }
 
