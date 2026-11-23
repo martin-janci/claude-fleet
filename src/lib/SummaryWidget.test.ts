@@ -65,6 +65,22 @@ describe('SummaryWidget', () => {
     expect(old.queryByTestId('summary-text')).toBeNull();
   });
 
+  it('keeps two summaries of one title apart by their slot (review w14-4)', async () => {
+    mock.mockResolvedValue({ text: 'First.', model: 'haiku', host_alias: 'h', from: '1 task', at: 1 });
+    const a = render(SummaryWidget, { props: { dashId: 'dash.two', widget, slot: 'Status' } });
+    await fireEvent.click(a.getByTestId('summary-write'));
+    await waitFor(() => expect(a.getByTestId('summary-text').textContent).toBe('First.'));
+    a.unmount();
+    mock.mockResolvedValue({ text: 'Second.', model: 'haiku', host_alias: 'h', from: '1 task', at: 1 });
+    const other = { ...widget, prompt: 'Something else' };
+    const b = render(SummaryWidget, { props: { dashId: 'dash.two', widget: other, slot: 'Status #2' } });
+    await fireEvent.click(b.getByTestId('summary-write'));
+    await waitFor(() => expect(b.getByTestId('summary-text').textContent).toBe('Second.'));
+    b.unmount();
+    const again = render(SummaryWidget, { props: { dashId: 'dash.two', widget, slot: 'Status' } });
+    expect(again.getByTestId('summary-text').textContent).toBe('First.');
+  });
+
   it('sends only the feeds its dashboard names', async () => {
     mock.mockResolvedValue({ text: 'ok', model: 'haiku', host_alias: 'h', from: '1 task', at: 1 });
     const { dashboardFeeds } = await import('./dashboards');

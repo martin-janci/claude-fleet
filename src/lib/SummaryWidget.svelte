@@ -20,9 +20,13 @@
     widget,
     fleet,
     feedKeys = [],
+    slot = undefined,
   }: {
     dashId: string;
     widget: Extract<Widget, { kind: 'summary' }>;
+    /** The widget's slot on its dashboard (`widgetSlots`); its title when
+     *  not given. */
+    slot?: string;
     /** What the page holds of the fleet, for `sources` other than work. */
     fleet?: FleetData;
     /** The feeds the dashboard's `feed` widgets name: the ones sent. */
@@ -36,7 +40,7 @@
     typeof v === 'object' && v !== null && typeof (v as Kept).ask === 'string' && typeof (v as Kept).draft?.text === 'string';
   const askOf = (w: typeof widget) => JSON.stringify([w.prompt, w.query ?? {}, w.sources ?? []]);
 
-  const key = $derived(summaryKey(dashId, widget.title));
+  const key = $derived(summaryKey(dashId, slot ?? widget.title));
   let kept = $state<Kept | null>(null);
   $effect(() => {
     const k = readPref<Kept | null>(key, null, (v): v is Kept | null => v === null || isKept(v));

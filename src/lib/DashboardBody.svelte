@@ -29,6 +29,7 @@
     groupsShown,
     paceOf,
     widgetKey,
+    widgetSlots,
     segmentsOf,
     shortDate,
     statOf,
@@ -112,6 +113,9 @@
   const fleet = $derived<FleetData>({ sessions: $sessions, hosts: $hosts, accounts: $accounts, usage: $accountUsage, facts: $attentionFacts });
   /** The feeds this dashboard's `feed` widgets name: all a summary sends. */
   const feedKeys = $derived(dash.widgets.flatMap((w) => (w.kind === 'feed' ? [w.key] : [])));
+  /** Each widget's title, unique on this dashboard: what a summary keeps
+   *  its text under. */
+  const slots = $derived(widgetSlots(dash.widgets));
 
   const answerOf = (w: Widget) => answers[widgetKey(w)];
   const errorOf = (w: Widget) => errors[widgetKey(w)];
@@ -141,7 +145,7 @@
             >
           {/if}
           {#if w.kind === 'summary'}
-            <SummaryWidget dashId={dash.id} widget={w} {fleet} {feedKeys} />
+            <SummaryWidget dashId={dash.id} widget={w} {fleet} {feedKeys} slot={slots[i]} />
           {:else if w.kind === 'feed'}
             {@const f = $dashboardFeeds[w.key]}
             {#if w.show === 'stat'}

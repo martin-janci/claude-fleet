@@ -2,7 +2,16 @@
 // rows a `fleet` widget counts, a feed's words, and what a summary widget
 // with `sources` sends with its request.
 import { describe, it, expect } from 'vitest';
-import { feedBy, feedStat, fleetFacts, summaryContext, type DashboardFeed, type FleetData } from './dashboard_sources';
+import {
+  cutToJsonBytes,
+  feedBy,
+  feedStat,
+  fleetFacts,
+  summaryContext,
+  SUMMARY_FEEDS_MAX_BYTES,
+  type DashboardFeed,
+  type FleetData,
+} from './dashboard_sources';
 import type { SessionRow } from './sessions';
 import type { HostRow } from './hosts';
 import type { AccountRow } from './accounts';
@@ -124,5 +133,21 @@ describe('feeds', () => {
     const c = summaryContext(['feeds'], data, { deploys: feed, notes: other }, ['deploys', 'missing'], NOW);
     expect(Object.keys(c.feeds as object)).toEqual(['deploys']);
     expect(summaryContext(['feeds'], data, { deploys: feed }, [], NOW)).toEqual({ feeds: {} });
+  });
+
+  it('cuts long feeds to their share of the hub cap (review w14-2)', () => {
+    // Four reports of 3600 non-ASCII characters and newlines: ~29 KB of JSON
+    // as they are, over the hub's 24 KiB.
+    const long = (key: string): DashboardFeed => ({ ...feed, key, value: 'čš\n'.repeat(1200) });
+    const all = { a: long('a'), b: long('b'), c: long('c'), d: long('d') };
+    const c = summaryContext(['feeds'], data, all, ['a', 'b', 'c', 'd'], NOW);
+    const bytes = new TextEncoder().encode(JSON.stringify(c)).length;
+    expect(bytes).toBeLessThanOrEqual(24 * 1024);
+    const sent = (c.feeds as Record<string, { value: string }>).a.value;
+    expect(sent.endsWith('…')).toBe(true);
+    expect(new TextEncoder().encode(JSON.stringify(sent)).length).toBeLessThanOrEqual(SUMMARY_FEEDS_MAX_BYTES / 4);
+    // A short value is sent whole; a cut never splits a character.
+    expect(cutToJsonBytes('3 today', 100)).toBe('3 today');
+    expect(cutToJsonBytes('😀😀😀', 12)).toBe('😀…');
   });
 });

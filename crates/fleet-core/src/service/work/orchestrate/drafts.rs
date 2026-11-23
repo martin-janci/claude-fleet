@@ -637,6 +637,86 @@ pub fn dashboard_summary_prompt(
     (prompt, from)
 }
 
+/// An account as the page names it (`accountLabel` in `src/lib/accounts.ts`):
+/// its nickname, else its email, else its display name, else the start of
+/// its uuid.
+fn account_label(a: &crate::store::AccountRow) -> String {
+    let nonempty = |v: &Option<String>| {
+        v.as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+    };
+    nonempty(&a.nickname)
+        .or_else(|| nonempty(&a.email))
+        .or_else(|| nonempty(&a.display_name))
+        .unwrap_or_else(|| a.uuid.chars().take(8).collect())
+}
+
+/// PURE: a summary's other data, held to `org` (review w14-3): the counts
+/// are that org's only, and so is what goes with them to its host. Host rows
+/// ("alias: …") are kept for the org's own hosts and unassigned ones, account
+/// rows ("label: …") for accounts the org is not forbidden; a row naming
+/// neither is dropped. Each source's `summary` line counted every row, so it
+/// goes. Feeds are written by any of the person's routines, in any org, and
+/// are not sent at all; only `sessions` (counts, no names) is kept besides.
+pub fn fence_summary_context(
+    context: &serde_json::Value,
+    org: i64,
+    hosts: &[(String, Option<i64>)],
+    accounts: &[(String, Vec<i64>)],
+) -> serde_json::Value {
+    use serde_json::Value;
+    let Some(o) = context.as_object() else {
+        return Value::Null;
+    };
+    // The longest known label a row starts with decides it.
+    let filter = |source: &Value, known: &[(&str, bool)]| -> Value {
+        let rows: Vec<Value> = source
+            .get("rows")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter(|r| {
+                        let Some(r) = r.as_str() else { return false };
+                        known
+                            .iter()
+                            .filter(|(l, _)| r.strip_prefix(l).is_some_and(|t| t.starts_with(": ")))
+                            .max_by_key(|(l, _)| l.len())
+                            .is_some_and(|(_, keep)| *keep)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        serde_json::json!({ "rows": rows })
+    };
+    let mut out = serde_json::Map::new();
+    for (k, v) in o {
+        match k.as_str() {
+            "sessions" => {
+                out.insert(k.clone(), v.clone());
+            }
+            "hosts" => {
+                let known: Vec<(&str, bool)> = hosts
+                    .iter()
+                    .map(|(a, h)| (a.as_str(), h.is_none() || *h == Some(org)))
+                    .collect();
+                out.insert(k.clone(), filter(v, &known));
+            }
+            "accounts" => {
+                let known: Vec<(&str, bool)> = accounts
+                    .iter()
+                    .map(|(l, forbidden)| (l.as_str(), !forbidden.contains(&org)))
+                    .collect();
+                out.insert(k.clone(), filter(v, &known));
+            }
+            _ => {}
+        }
+    }
+    Value::Object(out)
+}
+
 /// PURE: a summary widget's other data as it may be sent: an object of at
 /// most [`SUMMARY_CONTEXT_MAX_BYTES`].
 pub fn check_summary_context(c: Option<&serde_json::Value>) -> Result<(), IpcError> {
@@ -728,7 +808,28 @@ pub async fn dashboard_summary(
         None => crate::service::work::view::IdOrWord::Word("none".into()),
     });
     let stats = crate::service::work::stats::stats(&deps.store, scope, Some(&filters), None)?;
-    let (prompt, from) = dashboard_summary_prompt(request, &stats, args.context.as_ref());
+    // The page's other data is held to the same org (review w14-3).
+    let context = match (org_id, args.context.as_ref()) {
+        (Some(org), Some(c)) => {
+            let s = lock(&deps.store)?;
+            let hosts: Vec<(String, Option<i64>)> = s
+                .list_hosts()?
+                .into_iter()
+                .map(|h| {
+                    let org = s.host_org(&h.alias).ok().flatten();
+                    (h.alias, org)
+                })
+                .collect();
+            let accounts: Vec<(String, Vec<i64>)> = s
+                .list_accounts()?
+                .iter()
+                .map(|a| (account_label(a), a.forbidden_org_ids.clone()))
+                .collect();
+            Some(fence_summary_context(c, org, &hosts, &accounts))
+        }
+        (_, c) => c.cloned(),
+    };
+    let (prompt, from) = dashboard_summary_prompt(request, &stats, context.as_ref());
     let model = {
         let s = lock(&deps.store)?;
         settings::get_string_for(&s, settings::WORK_SUMMARY_MODEL, org_id)

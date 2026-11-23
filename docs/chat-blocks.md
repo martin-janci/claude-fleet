@@ -377,7 +377,9 @@ Each widget has a `kind`, a `title` (≤ 80) and a `query`:
   `sessions`, `hosts`, `accounts`, `feeds`; `work` alone when absent) adds
   what the page shows of those to the request (`context`, at most 24 KiB of
   JSON, fenced as data), so the model can answer "which host is behind"
-  or "what did last night's routine find" too.
+  or "what did last night's routine find" too. When the counts are one
+  org's, so is that: only the org's own (and unassigned) hosts and the
+  accounts it may use are sent, and no feeds.
 - `{ "kind": "feed", "title", "key", "show"? }`: the value written last to
   feed `key` (letters, digits, `. _ : -`), never computed by the app:
   Control writes it (`dashboards { feed, key, value }`), as can the
@@ -396,11 +398,13 @@ A `query` is the Work view's filters (`work { tree }`'s `filters`): `org`
 (an id or `none`), `status` (`any`, `open`, `todo`, `in_progress`, `done`),
 `mine`, `has`, `review`, `query` (words), `assignee`, `status_name`,
 `group_by`, `stages` (a list), `iteration` (`current`, `none` or a name),
-`epic` (a key or `item:<id>`) and `item_type`. Any other key is a problem:
-a misspelt filter would count the wrong tasks. Absent, a stat counts
-every task the person can open.
+`epic` (a key or `item:<id>`), `item_type`, `label` (one label, at most 200
+characters) and `priority` (`urgent`, `high`, `medium`, `low` or `none`).
+Any other key is a problem: a misspelt filter would count the wrong tasks.
+Absent, a stat counts every task the person can open.
 
-A `feed` or `fleet` widget takes no `query`.
+A `feed` or `fleet` widget counts no tasks: a `query` on one is checked
+as above and then ignored.
 
 The block names filters and never a number. The card reads each query
 with `work { stats }` under the person's own access and draws the answer,

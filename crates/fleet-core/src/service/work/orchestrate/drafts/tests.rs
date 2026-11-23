@@ -510,6 +510,45 @@ fn a_summary_widgets_other_data_is_fenced_and_named() {
     assert!(check_summary_context(Some(&big)).is_err());
 }
 
+/// Review w14-3: a summary bound to an org sends that org's hosts and the
+/// accounts it may use, never another org's, and no feeds.
+#[test]
+fn an_org_bound_summary_keeps_its_context_in_that_org() {
+    let context = serde_json::json!({
+        "sessions": { "summary": "2 working", "rows": ["Working: 2"] },
+        "hosts": { "summary": "3/3 hosts reachable",
+                   "rows": ["a-box: load 0.4", "b-box: offline", "shared: online", "stray: online"] },
+        "accounts": { "summary": "40% highest",
+                      "rows": ["ada@a.example: 5h 40%", "bo@b.example: 5h 10%"] },
+        "feeds": { "deploys": { "value": "B's release notes" } },
+    });
+    let hosts = [
+        ("a-box".to_string(), Some(1)),
+        ("b-box".to_string(), Some(2)),
+        ("shared".to_string(), None),
+    ];
+    let accounts = [
+        ("ada@a.example".to_string(), vec![]),
+        ("bo@b.example".to_string(), vec![1]),
+    ];
+    let out = fence_summary_context(&context, 1, &hosts, &accounts);
+    assert_eq!(
+        out,
+        serde_json::json!({
+            "sessions": { "summary": "2 working", "rows": ["Working: 2"] },
+            "hosts": { "rows": ["a-box: load 0.4", "shared: online"] },
+            "accounts": { "rows": ["ada@a.example: 5h 40%"] },
+        })
+    );
+    let json = out.to_string();
+    assert!(!json.contains("b-box") && !json.contains("bo@b") && !json.contains("release"));
+    // Not an object: nothing goes.
+    assert_eq!(
+        fence_summary_context(&serde_json::json!([1]), 1, &hosts, &accounts),
+        serde_json::Value::Null
+    );
+}
+
 /// A summary widget runs only with a request, refuses a long one and
 /// filters that are not the Work view's, and with no session today has no
 /// host: nothing is booked.
