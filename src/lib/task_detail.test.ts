@@ -18,6 +18,9 @@ describe('task_detail', () => {
   it('promotionLabel says a ticket is on its way, or why it was not made', () => {
     expect(promotionLabel(null)).toBeNull();
     expect(promotionLabel({ state: 'pending', tracker: 'Jira' })).toBe('Creating the ticket in Jira…');
+    expect(promotionLabel({ state: 'pending', tracker: 'Jira', error: 'rate limited' })).toBe(
+      'Still trying to create the ticket in Jira: rate limited',
+    );
     expect(promotionLabel({ state: 'failed', tracker: 'Jira', error: 'not permitted: 403' })).toBe('Not created in Jira: not permitted: 403');
     expect(promotionLabel({ state: 'failed', tracker: '' })).toBe('Not created in the tracker: the tracker refused it');
   });

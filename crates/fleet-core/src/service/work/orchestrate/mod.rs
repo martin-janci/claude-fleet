@@ -797,14 +797,28 @@ async fn apply_step_inner(
 /// The card an `ask` step raises: one per item and reason, however often
 /// the loop sees it.
 fn ask_card(s: &Store, m: i64, step: &Step) -> Result<Option<CardRow>, IpcError> {
+    ask_card_as(s, m, step, &ask_decision(step))
+}
+
+/// The decision id an ask carries: the same words on the same item make the
+/// same id, so a planner repeating itself raises one card.
+fn ask_decision(step: &Step) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     step.reason.hash(&mut h);
-    let decision = format!("loop:ask:{}:{:x}", step.item_id.unwrap_or(0), h.finish());
+    format!("loop:ask:{}:{:x}", step.item_id.unwrap_or(0), h.finish())
+}
+
+fn ask_card_as(
+    s: &Store,
+    m: i64,
+    step: &Step,
+    decision: &str,
+) -> Result<Option<CardRow>, IpcError> {
     s.add_card(
         m,
         &NewCard {
-            decision_id: &decision,
+            decision_id: decision,
             source: "loop",
             kind: "ask",
             work_item_id: step.item_id,
@@ -1525,12 +1539,39 @@ async fn loop_apply_cards(
     Ok(shown)
 }
 
-/// Ask the planner about `m` now, and card its answer.
+/// Ask the planner about `m` now, and card its answer. An ask that was made
+/// (its `planned` event written) and then failed (the host dropped, no
+/// Claude, no answer, every login signed out) is said on the log as
+/// `planner_failed`, so the loop asks again after a backoff (w05-2).
 pub async fn run_planner(
     deps: &Deps,
     m: &MissionRow,
     why: &str,
     actor: &Actor,
+) -> Result<PlanOutcome, IpcError> {
+    let mut asked = false;
+    let out = plan_once(deps, m, why, actor, &mut asked).await;
+    if let (Err(e), true) = (&out, asked) {
+        if let Ok(s) = lock(&deps.store) {
+            event(
+                &s,
+                m.id,
+                limit::PLANNER_FAILED_EVENT,
+                &actor.name(),
+                None,
+                serde_json::json!({ "why": e.message, "code": e.code }),
+            );
+        }
+    }
+    out
+}
+
+async fn plan_once(
+    deps: &Deps,
+    m: &MissionRow,
+    why: &str,
+    actor: &Actor,
+    asked: &mut bool,
 ) -> Result<PlanOutcome, IpcError> {
     let _slot = PlannerSlot::take(deps, m)?;
     let now = now_unix();
@@ -1583,6 +1624,7 @@ pub async fn run_planner(
             None,
             serde_json::json!({ "why": why, "host": login.host, "profile": login.profile }),
         );
+        *asked = true;
         (
             login,
             a.grant.clone(),
@@ -2099,18 +2141,24 @@ pub fn revoke(
 }
 
 /// `work_link { action: missions_pause_all }`: pause every active mission
-/// the caller may change, and revoke their grants (Pause all, §7.5).
+/// the caller may change, and revoke their grants (Pause all, §7.5). A
+/// mission already paused (by a brake) loses its grant too (w05-3), so its
+/// Resume needs a new signature like the others'.
 pub fn pause_all(store: &Mutex<Store>, scope: &ViewScope) -> Result<Vec<i64>, IpcError> {
     let s = lock(store)?;
     let who = super::graph::actor(scope);
     let mut paused = Vec::new();
     for m in s.list_missions()? {
-        if m.state != "active" || !super::missions::may_change_mission(&s, scope, &m)? {
+        if !matches!(m.state.as_str(), "active" | "paused")
+            || !super::missions::may_change_mission(&s, scope, &m)?
+        {
             continue;
         }
-        s.set_mission_state(m.id, None, "paused", &who)?;
+        if m.state == "active" {
+            s.set_mission_state(m.id, None, "paused", &who)?;
+            paused.push(m.id);
+        }
         s.revoke_grants(m.id)?;
-        paused.push(m.id);
     }
     Ok(paused)
 }
@@ -2118,26 +2166,37 @@ pub fn pause_all(store: &Mutex<Store>, scope: &ViewScope) -> Result<Vec<i64>, Ip
 /// Pause `m` because a brake fired, with a question for a person.
 fn brake(s: &Store, m: &MissionRow, kind: &str, why: String) -> Result<(), IpcError> {
     s.set_mission_state(m.id, None, "paused", "loop")?;
-    event(
-        s,
-        m.id,
-        kind,
-        "loop",
-        None,
-        serde_json::json!({ "why": why }),
-    );
-    ask_card(
-        s,
-        m.id,
-        &Step {
-            kind: "ask".into(),
-            item_id: None,
-            role: None,
-            reason: format!("paused: {why}"),
-            context: None,
-            auto: false,
-        },
-    )?;
+    let fired = s
+        .record_mission_event(
+            m.id,
+            &NewMissionEvent {
+                kind,
+                actor: "loop",
+                payload: Some(serde_json::json!({ "why": why })),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|err| {
+            tracing::debug!(mission = m.id, error = %err.message, "[orchestrate] event not recorded");
+            None
+        });
+    let step = Step {
+        kind: "ask".into(),
+        item_id: None,
+        role: None,
+        reason: format!("paused: {why}"),
+        context: None,
+        auto: false,
+    };
+    // Each brake asks anew (w05-1): the same words a second time, after the
+    // first card was answered and the mission resumed, still need a person.
+    // A card from an earlier brake that is still open already asks it.
+    let base = ask_decision(&step);
+    if s.open_card_with_decision_prefix(m.id, &base)? {
+        return Ok(());
+    }
+    let decision = format!("{base}:{}", fired.unwrap_or_else(now_unix));
+    ask_card_as(s, m.id, &step, &decision)?;
     Ok(())
 }
 
@@ -2193,6 +2252,12 @@ fn planner_wanted(
     // login it may use is signed in, or something else answers.
     if words.signed_out().is_some() && limit::choose_in(s, m, grant, now, &words, &[]).is_err() {
         return Ok(None);
+    }
+    // w05-2: the last ask failed without an answer; ask again once its
+    // backoff is over, whatever else changed.
+    if let Some((at, failures)) = words.failed() {
+        let wait = limit::planner_retry_after(failures);
+        return Ok((now - at >= wait).then_some("the planner's last call failed"));
     }
     let last_plan = words.last_planned_at();
     let items = s.mission_items(m.id)?;

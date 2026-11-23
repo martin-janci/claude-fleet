@@ -1030,12 +1030,23 @@ pub fn interval(store: &Mutex<Store>) -> Option<Duration> {
             .ok()
             .flatten()
     });
-    let secs = crate::service::settings::resolve(
-        crate::service::settings::WORK_SYNC_INTERVAL_SECS,
-        raw.as_deref(),
-    )
-    .parse::<u64>()
-    .unwrap_or(DEFAULT_INTERVAL_SECS);
+    interval_of(raw.as_deref())
+}
+
+/// [`interval`] read on a store the caller holds.
+pub fn interval_in(s: &Store) -> Option<Duration> {
+    let raw = s
+        .get_setting(crate::service::settings::WORK_SYNC_INTERVAL_SECS)
+        .ok()
+        .flatten();
+    interval_of(raw.as_deref())
+}
+
+fn interval_of(raw: Option<&str>) -> Option<Duration> {
+    let secs =
+        crate::service::settings::resolve(crate::service::settings::WORK_SYNC_INTERVAL_SECS, raw)
+            .parse::<u64>()
+            .unwrap_or(DEFAULT_INTERVAL_SECS);
     (secs > 0).then(|| Duration::from_secs(secs.max(60)))
 }
 

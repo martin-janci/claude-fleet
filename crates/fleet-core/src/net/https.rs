@@ -457,6 +457,11 @@ pub fn render_request(req: &Request, at: &Target) -> Result<Vec<u8>, TransportEr
 /// exactly and a chunked body must reach its last chunk; a shortfall is
 /// [`TransportError::Connect`] (`truncated response`), so the tracker
 /// reads as unreachable rather than as answering unreadable JSON.
+/// How a [`TransportError::Connect`] for a body the network cut mid-way
+/// starts: the request was sent and its answer began, so a write may have
+/// landed (tracker write-back, w07-1).
+pub const TRUNCATED: &str = "truncated response";
+
 pub fn parse_response(raw: &[u8]) -> Result<Response, TransportError> {
     let split = http1::find(raw, b"\r\n\r\n")
         .ok_or_else(|| TransportError::Protocol("no end of the response head".into()))?;
@@ -476,7 +481,7 @@ pub fn parse_response(raw: &[u8]) -> Result<Response, TransportError> {
             .map_err(TransportError::Protocol)?;
         if !dechunker.finished() {
             return Err(TransportError::Connect(format!(
-                "truncated response: the chunked body stopped after {} byte(s), before its last chunk",
+                "{TRUNCATED}: the chunked body stopped after {} byte(s), before its last chunk",
                 out.len()
             )));
         }
@@ -494,7 +499,7 @@ pub fn parse_response(raw: &[u8]) -> Result<Response, TransportError> {
         match declared {
             Some(n) if body.len() < n => {
                 return Err(TransportError::Connect(format!(
-                    "truncated response: {} of {n} body bytes arrived",
+                    "{TRUNCATED}: {} of {n} body bytes arrived",
                     body.len()
                 )));
             }

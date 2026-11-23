@@ -47,6 +47,11 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt", "io"] }
 dashmap = "6"
 async-trait = "0.1"
+# Routine schedules (`service/routines/cron.rs`) are read in the IANA zone the
+# person saved them in, so a daylight-saving change keeps the wall-clock time.
+# The tz database is compiled in (`tzdb-bundle-always`): a hub in a container
+# has no /usr/share/zoneinfo, and Windows has none at all. MIT/Unlicense.
+jiff = { version = "1.0.1", default-features = false, features = ["std", "tzdb-bundle-always"] }
 
 # The hub/agent wire types, shared with the `fleet-agent` binary (which never
 # depends on this crate). See crates/fleet-proto/src/lib.rs.

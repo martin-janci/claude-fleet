@@ -644,6 +644,35 @@ fn an_archived_ticket_is_listed_under_archived_only() {
     assert!(fx.keys(Some("archived"), &OrgScope::All).is_empty());
 }
 
+/// w10-14 (b): the tracker moving an archived ticket's status, assignee or
+/// sprint brings it back; another edit (its title) does not.
+#[test]
+fn a_tracker_move_brings_an_archived_ticket_back() {
+    let fx = Fx::new();
+    let s = fx.store.lock().unwrap();
+    let item = s.work_item_by_key("ABC-1").unwrap().unwrap();
+    let tracker = item.tracker_id.unwrap();
+    let ext = item.external_id.clone().unwrap();
+    let write = |title: &str, status: &str| TrackerItemWrite {
+        external_id: ext.clone(),
+        key: Some("ABC-1".into()),
+        title: title.into(),
+        status_name: status.into(),
+        status_category: "in_progress".into(),
+        ..Default::default()
+    };
+    s.upsert_tracker_item(tracker, &write("Fix login", "In Progress"))
+        .unwrap();
+    let archived = || s.get_work_item(item.id).unwrap().unwrap().archived_at;
+    assert!(s.set_item_archived(item.id, true).unwrap());
+    s.upsert_tracker_item(tracker, &write("Fix the login", "In Progress"))
+        .unwrap();
+    assert!(archived().is_some(), "a new title is no reason");
+    s.upsert_tracker_item(tracker, &write("Fix the login", "In Review"))
+        .unwrap();
+    assert_eq!(archived(), None, "a status move is");
+}
+
 /// The scoping matrix: master and paired clients see everything; host A
 /// sees only what is linked on host A, and nothing when nothing is.
 #[tokio::test]
@@ -1097,10 +1126,36 @@ async fn start_resolves_project_and_host_from_past_work_and_links_started() {
     .unwrap();
     assert_eq!(hinted.host_alias, "hosta");
 
+    // w10-14: starting work on an archived ticket brings it back.
+    let abc1 = fx
+        .store
+        .lock()
+        .unwrap()
+        .tracker_item_for_key("ABC-1")
+        .unwrap()
+        .unwrap()
+        .id;
+    assert!(fx
+        .store
+        .lock()
+        .unwrap()
+        .set_item_archived(abc1, true)
+        .unwrap());
     let (row, queued) = start_with(&fx.store, &plan, None, &OrgScope::All, spawn_on(&fx.store))
         .await
         .unwrap();
     assert!(!queued);
+    assert_eq!(
+        fx.store
+            .lock()
+            .unwrap()
+            .get_work_item(abc1)
+            .unwrap()
+            .unwrap()
+            .archived_at,
+        None,
+        "unarchived by the start"
+    );
     let w = row.work.unwrap();
     assert_eq!(
         (w.key.as_deref(), w.source.as_str()),

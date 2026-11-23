@@ -37,6 +37,15 @@ describe('error copy', () => {
     expect(errorDetail(e)).toBe('E_LOCK: store mutex poisoned');
   });
 
+  it('a lock taken again is one bug, not a restart (w02-2)', () => {
+    const e = {
+      code: 'E_INTERNAL',
+      message: 'this action hit a bug and was not done (store lock taken again at a.rs:1:1 by the thread that holds it)',
+    };
+    expect(errorText(e)).toBe('Something went wrong inside Orbit Fleet');
+    expect(errorText(e)).not.toContain('restart');
+  });
+
   it("keeps a backend sentence as it is, minus a leading code", () => {
     expect(errorText({ code: 'E_INVALID', message: 'E_INVALID: the name is taken' })).toBe('the name is taken');
     expect(errorDetail({ code: 'E_INVALID', message: 'the name is taken' })).toBe('E_INVALID');

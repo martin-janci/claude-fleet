@@ -318,20 +318,31 @@ impl Store {
         Ok(())
     }
 
-    /// The attempts at the mission's members, counted.
+    /// The attempts at the mission's members, counted. The last activity is
+    /// the newest task start or finish, or the last output of an open run's
+    /// worker session: a run that works for hours is progress (w05-5). A
+    /// headless check has no session, so its start stands.
     pub fn mission_task_counts(&self, mission_id: i64) -> Result<MissionTaskCounts, IpcError> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*), \
                COALESCE(SUM(t.state IN ('queued','running')), 0), \
-               MAX(COALESCE(t.finished_at, t.started_at, t.created_at)) \
+               MAX(COALESCE(t.finished_at, t.started_at, t.created_at)), \
+               (SELECT MAX(s.last_activity_at) FROM sessions s \
+                 WHERE s.id IN (SELECT t2.worker_session_id FROM tasks t2 \
+                   JOIN work_items i2 ON i2.id = t2.work_item_id \
+                  WHERE i2.orchestration_project_id = ?1 \
+                    AND t2.state IN ('queued','running') \
+                    AND COALESCE(t2.role, '') <> 'wrapup')) \
              FROM tasks t JOIN work_items i ON i.id = t.work_item_id \
              WHERE i.orchestration_project_id = ?1 AND COALESCE(t.role, '') <> 'wrapup'",
             [mission_id],
             |r| {
+                let tasks: Option<i64> = r.get(2)?;
+                let workers: Option<i64> = r.get(3)?;
                 Ok(MissionTaskCounts {
                     total: r.get(0)?,
                     open: r.get(1)?,
-                    last_activity_at: r.get(2)?,
+                    last_activity_at: tasks.max(workers),
                 })
             },
         )?)
@@ -411,6 +422,28 @@ impl Store {
             rusqlite::params![mission_id, since],
             |r| r.get(0),
         )?)
+    }
+
+    /// Whether `mission_id` holds an open card whose decision id is `prefix`
+    /// or starts with `prefix:` (a brake's ask, w05-1).
+    pub fn open_card_with_decision_prefix(
+        &self,
+        mission_id: i64,
+        prefix: &str,
+    ) -> Result<bool, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM orchestration_cards \
+                 WHERE orchestration_project_id = ?1 AND state = 'open' \
+                   AND (decision_id = ?2 \
+                        OR substr(decision_id, 1, length(?2) + 1) = ?2 || ':') \
+                 LIMIT 1",
+                rusqlite::params![mission_id, prefix],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     /// Add a card. A `decision_id` already carded answers `Ok(None)`: the

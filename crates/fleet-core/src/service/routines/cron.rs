@@ -5,10 +5,13 @@
 //! `@yearly` (`@annually`) stand for their usual lines. When both day
 //! fields are restricted a day matching either fires, as in every cron.
 //!
-//! A line is read at a fixed offset from UTC (minutes east), the one the
-//! person's device had when they saved it: there is no time-zone database
-//! in the build, so a daylight-saving change moves the wall-clock time of a
-//! fire by an hour until the routine is saved again.
+//! A line is read in the IANA zone the person's device was in when they
+//! saved it (`time_zone`, through the tz database compiled into the build),
+//! so `0 9 * * *` stays at 09:00 across a daylight-saving change. A wall
+//! time the change skips fires at the instant after the gap (02:30 on a
+//! spring-forward night fires at 03:30); one it repeats fires once, at the
+//! first. A routine with no zone, or one the database does not know, is read
+//! at its fixed offset from UTC (`utc_offset_min`, minutes east).
 
 /// A parsed line: one bit per allowed value of each field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +164,71 @@ impl Cron {
     }
 }
 
+/// The zone `name` names, when the bundled tz database knows it.
+fn zone(name: Option<&str>) -> Option<jiff::tz::TimeZone> {
+    jiff::tz::TimeZone::get(name?.trim()).ok()
+}
+
+/// Whether the bundled tz database knows the zone `name` names: a routine
+/// in it follows its daylight-saving changes.
+pub fn zone_known(name: Option<&str>) -> bool {
+    zone(name).is_some()
+}
+
+/// `at` (unix seconds) as local wall-clock seconds in `tz`.
+fn wall_of(tz: &jiff::tz::TimeZone, at: i64) -> Option<i64> {
+    let ts = jiff::Timestamp::from_second(at).ok()?;
+    Some(at + i64::from(tz.to_offset(ts).seconds()))
+}
+
+/// The instant the wall-clock second `wall` names in `tz`: a skipped time
+/// moves past the gap, a repeated one is its first.
+fn instant_of(tz: &jiff::tz::TimeZone, wall: i64) -> Option<i64> {
+    let (y, mo, d) = civil_from_days(wall.div_euclid(86_400));
+    let secs = wall.rem_euclid(86_400);
+    let dt = jiff::civil::DateTime::new(
+        i16::try_from(y).ok()?,
+        mo as i8,
+        d as i8,
+        (secs / 3600) as i8,
+        (secs / 60 % 60) as i8,
+        (secs % 60) as i8,
+        0,
+    )
+    .ok()?;
+    Some(tz.to_timestamp(dt).ok()?.as_second())
+}
+
+impl Cron {
+    /// The first fire strictly after `after`, read in `time_zone` when the
+    /// tz database knows it and at `offset_min` east of UTC otherwise.
+    pub fn next_in(&self, after: i64, time_zone: Option<&str>, offset_min: i64) -> Option<i64> {
+        let Some(tz) = zone(time_zone) else {
+            return self.next_after(after, offset_min);
+        };
+        // Walk wall-clock fires from a little before `after`'s own wall time:
+        // a fall-back hour makes the wall clock repeat, so a fire whose wall
+        // time is behind `after`'s can still be after it.
+        let mut cursor = wall_of(&tz, after)? - 3 * 3600;
+        loop {
+            let wall = self.next_after(cursor, 0)?;
+            let at = instant_of(&tz, wall)?;
+            if at > after {
+                return Some(at);
+            }
+            cursor = wall;
+        }
+    }
+}
+
+/// The start of the local day `at` falls in, in `time_zone` when the tz
+/// database knows it and at `offset_min` east of UTC otherwise.
+pub fn local_day_start_in(at: i64, time_zone: Option<&str>, offset_min: i64) -> i64 {
+    zone(time_zone)
+        .and_then(|tz| instant_of(&tz, wall_of(&tz, at)?.div_euclid(86_400) * 86_400))
+        .unwrap_or_else(|| local_day_start(at, offset_min))
+}
+
 /// `(year, month 1–12, day 1–31)` of a day number since 1970-01-01
 /// (Howard Hinnant's `civil_from_days`).
 pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
@@ -284,6 +352,81 @@ mod tests {
             let e = Cron::parse(line).unwrap_err();
             assert!(e.contains(says), "{line}: {e}");
         }
+    }
+
+    /// 2027-03-28 00:00 UTC: Europe moves its clocks forward at 01:00 UTC,
+    /// and 2027-10-31 00:00 UTC, when it moves them back.
+    const MAR28: i64 = 1_806_192_000;
+    const OCT31: i64 = 1_824_940_800;
+
+    #[test]
+    fn a_zone_keeps_the_wall_clock_across_daylight_saving() {
+        let c = Cron::parse("0 9 * * *").unwrap();
+        let bratislava = Some("Europe/Bratislava");
+        // 09:00 CET is 08:00 UTC the day before the change, 09:00 CEST is
+        // 07:00 UTC on it.
+        assert_eq!(
+            c.next_in(MAR28 - 86_400, bratislava, 60),
+            Some(MAR28 - 86_400 + 8 * 3600)
+        );
+        assert_eq!(c.next_in(MAR28, bratislava, 60), Some(MAR28 + 7 * 3600));
+        // The fixed offset it was saved with would have drifted to 10:00.
+        assert_eq!(c.next_in(MAR28, None, 60), Some(MAR28 + 8 * 3600));
+        // And back in October.
+        assert_eq!(
+            c.next_in(OCT31 - 86_400, bratislava, 120),
+            Some(OCT31 - 86_400 + 7 * 3600)
+        );
+        assert_eq!(c.next_in(OCT31, bratislava, 120), Some(OCT31 + 8 * 3600));
+        // A zone the database does not know reads the offset.
+        assert_eq!(
+            c.next_in(MAR28, Some("Nowhere/Atlantis"), 60),
+            Some(MAR28 + 8 * 3600)
+        );
+    }
+
+    #[test]
+    fn a_skipped_time_fires_after_the_gap_and_a_repeated_one_once() {
+        let bratislava = Some("Europe/Bratislava");
+        // 02:30 does not exist on 2027-03-28; it fires at 03:30 CEST = 01:30 UTC.
+        let c = Cron::parse("30 2 * * *").unwrap();
+        assert_eq!(c.next_in(MAR28, bratislava, 60), Some(MAR28 + 3600 + 1800));
+        // 02:30 happens twice on 2027-10-31 (00:30 and 01:30 UTC): it fires at
+        // the first, and the next fire after that is the next day's.
+        let first = OCT31 + 1800;
+        assert_eq!(c.next_in(OCT31, bratislava, 120), Some(first));
+        assert_eq!(
+            c.next_in(first, bratislava, 120),
+            Some(OCT31 + 86_400 + 3600 + 1800)
+        );
+        // An hourly line: the skipped 02:00 fires at 03:00 CEST (01:00 UTC);
+        // the repeated 02:00 fires only the first time, so after 02:30 CEST
+        // (00:30 UTC) the next fire is 03:00 CET (02:00 UTC).
+        let h = Cron::parse("0 * * * *").unwrap();
+        assert_eq!(h.next_in(MAR28 + 1800, bratislava, 60), Some(MAR28 + 3600));
+        assert_eq!(
+            h.next_in(OCT31 + 1800, bratislava, 120),
+            Some(OCT31 + 2 * 3600)
+        );
+    }
+
+    #[test]
+    fn a_zones_day_starts_at_its_local_midnight() {
+        let bratislava = Some("Europe/Bratislava");
+        // On 2027-03-28 local midnight is still CET: 23:00 UTC the day before.
+        assert_eq!(
+            local_day_start_in(MAR28 + 12 * 3600, bratislava, 0),
+            MAR28 - 3600
+        );
+        // The next day it is CEST: 22:00 UTC.
+        assert_eq!(
+            local_day_start_in(MAR28 + 86_400 + 12 * 3600, bratislava, 0),
+            MAR28 + 86_400 - 2 * 3600
+        );
+        assert_eq!(
+            local_day_start_in(MAR28 + 12 * 3600, None, 120),
+            MAR28 - 2 * 3600
+        );
     }
 
     #[test]

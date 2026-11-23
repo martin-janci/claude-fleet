@@ -16,6 +16,7 @@ import {
   routineDeleteLoss,
   ROUTINE_RUNS_SHOWN,
   clockChange,
+  previewClockChange,
   cronWords,
   dryRunLine,
   nextRunLabel,
@@ -303,6 +304,13 @@ describe('the schedule picker and its next run (G2.3)', () => {
     const spring = [Date.UTC(2027, 2, 26, 7, 30) / 1000, Date.UTC(2027, 2, 29, 7, 30) / 1000];
     expect(clockChange(spring, 60, zone)).toEqual({ at: spring[1], shiftMin: 60 });
     expect(nextRunLabel(spring[1], zone)).toBe('Mon 29 Mar, 09:30');
+  });
+
+  it('warns of no clock change when the hub reads the schedule in its zone', () => {
+    expect(previewClockChange({ next_runs: fires, utc_offset_min: 120 }, zone)).toEqual({ at: fires[1], shiftMin: -60 });
+    // 08:30 in the zone, both sides of the change.
+    const zoned = [utc(23, 6, 30), utc(26, 7, 30)];
+    expect(previewClockChange({ next_runs: zoned, utc_offset_min: 120, zoned: true }, zone)).toBeNull();
   });
 
   it('says the offset a line is saved at, and the dry run in one line', () => {

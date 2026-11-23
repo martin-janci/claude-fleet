@@ -355,6 +355,51 @@ fn pause_all_pauses_what_the_caller_may_change_and_revokes_its_grants() {
     assert_eq!(mission_now(&fx).state, "paused");
     let s = lock(&fx.deps.store).unwrap();
     assert!(s.live_mission_grant(fx.m.id, now_unix()).unwrap().is_none());
+    drop(s);
+    // w05-3: a mission a brake already paused loses its grant too.
+    grant(
+        &WorkLinkArgs {
+            level: Some(2),
+            ..by_id("mission_grant", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    assert!(lock(&fx.deps.store)
+        .unwrap()
+        .live_mission_grant(fx.m.id, now_unix())
+        .unwrap()
+        .is_some());
+    assert!(pause_all(&fx.deps.store, &fx.me).unwrap().is_empty());
+    assert!(lock(&fx.deps.store)
+        .unwrap()
+        .live_mission_grant(fx.m.id, now_unix())
+        .unwrap()
+        .is_none());
+}
+
+/// w05-3: an hours grant ends with the mission as an until-done grant does,
+/// so a cancelled mission reopened and resumed runs nothing on it.
+#[test]
+fn an_hours_grant_ends_with_the_mission() {
+    let fx = fixture();
+    grant(
+        &WorkLinkArgs {
+            level: Some(2),
+            hours: Some(8),
+            ..by_id("mission_grant", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    let s = lock(&fx.deps.store).unwrap();
+    assert!(s.live_mission_grant(fx.m.id, now_unix()).unwrap().is_some());
+    s.set_mission_state(fx.m.id, None, "cancelled", "ana")
+        .unwrap();
+    s.set_mission_state(fx.m.id, None, "paused", "ana").unwrap();
+    assert!(s.live_mission_grant(fx.m.id, now_unix()).unwrap().is_none());
 }
 
 #[tokio::test]
@@ -1487,6 +1532,57 @@ fn a_limit_answer_is_a_wait_and_the_loop_asks_again_after_the_reset() {
     assert_eq!(limit::wake_at(&s, m.id, now).unwrap(), None);
 }
 
+/// w05-2: an ask that was made and failed (the host dropped, no answer) is
+/// asked again after a backoff that doubles per failure in a row, not never.
+#[test]
+fn a_failed_planner_ask_is_asked_again_after_a_backoff() {
+    let fx = fixture();
+    let m = planned_on_mac(&fx);
+    let s = lock(&fx.deps.store).unwrap();
+    s.insert_host("mac", None).unwrap();
+    let now = now_unix();
+    let counts = s.mission_task_counts(m.id).unwrap();
+    let fail = || {
+        event(&s, m.id, "planned", "loop", None, serde_json::json!({}));
+        event(
+            &s,
+            m.id,
+            limit::PLANNER_FAILED_EVENT,
+            "loop",
+            None,
+            serde_json::json!({ "why": "the planner on mac gave no answer" }),
+        );
+    };
+    fail();
+    assert_eq!(
+        limit::Words::read(&s, m.id).unwrap().failed().map(|f| f.1),
+        Some(1)
+    );
+    assert_eq!(
+        planner_wanted(&s, &m, &[], &counts, None, now).unwrap(),
+        None,
+        "not straight away"
+    );
+    assert_eq!(
+        planner_wanted(&s, &m, &[], &counts, None, now + 601).unwrap(),
+        Some("the planner's last call failed")
+    );
+    fail();
+    assert_eq!(
+        planner_wanted(&s, &m, &[], &counts, None, now + 601).unwrap(),
+        None,
+        "the second failure waits twice as long"
+    );
+    assert!(planner_wanted(&s, &m, &[], &counts, None, now + 1201)
+        .unwrap()
+        .is_some());
+    // An ask that answered ends the run of failures.
+    event(&s, m.id, "planned", "loop", None, serde_json::json!({}));
+    assert_eq!(limit::Words::read(&s, m.id).unwrap().failed(), None);
+    assert_eq!(limit::planner_retry_after(1), 600);
+    assert_eq!(limit::planner_retry_after(40), 6 * 3600);
+}
+
 /// TASK-291: a limit nobody says the reset of (Claude's words carry no time,
 /// the account has no reading) is waited out for the guess, said as such.
 #[test]
@@ -1859,9 +1955,25 @@ async fn a_persons_resume_restarts_the_no_progress_window() {
             )
             .unwrap()
     };
+    let open_asks = || {
+        lock(&fx.deps.store)
+            .unwrap()
+            .mission_cards(fx.m.id, 50)
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.kind == "ask" && c.state == "open")
+            .collect::<Vec<_>>()
+    };
     tick_mission(&fx.deps, fx.m.id, now).await.unwrap();
     assert_eq!(mission_now(&fx).state, "paused", "the stale run brakes it");
     assert_eq!(braked(), 1);
+    let first = open_asks();
+    assert_eq!(first.len(), 1, "the brake asks a person");
+    // The person answers the card, then resumes.
+    assert!(lock(&fx.deps.store)
+        .unwrap()
+        .decide_card(first[0].id, "dismissed", "me", None)
+        .unwrap());
 
     missions::set_state(
         &WorkLinkArgs {
@@ -1881,6 +1993,52 @@ async fn a_persons_resume_restarts_the_no_progress_window() {
     tick_mission(&fx.deps, fx.m.id, later).await.unwrap();
     assert_eq!(mission_now(&fx).state, "paused");
     assert_eq!(braked(), 2);
+    // w05-1: the second brake, in the same words, asks again.
+    assert_eq!(open_asks().len(), 1, "the second brake raises its own card");
+}
+
+/// w05-5: a run whose worker keeps producing output is progress, though it
+/// started more than the no-progress window ago.
+#[tokio::test]
+async fn a_working_run_is_not_braked_for_no_progress() {
+    let fx = fixture();
+    let item = member(&fx, "a");
+    let now = now_unix();
+    let stale = now - 2 * fx.m.policy.no_progress_secs as i64;
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        crate::service::work::run::record_headless_run(&s, "x", item, 1, "implement").unwrap();
+        s.upsert_host("h").unwrap();
+        let sid = s
+            .upsert_session("worker", "h", None, None, stale, now - 30, "running", None)
+            .unwrap();
+        let c = s.conn_for_test();
+        c.execute(
+            "UPDATE tasks SET created_at = ?1, started_at = ?1, worker_session_id = ?2",
+            rusqlite::params![stale, sid],
+        )
+        .unwrap();
+        c.execute(
+            "UPDATE orchestration_events SET at = ?1 WHERE kind = 'state'",
+            [stale],
+        )
+        .unwrap();
+    }
+    tick_mission(&fx.deps, fx.m.id, now).await.unwrap();
+    assert_eq!(
+        mission_now(&fx).state,
+        "active",
+        "its worker is still at it"
+    );
+
+    // The worker goes quiet too: now nothing moves.
+    lock(&fx.deps.store)
+        .unwrap()
+        .conn_for_test()
+        .execute("UPDATE sessions SET last_activity_at = ?1", [stale])
+        .unwrap();
+    tick_mission(&fx.deps, fx.m.id, now + 1).await.unwrap();
+    assert_eq!(mission_now(&fx).state, "paused");
 }
 
 /// Lanes design L1: the planner reads a repository only when

@@ -338,7 +338,7 @@ pub(super) fn fire_checks(
         RoutineCheck::new("overlap", "ok", "no run of it is open")
     });
     if let Some(budget) = r.budget_day_micros {
-        let since = super::cron::local_day_start(now, r.utc_offset_min);
+        let since = super::cron::local_day_start_in(now, r.time_zone.as_deref(), r.utc_offset_min);
         let spent = s.routine_cost_since(r.id, since)?;
         let words = format!("its runs spent {} of today's {}", usd(spent), usd(budget));
         out.push(RoutineCheck::new(

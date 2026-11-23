@@ -170,6 +170,33 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// [`Self::due_tracker_writes`] of the ops in `ops` only: the drain asks
+    /// for the ops whose setting is on, so rows queued under a setting that
+    /// is off now cannot fill its batch and starve the rest (w07-2).
+    pub fn due_tracker_writes_of(
+        &self,
+        tracker_id: i64,
+        now: i64,
+        ops: &[&str],
+        limit: usize,
+    ) -> Result<Vec<TrackerWriteRow>, IpcError> {
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ops_json = serde_json::to_string(ops).unwrap_or_else(|_| "[]".into());
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {COLUMNS} FROM tracker_writes \
+             WHERE tracker_id = ?1 AND state = 'pending' AND next_at <= ?2 \
+               AND op IN (SELECT value FROM json_each(?4)) \
+             ORDER BY next_at, id LIMIT ?3"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![tracker_id, now, limit as i64, ops_json],
+            map_row,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// One row by id.
     pub fn tracker_write(&self, id: i64) -> Result<Option<TrackerWriteRow>, IpcError> {
         Ok(self

@@ -28,7 +28,7 @@
     AUTONOMY_CHOICES,
     budgetProblem,
     capProblem,
-    clockChange,
+    previewClockChange,
     deviceZone,
     dryRunLine,
     isCronProblem,
@@ -189,7 +189,7 @@
   /** The option's full words, as its title (the select clips them). */
   const loginTitle = (l: RoutineAccount) => `${accountName(l)} · ${l.profile ? `profile ${l.profile}` : "the host's own login"}`;
 
-  const moved = $derived(preview && draft.trigger === 'cron' ? clockChange(preview.next_runs, preview.utc_offset_min, zoneOf(draft)) : null);
+  const moved = $derived(preview && draft.trigger === 'cron' ? previewClockChange(preview, zoneOf(draft)) : null);
 
   const dryLine = $derived.by(() => {
     if (!preview) return previewError ? `Dry run unavailable: ${errorText(previewError)}.` : 'Dry run: checking what a run would do…';

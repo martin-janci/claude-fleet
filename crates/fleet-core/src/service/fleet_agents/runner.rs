@@ -2329,7 +2329,8 @@ impl FleetRunner {
     }
 
     /// The answer's actions: kept in the result at `watch`, queued for a
-    /// person at `propose`, approved at once at `act` when `auto` (see
+    /// person at `propose` (an `auto` record approved at once: it writes
+    /// only fleet's store), approved at once at `act` when `auto` (see
     /// [`super::actions::plan`]). Answers what became of each.
     fn queue_actions(
         &self,
@@ -2369,8 +2370,19 @@ impl FleetRunner {
                 ("watch", _) => "kept".to_string(),
                 (_, None) => "not queued: store lock".to_string(),
                 (level, Some(s)) => {
-                    if level == "act" && p.auto {
-                        s.insert_approved_agent_action(job.id, p.kind, &p.payload, "rule:act", now)
+                    // w08-11: an `auto` record ("remember") writes fleet's
+                    // own store, nothing outside it, so it is kept at
+                    // `propose` as at `act`: no second Inbox card beside
+                    // the proposal it remembers.
+                    let own_record = level == "propose"
+                        && p.kind == super::definition::ActionKind::Record.word();
+                    if (level == "act" || own_record) && p.auto {
+                        let by = if level == "act" {
+                            "rule:act"
+                        } else {
+                            "rule:record"
+                        };
+                        s.insert_approved_agent_action(job.id, p.kind, &p.payload, by, now)
                             .map_or_else(|e| format!("not queued: {e}"), |_| "approved".into())
                     } else {
                         queue.queue(s, rule.id, job.id, p.kind, &p.payload, now)

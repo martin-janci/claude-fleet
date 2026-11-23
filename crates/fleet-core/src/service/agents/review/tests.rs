@@ -659,6 +659,46 @@ async fn the_executor_posts_once_marks_it_and_expires_a_moved_head() {
     assert_eq!(f.host.posts.lock().unwrap().len(), 2);
 }
 
+/// w15-2: revoking the rule expires its pending actions, and an approval of
+/// one that slipped through posts nothing.
+#[tokio::test]
+async fn a_revoked_rule_posts_nothing_and_its_pending_actions_expire() {
+    use crate::service::agents::{ActionResult, AgentExecutor};
+    let f = fx_at("{}", "propose");
+    *f.host.open.lock().unwrap() = vec![pr(4, SHA)];
+    *f.host.answer.lock().unwrap() = Some(answered(BLOCKING));
+    let job = f.job().await;
+    f.runner().run(&job, Some(&f.rule)).await;
+    let pending = f
+        .store
+        .lock()
+        .unwrap()
+        .list_agent_actions(Some("pending"), 10)
+        .unwrap();
+    assert!(!pending.is_empty(), "the review waits for a person");
+    assert!(f
+        .store
+        .lock()
+        .unwrap()
+        .revoke_agent_rule(f.rule.id)
+        .unwrap());
+    {
+        let s = f.store.lock().unwrap();
+        assert!(s
+            .list_agent_actions(Some("pending"), 10)
+            .unwrap()
+            .is_empty());
+        let gone = s.list_agent_actions(Some("expired"), 10).unwrap();
+        assert_eq!(gone.len(), pending.len());
+        assert_eq!(gone[0].error.as_deref(), Some("the rule was revoked"));
+    }
+    assert!(matches!(
+        f.executor().execute(&pending[0]).await,
+        ActionResult::Expired(_)
+    ));
+    assert!(f.host.posts.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn a_vanished_review_is_reviewed_again() {
     let f = fx("{}");

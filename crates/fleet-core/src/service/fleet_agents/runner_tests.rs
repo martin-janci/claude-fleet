@@ -1093,9 +1093,29 @@ async fn at_watch_the_actions_are_only_kept_in_the_result() {
 #[tokio::test]
 async fn at_propose_a_person_gets_each_and_at_act_the_auto_ones_run() {
     let (f, r) = l2_run("propose", found()).await;
-    assert!(states(&r).iter().all(|(_, s)| s == "pending"));
+    // w08-11: the auto `remember` writes only fleet's store, so it is kept
+    // at once; the rest wait for a person, and only they reach the Inbox.
+    let st = states(&r);
+    assert!(
+        st.iter().all(|(id, s)| s
+            == if id == "remember" {
+                "approved"
+            } else {
+                "pending"
+            }),
+        "{st:?}"
+    );
     let kinds: Vec<String> = f.actions().iter().map(|a| a.kind.clone()).collect();
     assert_eq!(kinds.len(), 4);
+    assert_eq!(
+        f.store
+            .lock()
+            .unwrap()
+            .list_agent_actions(Some("pending"), 50)
+            .unwrap()
+            .len(),
+        3
+    );
     assert!(
         kinds.contains(&"tracker_issue".to_string()) && kinds.contains(&"mcp_call".to_string())
     );

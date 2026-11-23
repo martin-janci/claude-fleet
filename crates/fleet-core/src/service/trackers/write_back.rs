@@ -203,6 +203,32 @@ pub fn on_enabled(s: &Store, tracker_id: i64) -> Result<usize, IpcError> {
     Ok(queued)
 }
 
+/// Refuse a write that would never be sent (w07-3): only the tracker sync
+/// drains the outbox, and it skips a tracker whose credential was refused or
+/// that wants a browser login. Queued anyway, a promotion would read
+/// "Creating…" and a comment "Sending…" with no end and no reason.
+pub fn refuse_unsendable(s: &Store, t: &TrackerRow) -> Result<(), IpcError> {
+    if super::sync::interval_in(s).is_none() {
+        return Err(IpcError::new(
+            crate::ipc_error::codes::E_INVALID_STATE,
+            format!(
+                "the tracker sync is off on this hub (work.sync_interval_secs = 0), so \
+                 nothing would be sent to {}",
+                t.name
+            ),
+        ));
+    }
+    let fix = match t.state.as_str() {
+        "auth_failed" => "its credential was refused: set a new one in Settings → Trackers",
+        "captcha" => "Atlassian wants a browser login first: log in to it in a browser",
+        _ => return Ok(()),
+    };
+    Err(IpcError::new(
+        crate::ipc_error::codes::E_INVALID_STATE,
+        format!("{} takes no writes now; {fix}, then try again", t.name),
+    ))
+}
+
 /// The tracker is a Jira whose admin turned the PR remote link on.
 fn writes_pr_links(t: &TrackerRow) -> bool {
     matches!(t.provider.as_str(), "jira" | "jira_dc") && t.settings.write_back.pr_remote_link
@@ -257,7 +283,18 @@ pub async fn drain(
     now: i64,
 ) -> DrainReport {
     let mut report = DrainReport::default();
-    let due = match lock(store).and_then(|s| s.due_tracker_writes(t.id, now, DRAIN_BATCH)) {
+    // Only the ops that are on (w07-2): a batch of rows whose setting is
+    // off would be skipped whole, every pass, and nothing else sent.
+    let ops: Vec<&str> = [
+        (WRITE_OP_PR_REMOTE_LINK, writes_pr_links(t)),
+        (WRITE_OP_COMMENT, writes_comments(t)),
+        (WRITE_OP_CREATE_ITEM, writes_creates(t)),
+    ]
+    .into_iter()
+    .filter_map(|(op, on)| on.then_some(op))
+    .collect();
+    let due = match lock(store).and_then(|s| s.due_tracker_writes_of(t.id, now, &ops, DRAIN_BATCH))
+    {
         Ok(d) => d,
         Err(e) => {
             tracing::debug!(tracker = t.id, error = %e.message, "[write-back] outbox unreadable");
@@ -379,12 +416,26 @@ pub async fn drain(
                     error = %msg,
                     "[write-back] send failed"
                 );
+                // w07-1: a new ticket or a comment whose answer was lost
+                // may be at the tracker already; sent again it would be
+                // there twice. Said, not retried: the person checks there.
+                let once = w.op == WRITE_OP_CREATE_ITEM || w.op == WRITE_OP_COMMENT;
+                let msg = if once && e.maybe_delivered() {
+                    format!(
+                        "{msg}: it may have been {} at the tracker; check there before you {} again",
+                        if comment { "posted" } else { "created" },
+                        if comment { "post it" } else { "promote it" }
+                    )
+                } else {
+                    msg
+                };
                 // A refusal no retry can fix gives up now; anything that
                 // may heal (a credential, the network) backs off.
                 let next = match e {
                     TrackerError::Forbidden(_)
                     | TrackerError::NotFound
                     | TrackerError::Invalid(_) => None,
+                    _ if once && e.maybe_delivered() => None,
                     _ => Some(now + backoff_secs(w.attempts)),
                 };
                 if next.is_none() || w.attempts + 1 >= crate::store::WRITE_MAX_ATTEMPTS {
