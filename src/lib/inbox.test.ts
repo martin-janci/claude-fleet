@@ -20,6 +20,8 @@ import { reviewRequests } from './review_requests';
 import { attentionState, countNeedsYou } from './attention';
 import { host, session } from './hosts_fixture';
 import { hosts } from './hosts';
+import { hubStatus, STANDALONE } from './hub';
+import { myGrants, myPersonId } from './access';
 
 // Redesign step 3.3: the Inbox lists exactly what raises the badge.
 
@@ -111,6 +113,41 @@ describe('G1.6: Jev proposals and waiting missions', () => {
     expect(get(inboxCount)).toBe(1);
     reviewRequests.set([]);
     expect(get(inboxCount)).toBe(0);
+  });
+});
+
+describe('review w08-3 (option a): a share counts only at Answer or Steer', () => {
+  it('lists a Read share that waits, but never counts it', () => {
+    waitingMissions.set([]);
+    reviewRequests.set([]);
+    hubStatus.set({
+      remote: true,
+      url: 'https://fleet.example.com',
+      client_name: 'laptop',
+      client_mode: null,
+      configured_url: 'https://fleet.example.com',
+      configured_client_name: 'laptop',
+      allow_plaintext: false,
+      warning: null,
+      restart_required: false,
+      unavailable: null,
+    });
+    myPersonId.set(3);
+    const theirs = session('mac', 'theirs', { claude_status: 'blocked', owner_person_id: 7 });
+    sessions.set([theirs]);
+    try {
+      myGrants.set(new Map([[theirs.id, 'watch']]));
+      expect(get(inboxCount)).toBe(0);
+      myGrants.set(new Map([[theirs.id, 'answer']]));
+      expect(get(inboxCount)).toBe(1);
+      myGrants.set(new Map([[theirs.id, 'drive']]));
+      expect(get(inboxCount)).toBe(1);
+    } finally {
+      hubStatus.set({ ...STANDALONE });
+      myPersonId.set(null);
+      myGrants.set(new Map());
+      sessions.set([]);
+    }
   });
 });
 
