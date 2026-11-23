@@ -206,6 +206,23 @@ impl JevRequest {
         }
     }
 
+    /// [`Self::redacted`], plus every literal in `secrets` (the store's
+    /// tokens, secret env vars, catalog and tracker secrets:
+    /// `diagnostics::known_secrets`) masked wherever it appears: a secret
+    /// of no known shape printed in a pane must not reach Jev (review
+    /// w18-2). What is SENT; the fingerprint stays over [`Self::redacted`].
+    pub fn masked(&self, secrets: &[String]) -> JevRequest {
+        if secrets.is_empty() {
+            return self.clone();
+        }
+        let f = |s: &str| crate::logging::redact_secrets(s, secrets);
+        JevRequest {
+            state: map_value(&self.state, &f),
+            question: self.question.map_text(&f),
+            order_salt: self.order_salt.clone(),
+        }
+    }
+
     /// The API body for `model`, as JSON. Its objects are sorted (fleet
     /// builds `serde_json` without `preserve_order`), so a choice's options
     /// read here in key order; [`Self::wire_body`] is what is sent.

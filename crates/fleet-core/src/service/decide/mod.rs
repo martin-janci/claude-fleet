@@ -957,15 +957,24 @@ async fn decide_jev(ctx: &DecideCtx, req: DecideRequest) -> DecisionOutcome {
                 Caller::Bench => Mode::Shadow.as_str().into(),
             };
             run.input_fp = s.decision_fp_key().ok().map(|k| fingerprint(&k, &redacted));
-            clear(&s, req.feature, req.org_id, provider, now, req.caller())
-                .map(|c| (c, floor::read(&s)))
+            // The literal secrets, read under the same lock; a store that
+            // cannot list them sends nothing rather than sending unmasked.
+            match crate::service::diagnostics::known_secrets(&s) {
+                Ok(secrets) => clear(&s, req.feature, req.org_id, provider, now, req.caller())
+                    .map(|c| (c, floor::read(&s), secrets)),
+                Err(e) => {
+                    tracing::warn!(error = %e.message, "[decide] cannot read the secrets to mask; not sending");
+                    Err(Fallback::FlagOff)
+                }
+            }
         }
         Err(_) => Err(Fallback::FlagOff),
     };
-    let (cleared, floors) = match gated {
+    let (cleared, floors, secrets) = match gated {
         Ok(c) => c,
         Err(f) => return record(ctx, run, None, None, Some(f)),
     };
+    let redacted = redacted.masked(&secrets);
     // The adapter's floor, raised to the feature's fitted one (`floor`).
     let min_confidence = floor::effective(
         req.min_confidence,

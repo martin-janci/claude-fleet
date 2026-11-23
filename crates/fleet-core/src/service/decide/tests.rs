@@ -714,6 +714,32 @@ async fn what_is_sent_is_redacted() {
     assert!(body.contains("ACME-1"), "ids stay: {body}");
 }
 
+/// Review w18-2: a stored secret of no known shape (a secret env var here)
+/// printed in a pane is masked by value before anything reaches Jev.
+#[tokio::test]
+async fn a_stored_secret_is_masked_by_value_before_it_is_sent() {
+    let w = world();
+    w.all_on();
+    w.store
+        .lock()
+        .unwrap()
+        .set_env_var(
+            "global",
+            "",
+            "ACME_THING",
+            &crate::store::EnvValue::Secret(Secret::new("plainwordsecretvalue")),
+        )
+        .unwrap();
+    let fake = Fake::answering(vec![Ok(choice_response("ACME-1", 0.9, 10))]);
+    let mut req = request(Feature::WorkLink, Some(w.org));
+    req.request.state = json!({"pane": "$ cat .mcp.json\n  \"key\": \"plainwordsecretvalue\""});
+    decide(&w.ctx(fake.clone()), req).await;
+    let (_, _, sent) = fake.seen.lock().unwrap()[0].clone();
+    let body = serde_json::to_string(&sent).unwrap();
+    assert!(!body.contains("plainwordsecretvalue"), "{body}");
+    assert!(body.contains("[REDACTED]"), "{body}");
+}
+
 /// Review r15 F08: a state object's keys go through the redaction as its
 /// values do, at every depth.
 #[test]

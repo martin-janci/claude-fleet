@@ -511,6 +511,40 @@ fn looks_secret(key: &str) -> bool {
         .any(|s| k.contains(s))
 }
 
+/// Whether an MCP server's argument `arg` (after `prev`) is a literal
+/// secret: the value of a secret-named flag (`--api-key sk-…`,
+/// `--token=…`), or anything [`crate::logging::redact`] would mask.
+fn literal_secret_arg(prev: Option<&str>, arg: &str) -> bool {
+    if arg.contains("${") {
+        return false;
+    }
+    let flag_value = match arg.split_once('=') {
+        Some((flag, v)) if flag.starts_with('-') => looks_secret(flag) && !v.is_empty(),
+        _ => {
+            prev.is_some_and(|p| p.starts_with('-') && !p.contains('=') && looks_secret(p))
+                && !arg.starts_with('-')
+        }
+    };
+    flag_value || crate::logging::redact(arg) != arg
+}
+
+/// Whether `url` carries a literal secret: userinfo (`https://u:p@host`), a
+/// secret-named query parameter, or a token [`crate::logging::redact`] masks.
+fn literal_secret_in_url(url: &str) -> bool {
+    if url.contains("${") {
+        return false;
+    }
+    let authority = url.split_once("://").map_or("", |(_, rest)| {
+        rest.split(['/', '?', '#']).next().unwrap_or("")
+    });
+    let query_secret = url.split_once('?').is_some_and(|(_, q)| {
+        q.split(['&', '#'])
+            .filter_map(|kv| kv.split_once('='))
+            .any(|(k, v)| looks_secret(k) && !v.is_empty())
+    });
+    authority.contains('@') || query_secret || crate::logging::redact(url) != url
+}
+
 #[allow(clippy::too_many_arguments)]
 fn import_hooks(
     settings: &Value,
@@ -712,6 +746,30 @@ fn import_mcp(
                 ));
             }
         }
+        let args: Vec<String> = s
+            .get("args")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Secrets in `args` and the `url` are committed and synced to every
+        // host as well (review w18-5).
+        for (i, a) in args.iter().enumerate() {
+            if literal_secret_arg(i.checked_sub(1).map(|j| args[j].as_str()), a) {
+                flagged.push(format!(
+                    "mcp_server {name}: argument {} holds a literal secret; replace with a ${{PLACEHOLDER}}",
+                    i + 1
+                ));
+            }
+        }
+        if url.as_deref().is_some_and(literal_secret_in_url) {
+            flagged.push(format!(
+                "mcp_server {name}: url holds a literal secret; replace with a ${{PLACEHOLDER}}"
+            ));
+        }
         let extra: BTreeMap<String, Value> = s
             .as_object()
             .map(|o| {
@@ -740,15 +798,7 @@ fn import_mcp(
                 url,
                 headers,
                 command: s.get("command").and_then(Value::as_str).map(String::from),
-                args: s
-                    .get("args")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
+                args,
                 env,
             },
             body: String::new(),
@@ -1690,6 +1740,50 @@ mod tests {
             flagged
                 .iter()
                 .any(|s| s.contains("hook") && s.contains("Authorization")),
+            "{flagged:?}"
+        );
+    }
+
+    /// Review w18-5: a literal secret in an MCP server's args or url is
+    /// flagged like one in its headers or env.
+    #[test]
+    fn mcp_secrets_in_args_and_url_are_flagged() {
+        let claude_json = serde_json::json!({
+            "mcpServers": {
+                "cli": { "type": "stdio", "command": "npx",
+                         "args": ["-y", "some-mcp", "--api-key", "abc123literal"] },
+                "eq": { "type": "stdio", "command": "x", "args": ["--token=zzz999"] },
+                "web": { "type": "http", "url": "https://mcp.example.com/sse?apikey=abc123" },
+                "auth": { "type": "http", "url": "https://bot:pw@mcp.example.com/sse" },
+                "clean": { "type": "http", "url": "https://mcp.example.com/sse?region=eu",
+                           "command": "x", "args": ["--port", "8080", "--api-key", "${KEY}"] }
+            }
+        });
+        let mut flagged = Vec::new();
+        let mut slugs = SlugMap::new();
+        let mut problems = Vec::new();
+        let mut warnings = Vec::new();
+        import_mcp(
+            &claude_json,
+            "local",
+            Path::new(".claude.json"),
+            None,
+            &mut flagged,
+            &mut slugs,
+            &mut problems,
+            &mut warnings,
+            &[],
+        );
+        for name in ["cli", "eq", "web", "auth"] {
+            assert!(
+                flagged
+                    .iter()
+                    .any(|f| f.starts_with(&format!("mcp_server {name}:"))),
+                "{name}: {flagged:?}"
+            );
+        }
+        assert!(
+            !flagged.iter().any(|f| f.starts_with("mcp_server clean:")),
             "{flagged:?}"
         );
     }

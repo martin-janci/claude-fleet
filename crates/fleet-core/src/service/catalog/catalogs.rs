@@ -107,7 +107,9 @@ pub fn list_catalogs(store: &Mutex<Store>) -> Result<Vec<CatalogStatus>, IpcErro
                     org_id: r.org_id,
                     org,
                     repo_path: r.repo_path,
-                    remote_url: r.remote_url,
+                    // Listed to any person's full device: a PAT in the
+                    // URL's userinfo stays in the store (review w18-3).
+                    remote_url: r.remote_url.as_deref().map(repo::redact_url_userinfo),
                     head_commit: r.head_commit,
                     last_loaded_at: r.last_loaded_at,
                     state: state.to_string(),
@@ -161,7 +163,7 @@ pub fn probe_catalogs(store: &Mutex<Store>) -> Result<Vec<CatalogStatus>, IpcErr
                 org_id: r.org_id,
                 org,
                 repo_path: r.repo_path,
-                remote_url: r.remote_url,
+                remote_url: r.remote_url.as_deref().map(repo::redact_url_userinfo),
                 head_commit: r.head_commit,
                 last_loaded_at: r.last_loaded_at,
                 state: state.to_string(),
@@ -365,6 +367,45 @@ mod tests {
             remote_url: None,
             org: org.map(String::from),
         }
+    }
+
+    /// Review w18-3: a PAT in a catalog's remote URL is never listed.
+    #[test]
+    fn a_remote_urls_credentials_are_not_listed() {
+        let _g = lock_registry_for_test();
+        let store = store_with_org();
+        let org = store.lock().unwrap().list_orgs().unwrap()[0].id;
+        store
+            .lock()
+            .unwrap()
+            .upsert_catalog(
+                "acme",
+                "/nonexistent/fleet-catalog-w18-3",
+                Some("https://bot:ghp_notarealtoken@github.com/acme/catalog.git"),
+                Some(org),
+            )
+            .unwrap();
+        for listed in [
+            list_catalogs(&store).unwrap(),
+            probe_catalogs(&store).unwrap(),
+        ] {
+            let acme = listed.iter().find(|c| c.name == "acme").unwrap();
+            assert_eq!(
+                acme.remote_url.as_deref(),
+                Some("https://***@github.com/acme/catalog.git")
+            );
+        }
+        let row = store
+            .lock()
+            .unwrap()
+            .get_catalog_by_name("acme")
+            .unwrap()
+            .unwrap();
+        assert!(
+            row.remote_url.unwrap().contains("ghp_notarealtoken"),
+            "the store keeps it"
+        );
+        registry::clear().unwrap();
     }
 
     #[test]

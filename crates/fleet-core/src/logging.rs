@@ -195,6 +195,37 @@ static PROVIDER_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("provider token regex")
 });
+/// Credentials of other services, wherever they appear (review w18-1):
+/// Anthropic's own (`sk-ant-oat01-…` setup tokens, `sk-ant-api03-…` API
+/// keys, `sk-ant-ort01-…` refresh tokens, which fleet keeps no copy of to
+/// mask literally), AWS access key ids, Slack and GitLab tokens.
+static SERVICE_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"\b(?:sk-ant-[a-z]+[0-9]*-[A-Za-z0-9_\-]{20,}|AKIA[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9\-]{10,}|glpat-[A-Za-z0-9_\-]{20,})",
+    )
+    .expect("service token regex")
+});
+/// An OpenAI-style key (`sk-…`, `sk-proj-…`). Masked only when it carries a
+/// digit, so a long hyphenated word after `sk-` survives.
+static SK_KEY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bsk-(?:proj-)?[A-Za-z0-9_\-]{32,}").expect("sk key regex"));
+/// A PEM private key block, to its end or to the end of the text (a pane
+/// tail cut mid-key).
+static PEM_KEY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\z)",
+    )
+    .expect("pem key regex")
+});
+/// An environment-style assignment of a secret-named variable
+/// (`LINEAR_API_KEY=…`, `export GITHUB_TOKEN="…"`): the value (group 3) is
+/// masked when it is token-shaped ([`is_token_shaped`]), whatever its shape.
+static SECRET_ASSIGN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"\b((?:[A-Z][A-Z0-9_]*)?(?:TOKEN|SECRET|API_KEY|APIKEY|PASSWORD|PASSWD|ACCESS_KEY|PRIVATE_KEY)[A-Z0-9_]*=)("?)([^\s"']{8,})"#,
+    )
+    .expect("secret assignment regex")
+});
 static QUERY_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)([?&](?:access_)?token=)[^&\s"'#]+"#).expect("query token regex")
 });
@@ -275,6 +306,25 @@ pub fn redact(input: &str) -> Cow<'_, str> {
         out = Cow::Owned(s);
     }
     if let Cow::Owned(s) = PROVIDER_TOKEN_RE.replace_all(&out, REDACTED) {
+        out = Cow::Owned(s);
+    }
+    if let Cow::Owned(s) = PEM_KEY_RE.replace_all(&out, REDACTED) {
+        out = Cow::Owned(s);
+    }
+    if let Cow::Owned(s) = SERVICE_TOKEN_RE.replace_all(&out, REDACTED) {
+        out = Cow::Owned(s);
+    }
+    if let Cow::Owned(s) = mask_matches(&SK_KEY_RE, &out, |c| {
+        c[0].bytes()
+            .any(|b| b.is_ascii_digit())
+            .then(|| REDACTED.to_string())
+    }) {
+        out = Cow::Owned(s);
+    }
+    if let Cow::Owned(s) = mask_matches(&SECRET_ASSIGN_RE, &out, |c| {
+        (&c[3] != REDACTED && is_token_shaped(&c[3]))
+            .then(|| format!("{}{}{REDACTED}", &c[1], &c[2]))
+    }) {
         out = Cow::Owned(s);
     }
     if let Cow::Owned(s) = QUERY_TOKEN_RE.replace_all(&out, format!("${{1}}{REDACTED}")) {
@@ -852,6 +902,44 @@ mod tests {
             redact("Bearer authentication with Bearer tok-98765"),
             "Bearer authentication with Bearer [REDACTED]"
         );
+    }
+
+    #[test]
+    fn redacts_anthropic_and_other_service_credentials() {
+        // Assembled at run time, as above: every one is invented.
+        let tail = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-xyz";
+        for tok in [
+            format!("{}-{tail}", "sk-ant-oat01"),
+            format!("{}-{tail}", "sk-ant-api03"),
+            format!("{}-{tail}", "sk-ant-ort01"),
+            format!("{}-{tail}", "sk-proj"),
+            format!("{}{}", "AKIA", "IOSFODNN7EXAMPLE"),
+            format!("{}-{}", "xoxb", "1234567890-abcdefghij"),
+            format!("{}-{}", "glpat", "abcdefghij0123456789xyz"),
+        ] {
+            let got = redact(&format!("key {tok} (refused)")).into_owned();
+            assert_eq!(got, "key [REDACTED] (refused)", "{tok}");
+        }
+        let pem = format!(
+            "before\n-----BEGIN {} PRIVATE KEY-----\nMIIEv\nQIBAD\n-----END {} PRIVATE KEY-----\nafter",
+            "OPENSSH", "OPENSSH"
+        );
+        assert_eq!(redact(&pem), "before\n[REDACTED]\nafter");
+        let cut = format!("$ cat id\n-----BEGIN {} PRIVATE KEY-----\nMIIEv", "RSA");
+        assert_eq!(redact(&cut), "$ cat id\n[REDACTED]");
+        assert_eq!(
+            redact("export LINEAR_API_KEY=\"x9y8z7w6v5u4\" and DB_PASSWORD=hunter2025"),
+            "export LINEAR_API_KEY=\"[REDACTED]\" and DB_PASSWORD=[REDACTED]"
+        );
+        // Look-alikes that are not credentials survive.
+        for text in [
+            "a sk-some-long-hyphenated-css-class-name-without-digits",
+            "MAX_TOKENS=4096",
+            "TOKEN_BUDGET=fine",
+            "the ask-ant-farm",
+        ] {
+            assert_eq!(redact(text), text);
+        }
     }
 
     #[test]

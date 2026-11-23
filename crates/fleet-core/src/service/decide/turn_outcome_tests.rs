@@ -455,3 +455,15 @@ fn a_hooks_effect_is_a_word() {
     );
     assert_eq!(hook_word(ClaudeStatus::Idle, None), None);
 }
+
+/// Review w18-2: the window never starts inside a line, so a token cut at
+/// its start cannot lose the prefix that makes it recognisable.
+#[test]
+fn the_tail_starts_on_a_whole_line() {
+    let tok = format!("{}_{}", "ghp", "abcdefghijklmnopqrstuvwxyz0123456789ab");
+    let first = format!("{}{tok}", "x".repeat(1000));
+    let second = "y".repeat(TAIL_CHARS - 20);
+    let got = prepare_tail(&format!("{first}\n{second}"));
+    assert_eq!(got, second);
+    assert!(!got.contains("6789ab"), "no tail of the token survives");
+}

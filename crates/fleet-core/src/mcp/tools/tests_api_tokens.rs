@@ -284,6 +284,36 @@ async fn a_device_mints_read_or_act_only_and_only_when_trusted_and_full() {
     );
 }
 
+/// Review w11-1: a named token resolves as the hub's owner, so a second
+/// person mapped to fleet-admin must not mint one from their own trusted
+/// device (it would read the owner's private sessions, and outlive
+/// `person disable`).
+#[tokio::test]
+async fn another_persons_fleet_admin_device_cannot_mint_a_token() {
+    let t = super::tests::test_tools(Store::open_in_memory().unwrap());
+    let mut ada = owners_device(true, TokenMode::Full);
+    if let Some(c) = ada.client.as_mut() {
+        c.person_id = Some(2);
+    }
+    ada.is_personal_owner = false;
+    assert!(ada.is_fleet_admin_device() && ada.is_trusted_client());
+    let e = tokens_call(
+        &t,
+        &ada,
+        serde_json::json!({"action": "create", "name": "ada", "scope": "act"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(e.starts_with("E_FORBIDDEN"), "{e}");
+    assert!(t
+        .store
+        .lock()
+        .unwrap()
+        .auth_control_tokens()
+        .unwrap()
+        .is_empty());
+}
+
 #[test]
 fn a_host_limited_token_reaches_only_the_session_gated_tools() {
     let limited = api_caller(ApiScope::Act, Some(&["mercury"]));
