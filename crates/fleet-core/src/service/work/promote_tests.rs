@@ -367,6 +367,32 @@ fn promoting_is_refused_while_nothing_would_send_it() {
     assert_eq!(n, 0);
 }
 
+/// Review 23b w02-8: the check follows what this process started with, as
+/// the sync does (it reads the interval once): turned on since, it is not
+/// running until a restart; turned off since, it still drains.
+#[test]
+fn the_send_check_follows_the_sync_this_process_runs() {
+    use crate::service::trackers::sync::{SYNC_OFF, SYNC_RUNNING, SYNC_UNKNOWN};
+    use crate::service::trackers::write_back::unsendable_for;
+    let f = jira_fx(true);
+    let s = f.store.lock().unwrap();
+    let t = s.get_tracker(f.tracker).unwrap().unwrap();
+    s.set_setting(crate::service::settings::WORK_SYNC_INTERVAL_SECS, "300")
+        .unwrap();
+    let e = unsendable_for(&s, &t, SYNC_OFF).unwrap_err();
+    assert!(e.message.contains("takes a restart"), "{}", e.message);
+    assert!(unsendable_for(&s, &t, SYNC_RUNNING).is_ok());
+    assert!(unsendable_for(&s, &t, SYNC_UNKNOWN).is_ok());
+    s.set_setting(crate::service::settings::WORK_SYNC_INTERVAL_SECS, "0")
+        .unwrap();
+    assert!(
+        unsendable_for(&s, &t, SYNC_RUNNING).is_ok(),
+        "it still drains"
+    );
+    let e = unsendable_for(&s, &t, SYNC_OFF).unwrap_err();
+    assert!(e.message.contains("sync is off"), "{}", e.message);
+}
+
 #[tokio::test]
 async fn a_subtask_of_a_jira_ticket_becomes_its_sub_task_and_keeps_everything() {
     let f = jira_fx(true);
