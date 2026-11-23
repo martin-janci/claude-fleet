@@ -336,6 +336,21 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// End `expired` every pending action whose job lost its rule: a
+    /// revoke before #1140 left them `pending` for good, still counted in
+    /// Needs you (review 23b w02-6). Every job is inserted with a rule, so
+    /// a job without one had its rule revoked (`ON DELETE SET NULL`,
+    /// migration 185). Returns how many ended.
+    pub fn expire_orphaned_agent_actions(&self) -> Result<usize, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE agent_actions SET state = 'expired', decided_by = 'revoked', \
+               decided_at = ?1, error = 'the rule was revoked' \
+             WHERE state = 'pending' \
+               AND job_id IN (SELECT id FROM agent_jobs WHERE rule_id IS NULL)",
+            params![super::now_unix()],
+        )
+    }
+
     /// Remove every rule (the agents' Pause all). Returns how many went.
     /// Every pending action of a rule ends `expired`, as on a revoke.
     pub fn revoke_all_agent_rules(&self) -> Result<usize, rusqlite::Error> {
@@ -1239,6 +1254,45 @@ mod tests {
             error: None,
         };
         assert!(s.finish_agent_job(j.id, &bad, 0, 0).is_err());
+    }
+
+    /// Review 23b w02-6: a pending action whose rule was revoked before
+    /// revokes expired them (its job's `rule_id` went NULL) ends `expired`;
+    /// one whose rule is still there stays pending.
+    #[test]
+    fn a_pending_action_of_a_rule_revoked_long_ago_expires() {
+        let s = Store::open_in_memory().unwrap();
+        let gone = s.grant_agent_rule(&rule("review", "gh:o/r")).unwrap();
+        let kept = s.grant_agent_rule(&rule("review", "gh:o/q")).unwrap();
+        s.record_agent_poll(gone, 1000, None, &[job(gone, "gh:o/r#1", "k1")])
+            .unwrap();
+        s.record_agent_poll(kept, 1000, None, &[job(kept, "gh:o/q#1", "k2")])
+            .unwrap();
+        let jobs = s.list_agent_jobs(None, 10).unwrap();
+        let job_of = |rid: i64| jobs.iter().find(|j| j.rule_id == Some(rid)).unwrap().id;
+        let orphan = s
+            .insert_agent_action(job_of(gone), "post_review", "{}", 10)
+            .unwrap();
+        let live = s
+            .insert_agent_action(job_of(kept), "post_review", "{}", 10)
+            .unwrap();
+        // The pre-#1140 revoke: the rule went, its actions stayed pending.
+        s.conn_ref()
+            .execute("DELETE FROM agent_rules WHERE id = ?1", params![gone])
+            .unwrap();
+        assert_eq!(s.expire_orphaned_agent_actions().unwrap(), 1);
+        assert_eq!(s.expire_orphaned_agent_actions().unwrap(), 0);
+        let state = |id: i64| {
+            s.conn_ref()
+                .query_row(
+                    "SELECT state, decided_by FROM agent_actions WHERE id = ?1",
+                    params![id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(state(orphan), ("expired".into(), Some("revoked".into())));
+        assert_eq!(state(live).0, "pending");
     }
 
     #[test]

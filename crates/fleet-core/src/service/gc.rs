@@ -534,6 +534,15 @@ pub const AGENT_ACTION_KEEP_DAYS: i64 = 180;
 /// Ended fleet-agent actions past [`AGENT_ACTION_KEEP_DAYS`]; the number
 /// deleted.
 fn sweep_agent_actions(store: &Mutex<Store>, now: i64) -> usize {
+    // Pending actions of a rule revoked before revokes expired them
+    // (review 23b w02-6); a no-op once they are gone.
+    if let Ok(s) = store.lock() {
+        match s.expire_orphaned_agent_actions() {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(n, "[gc] expired pending actions of revoked rules"),
+            Err(e) => tracing::warn!(error = %e, "[gc] expiring actions of revoked rules failed"),
+        }
+    }
     let cutoff = now - AGENT_ACTION_KEEP_DAYS * 86_400;
     crate::service::work::retention::sweep_batches(
         store,

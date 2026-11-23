@@ -176,8 +176,11 @@ pub fn setting_moved(s: &Store, p: &SettingPayload) -> Option<String> {
 }
 
 /// Why an approved `session_recover` proposed at `proposed_at` no longer
-/// applies (w15-4): the session finished a turn or was started again since,
-/// or it is working and not stuck. A lost session is still restored.
+/// applies (w15-4): the session finished a turn or was started again since.
+/// Judged by what changed since the proposal, never by the status now: a
+/// Claude hung in a tool call or an API retry loop reads `working` with no
+/// stuck kind, and that is the session a recover is proposed for (review
+/// 23b w02-5). A lost session is still restored.
 pub fn recover_moot(s: &Store, p: &RecoverPayload, proposed_at: i64) -> Option<String> {
     let rows = s
         .find_sessions_by_tmux_name(&p.session, p.host.as_deref())
@@ -195,9 +198,7 @@ pub fn recover_moot(s: &Store, p: &RecoverPayload, proposed_at: i64) -> Option<S
             p.session
         ));
     }
-    let stuck = row.stuck_kind.as_deref().is_some_and(|k| !k.is_empty());
-    (row.claude_status.as_deref() == Some("working") && !stuck)
-        .then(|| format!("{} is working now", p.session))
+    None
 }
 
 /// PURE: what restoring session `id` came to. `restore_host_sessions`
@@ -370,8 +371,10 @@ mod tests {
             .any(|p| p.id == other.id));
     }
 
-    /// w15-4: a recover approved after the session came back, or while it
-    /// works, is moot; a stuck one still recovers.
+    /// w15-4: a recover approved after the session came back is moot. One
+    /// that still reads `working` with nothing changed since the proposal
+    /// (hung in a tool call: no stuck kind) still recovers (review 23b
+    /// w02-5), as does one stuck at a real pane state.
     #[test]
     fn a_recover_of_a_session_that_came_back_is_moot() {
         let store = Store::open_in_memory().unwrap();
@@ -396,10 +399,10 @@ mod tests {
             why: String::new(),
             body: String::new(),
         };
-        set("working", Some("wedged"), Some(50));
+        set("working", Some("reconnect"), Some(50));
         assert_eq!(recover_moot(&store, &p, 100), None, "still stuck");
         set("working", None, Some(50));
-        assert!(recover_moot(&store, &p, 100).unwrap().contains("working"));
+        assert_eq!(recover_moot(&store, &p, 100), None, "hung while working");
         set("idle", None, Some(150));
         assert!(recover_moot(&store, &p, 100)
             .unwrap()
