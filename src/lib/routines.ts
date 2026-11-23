@@ -229,9 +229,13 @@ export interface RoutineInput {
 /** `preview`: the editor's dry run (gap plan G2.3, fleet-core
  *  `routines::RoutinePreview`). Nothing is written. */
 export interface RoutinePreview {
-  /** The schedule's next fires (unix seconds), at the offset below. */
+  /** The schedule's next fires (unix seconds), in the routine's zone when
+   *  `zoned`, else at the offset below. */
   next_runs: number[];
   utc_offset_min: number;
+  /** The fires follow the routine's time zone, so a clock change does not
+   *  move them; absent from a hub that reads only the offset. */
+  zoned?: boolean;
   /** Why save would refuse it; absent when it would save. */
   problem?: string;
   /** The account the chosen login bills. */
@@ -1343,9 +1347,9 @@ export function nextRunLabel(sec: number, timeZone?: string): string {
 
 /**
  * The first of `runs` whose wall-clock time moved because a clock change
- * lies between now and it: a routine keeps the UTC offset it was saved at
- * (fleet-core `routines::cron`), so past a daylight-saving change it fires
- * an hour off. `null` when none moved.
+ * lies between now and it: a routine read at the UTC offset it was saved
+ * at (no zone, or a hub that predates zones: fleet-core `routines::cron`)
+ * fires an hour off past a daylight-saving change. `null` when none moved.
  */
 export function clockChange(
   runs: readonly number[],
@@ -1357,6 +1361,15 @@ export function clockChange(
     if (shift !== 0) return { at, shiftMin: shift };
   }
   return null;
+}
+
+/** The clock-change warning a dry run earns: none when the hub reads the
+ *  schedule in its zone (`zoned`), where a clock change moves nothing. */
+export function previewClockChange(
+  p: Pick<RoutinePreview, 'next_runs' | 'utc_offset_min' | 'zoned'>,
+  timeZone?: string,
+): { at: number; shiftMin: number } | null {
+  return p.zoned ? null : clockChange(p.next_runs, p.utc_offset_min, timeZone);
 }
 
 /** The editor's dry-run line: "Dry run: on mercury, in acme/web, as

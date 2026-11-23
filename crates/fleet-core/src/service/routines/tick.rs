@@ -4,7 +4,9 @@
 //! one store never both fire one routine. A restart loses nothing: a fire
 //! missed while the process was down runs once at the next pass, and the
 //! next one is counted from then. A fire under way when it stopped is not
-//! started again: the next one is counted before a fire starts.
+//! started again: the next one is counted before a fire starts. A finished
+//! run's session is closed once it has idled [`RUN_SESSION_IDLE_SECS`],
+//! except a routine's newest few and any a person touched (w06-8).
 
 use super::fix::{
     turn_code, E_NO_SESSION, E_PROMPT_NOT_DELIVERED, E_PROMPT_NOT_QUEUED, E_RUN_BUDGET,
@@ -45,6 +47,15 @@ pub const RETRY_WITHIN_SECS: i64 = 3600;
 /// retry (F16), and a weekly limit can take days: it stays retryable this
 /// long, so the wait does not age it out.
 pub const RATE_LIMIT_RETRY_WITHIN_SECS: i64 = 8 * 86_400;
+/// A finished run's session is closed once it has sat idle this long
+/// (w06-8): each run leaves a live Claude behind, and a `*/30` routine
+/// would leave about 48 a day on its host.
+pub const RUN_SESSION_IDLE_SECS: i64 = 12 * 3600;
+/// The newest live sessions of each routine that stay open however long
+/// they idle, for a person to read the last runs in.
+pub const RUN_SESSIONS_KEPT: i64 = 3;
+/// Sessions one pass closes at most.
+const CLOSES_PER_PASS: i64 = 5;
 
 /// Starts a run's session: the real start path in production, a fake in
 /// tests.
@@ -69,6 +80,13 @@ pub trait Spawn: Send + Sync {
     /// Stops the turn of a run past its time cap (G3.8): Escape in its
     /// pane, so the session stays for a person to read. Nothing in tests.
     async fn stop_turn(&self, _host_alias: &str, _tmux_name: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    /// Closes a finished run's idle session (w06-8). A run's session works
+    /// in its project's own directory, not a worktree, so ending it loses no
+    /// file: a plain kill, which still refuses a pinned session and the
+    /// fleet controller. Nothing in tests.
+    async fn close(&self, _host_alias: &str, _tmux_name: &str) -> Result<(), IpcError> {
         Ok(())
     }
     /// Types a run's prompt into its fresh session once Claude is ready
@@ -122,6 +140,19 @@ impl Spawn for LiveSpawn {
             &self.ssh,
         )
         .await
+    }
+    async fn close(&self, host_alias: &str, tmux_name: &str) -> Result<(), IpcError> {
+        crate::service::sessions::kill_session(
+            crate::service::sessions::KillSessionArgs {
+                host_alias: host_alias.to_string(),
+                name: tmux_name.to_string(),
+                force: false,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map(|_| ())
     }
     async fn deliver(&self, row: &SessionRow, prompt: &str, handover: i64) -> Result<(), String> {
         crate::service::sessions::seed::seed_routine(&self.store, &self.ssh, row, prompt, handover)
@@ -524,7 +555,7 @@ pub(super) fn plan(s: &Store, r: &RoutineRow, now: i64) -> Result<Plan, IpcError
         return Ok(Plan::Skip("its last run is still going".into()));
     }
     if let Some(budget) = r.budget_day_micros {
-        let since = super::cron::local_day_start(now, r.utc_offset_min);
+        let since = super::cron::local_day_start_in(now, r.time_zone.as_deref(), r.utc_offset_min);
         let spent = s.routine_cost_since(r.id, since)?;
         if spent >= budget {
             return Ok(Plan::Skip(format!(
@@ -952,7 +983,7 @@ fn settle_run(
         // Retired with the run, as `undelivered` does: after it, so a
         // run that failed to close keeps them for the next pass.
         s.mark_handovers_delivered(&untyped, None)?;
-    } else if now - run.started_at > RUN_STALE_SECS {
+    } else if now - run.started_at > RUN_STALE_SECS && !session_working(&row) {
         fail(
             s,
             run.id,
@@ -961,10 +992,20 @@ fn settle_run(
             cost,
             now,
         )?;
+        // w06-3: closed, the run no longer holds `overlap: skip` off its
+        // checkout, so its session must not go on in it either.
+        stop.push((row.host_alias.clone(), row.tmux_name.clone()));
     } else if cost != run.cost_micros {
         s.set_routine_run_cost(run.id, cost)?;
     }
     Ok(())
+}
+
+/// Whether `row`'s Claude reads as still at its turn: a run past
+/// [`RUN_STALE_SECS`] whose session is working stays open (w06-3), so the
+/// next fire's `overlap: skip` still sees it.
+fn session_working(row: &crate::store::SessionRow) -> bool {
+    row.claude_status.as_deref() == Some("working") && row.idle_since.is_none()
 }
 
 /// Start each failed run of a `retry_once` routine again, once (G3.8): the
@@ -1722,7 +1763,20 @@ pub async fn tick_once(deps: &Deps, now: i64) {
             if !crate::service::loops::gate_in("routines", &s, next) {
                 return Ok(None);
             }
-            Ok(Some((s.routines_due(now)?, s.event_routines()?)))
+            // The controller is never closed unattended (`kill_session`
+            // refuses it too, but then every pass would try again).
+            let controller = s.get_controller()?;
+            let mut close = s.routine_sessions_to_close(
+                now - RUN_SESSION_IDLE_SECS,
+                RUN_SESSIONS_KEPT,
+                CLOSES_PER_PASS,
+            )?;
+            close.retain(|(_, h, t)| controller.as_ref() != Some(&(h.clone(), t.clone())));
+            for (sid, _, _) in &close {
+                // Written first: the kill reaps the row moments later.
+                let _ = s.insert_session_event(*sid, "gc_killed", Some(CLOSED_DETAIL));
+            }
+            Ok(Some((s.routines_due(now)?, s.event_routines()?, close)))
         })
         .map_err(|e| e.message);
     stop_turns(deps, stop).await;
@@ -1736,7 +1790,7 @@ pub async fn tick_once(deps: &Deps, now: i64) {
     if let Some(replies) = deps.spawn.replies() {
         super::memory::spawn_pass(&deps.store, replies, now);
     }
-    let (due, events) = match work {
+    let (due, events, close) = match work {
         Ok(Some(w)) => w,
         Ok(None) => return,
         Err(e) => {
@@ -1744,6 +1798,7 @@ pub async fn tick_once(deps: &Deps, now: i64) {
             return;
         }
     };
+    close_sessions(deps, close).await;
     let mut failed: Option<String> = None;
     if let Err(e) = retry_failed(deps, now).await {
         tracing::warn!(error = %e.message, "[routines] retry failed");
@@ -1766,6 +1821,19 @@ pub async fn tick_once(deps: &Deps, now: i64) {
         routine_run_outcome::spawn_pass(&deps.store, panes, now);
     }
     crate::service::loops::report("routines", failed.map_or(Ok(()), Err), next);
+}
+
+/// The `gc_killed` detail of a run's session the scheduler closed.
+const CLOSED_DETAIL: &str = "routine run finished, idle 12 h";
+
+/// Close the finished runs' idle sessions; a failure is logged, and the
+/// session is picked again on a later pass while it still qualifies.
+async fn close_sessions(deps: &Deps, close: Vec<(i64, String, String)>) {
+    for (_, host, name) in close {
+        if let Err(e) = deps.spawn.close(&host, &name).await {
+            tracing::warn!(host = %host, session = %name, error = %e.message, "[routines] close session failed");
+        }
+    }
 }
 
 /// Stop the turns of the runs past their time cap; a failure is logged,

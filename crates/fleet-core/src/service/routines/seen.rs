@@ -32,8 +32,10 @@ use std::sync::Mutex;
 
 /// An item no run reported for this long is forgotten.
 pub const KEEP_SECS: i64 = 30 * 86_400;
-/// The most items a routine keeps.
-pub const MAX_ITEMS: i64 = 500;
+/// The most items a routine keeps. As many as a run is shown (w06-5): an
+/// item kept but not shown would look new to every run, and be reviewed,
+/// and reported, again each time.
+pub const MAX_ITEMS: i64 = SHOWN_MAX;
 /// The most items a run's prompt lists, the last seen first.
 pub const SHOWN_MAX: i64 = 200;
 /// The most items one reply reports.
@@ -66,11 +68,22 @@ pub fn prompt_block(items: &[RoutineSeenRow]) -> String {
     if items.is_empty() {
         out.push_str(" None yet.");
     } else {
-        let list = items
-            .iter()
-            .map(|i| format!("{} | {}", i.item, i.state))
-            .collect::<Vec<_>>()
-            .join("\n");
+        // Whole lines, the last seen first, up to the list's size: the
+        // fence would otherwise cut the list mid-line (w06-5).
+        let mut list = String::new();
+        let mut chars = 0;
+        for i in items {
+            let line = format!("{} | {}", i.item, i.state);
+            let add = line.chars().count() + usize::from(!list.is_empty());
+            if chars + add > LIST_MAX_CHARS {
+                break;
+            }
+            if !list.is_empty() {
+                list.push('\n');
+            }
+            list.push_str(&line);
+            chars += add;
+        }
         let fenced =
             crate::mcp::guard::fence_untrusted(&list, "routine seen items", LIST_MAX_CHARS);
         out.push_str(&format!(
@@ -168,9 +181,12 @@ pub struct Tally {
 }
 
 impl Tally {
-    /// Nothing new and nothing changed.
+    /// Every item it reported was as it was: nothing new, nothing changed,
+    /// and at least one item. An empty block says nothing about the run's
+    /// worth (w06-4): a digest or a test run has no items to report, and
+    /// its reply is still news.
     pub fn quiet(&self) -> bool {
-        self.new == 0 && self.changed == 0
+        self.new == 0 && self.changed == 0 && self.same > 0
     }
 }
 
@@ -378,6 +394,20 @@ mod tests {
             "{p}"
         );
         assert!(p.contains("<routine-seen>"), "{p}");
+        // A list longer than the fence holds loses its oldest lines whole.
+        let many: Vec<_> = (0..SHOWN_MAX)
+            .map(|n| RoutineSeenRow {
+                item: format!("pr o/r#{n}"),
+                state: "x".repeat(STATE_MAX_CHARS),
+                first_seen_at: 1,
+                seen_at: 2,
+                changed_at: 1,
+                run_id: None,
+            })
+            .collect();
+        let p = prompt_block(&many);
+        assert!(p.contains(&format!("pr o/r#0 | {}", "x".repeat(STATE_MAX_CHARS))));
+        assert!(!p.contains(&format!("pr o/r#{} |", SHOWN_MAX - 1)), "{p}");
         let empty = prompt_block(&[]);
         assert!(empty.contains("None yet."), "{empty}");
         assert!(!empty.contains("Skip an item"), "{empty}");
@@ -392,7 +422,12 @@ mod tests {
         };
         assert_eq!(summary(&t), "Seen items: 1 new, 4 unchanged");
         assert!(!t.quiet());
-        assert!(Tally::default().quiet());
+        assert!(Tally {
+            same: 4,
+            ..Tally::default()
+        }
+        .quiet());
+        assert!(!Tally::default().quiet(), "an empty block is not quiet");
         assert_eq!(
             summary(&Tally::default()),
             "Its reply listed nothing to look at"

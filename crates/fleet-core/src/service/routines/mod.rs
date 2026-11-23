@@ -527,7 +527,9 @@ fn check(
                 .filter(|l| !l.is_empty())
                 .ok_or_else(|| invalid("a cron routine needs cron".into()))?;
             let c = cron::Cron::parse(line).map_err(invalid)?;
-            if c.next_after(crate::store::now_unix(), offset).is_none() {
+            if c.next_in(crate::store::now_unix(), input.time_zone.as_deref(), offset)
+                .is_none()
+            {
                 return Err(invalid(format!("{line:?} never fires")));
             }
             Some(line.to_string())
@@ -875,12 +877,12 @@ fn next_fire(f: &RoutineFields, now: i64) -> Option<i64> {
     if !f.enabled {
         return None;
     }
-    schedule(&f.trigger, f.cron.as_deref())?.next_after(now, f.utc_offset_min)
+    schedule(&f.trigger, f.cron.as_deref())?.next_in(now, f.time_zone.as_deref(), f.utc_offset_min)
 }
 
 /// The next fire of a stored routine after `now` (see [`next_fire`]).
 pub(crate) fn next_fire_of(r: &RoutineRow, now: i64) -> Option<i64> {
-    schedule(&r.trigger, r.cron.as_deref())?.next_after(now, r.utc_offset_min)
+    schedule(&r.trigger, r.cron.as_deref())?.next_in(now, r.time_zone.as_deref(), r.utc_offset_min)
 }
 
 /// Why a change that moves a routine to another organisation's host is
@@ -895,14 +897,20 @@ pub const PREVIEW_RUNS: usize = 5;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutinePreview {
     /// Its schedule's next fires after now (unix seconds), at most
-    /// [`PREVIEW_RUNS`], read at `utc_offset_min` as the scheduler reads
-    /// them; empty for an event or manual routine and for a line that does
-    /// not parse. A fixed offset does not follow a daylight-saving change
-    /// (see [`cron`]): the editor shows these in the device's zone, so a
-    /// fire past the change shows the hour it moved by.
+    /// [`PREVIEW_RUNS`], read in `time_zone` (or, without one the tz
+    /// database knows, at `utc_offset_min`) as the scheduler reads them;
+    /// empty for an event or manual routine and for a line that does not
+    /// parse. A fixed offset does not follow a daylight-saving change (see
+    /// [`cron`]): the editor shows these in the device's zone, so a fire
+    /// past the change shows the hour it moved by.
     pub next_runs: Vec<i64>,
-    /// The offset `next_runs` were read at, minutes east of UTC.
+    /// The offset `next_runs` were read at, minutes east of UTC, when they
+    /// were not read in a zone.
     pub utc_offset_min: i64,
+    /// `next_runs` follow `time_zone`, so a clock change does not move
+    /// their wall-clock time. Absent from a hub that reads only the offset.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub zoned: bool,
     /// Why `save` would refuse it, in its words; absent when it would save.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
@@ -948,7 +956,7 @@ pub fn preview(
         {
             let mut at = now;
             while next_runs.len() < PREVIEW_RUNS {
-                let Some(next) = c.next_after(at, offset) else {
+                let Some(next) = c.next_in(at, input.time_zone.as_deref(), offset) else {
                     break;
                 };
                 next_runs.push(next);
@@ -977,6 +985,7 @@ pub fn preview(
     Ok(RoutinePreview {
         next_runs,
         utc_offset_min: offset,
+        zoned: input.trigger == "cron" && cron::zone_known(input.time_zone.as_deref()),
         problem,
         account,
         logins,
@@ -1037,7 +1046,8 @@ pub fn save(
                 && f.enabled
                 && before.trigger == f.trigger
                 && before.cron == f.cron
-                && before.utc_offset_min == f.utc_offset_min;
+                && before.utc_offset_min == f.utc_offset_min
+                && before.time_zone == f.time_zone;
             let next = if same_schedule && before.next_run_at.is_some() {
                 before.next_run_at
             } else {
