@@ -452,6 +452,11 @@ pub struct PersonSummary {
     pub created_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled_at: Option<i64>,
+    /// `owner`, `disabled` or `live`: which of Disable and Enable Settings →
+    /// People offers on the row (review w07-4). Absent from an older hub's
+    /// answer, which offers neither.
+    #[serde(default)]
+    pub state: String,
     /// Their live devices, by name.
     #[serde(default)]
     pub devices: Vec<String>,
@@ -637,6 +642,13 @@ pub struct MemberSummary {
     /// shown as existing, never named — a session's metadata is content.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub private_sessions: u32,
+    /// The asking admin may not change this membership: their own, or a
+    /// fleet admin's (the owner's among them), under an org admin's
+    /// authority ([`require_other_member`]). A client offers no role change
+    /// and no Remove on the row (review w07-5). Absent (false) otherwise,
+    /// and from an older hub.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 /// A fleet admin's device, the hub owner's among them (`Store::fleet_admins`
@@ -651,8 +663,13 @@ pub(crate) fn is_fleet_admins_device(admins: &[i64], c: &crate::store::ClientTok
 pub fn list_members(s: &Store, org: i64, me: Me<'_>) -> Result<Vec<MemberSummary>, IpcError> {
     let owner = s.personal_owner_id()?;
     let mut devices = s.active_client_tokens()?;
-    if matches!(me.authority, Authority::Org { .. }) {
-        let admins = s.fleet_admins()?;
+    let org_admin = matches!(me.authority, Authority::Org { .. });
+    let admins = if org_admin {
+        s.fleet_admins()?
+    } else {
+        Vec::new()
+    };
+    if org_admin {
         devices.retain(|d| !is_fleet_admins_device(&admins, d));
     }
     let mut out = Vec::new();
@@ -678,6 +695,8 @@ pub fn list_members(s: &Store, org: i64, me: Me<'_>) -> Result<Vec<MemberSummary
             owner: owner == Some(m.person_id),
             live_sessions: 0,
             private_sessions: 0,
+            locked: org_admin
+                && (me.person == Some(m.person_id) || admins.binary_search(&m.person_id).is_ok()),
         });
     }
     Ok(out)
@@ -1086,6 +1105,14 @@ pub fn list_people(s: &Store) -> Result<Vec<PersonSummary>, IpcError> {
             id: p.id,
             name: p.name,
             display_name: p.display_name,
+            state: if p.is_personal_owner {
+                "owner"
+            } else if p.disabled_at.is_some() {
+                "disabled"
+            } else {
+                "live"
+            }
+            .into(),
             owner: p.is_personal_owner,
             created_at: p.created_at,
             disabled_at: p.disabled_at,
@@ -1376,6 +1403,14 @@ fn run_action(
                     .collect();
                 let mut people = list_people(s)?;
                 people.retain(|p| members.contains(&p.id));
+                // A fleet admin's devices are not an org admin's to see, as
+                // `list_members` and `list_devices` hide them (review w07-5).
+                let admins = s.fleet_admins()?;
+                for p in &mut people {
+                    if admins.binary_search(&p.id).is_ok() {
+                        p.devices.clear();
+                    }
+                }
                 fence_realm_to_org(s, org, &mut people)?;
                 to_json(&people)
             }

@@ -994,11 +994,23 @@ loopback hub, or to the public URL directly on a public hub.
 
 ### Removing the agent
 
-There is no `fleet-agent uninstall` yet. After `remove_host` (or after moving
-the host back to `transport: ssh`) the hub refuses the agent's token (401, or
-403 "not an agent host"); the agent keeps dialling every minute or so and its
-status (`fleet-agent status`, systemd's `STATUS=`) says the hub no longer
-takes it. Remove it on the host:
+After `remove_host` (or after moving the host back to `transport: ssh`) the
+hub refuses the agent's token (401, or 403 "not an agent host"); the agent
+keeps dialling every few minutes and its status (`fleet-agent status`,
+systemd's `STATUS=`) says the hub no longer takes it and names the command
+below. Remove it on the host:
+
+```bash
+sudo fleet-agent uninstall          # Linux, system unit (installed with sudo)
+fleet-agent uninstall --user        # Linux, --user unit; macOS (no flag needed)
+```
+
+It stops and disables the unit and the update timer (on macOS it boots the
+LaunchAgent out), removes them, the config (it holds the host's token; pass
+`--config` if `install --config` put it elsewhere) and the updater's state,
+and reloads systemd. The sessions the agent started keep running, and the
+binaries stay: it prints where they are. An agent older than `uninstall`
+is removed by hand:
 
 ```bash
 # Linux, system unit (installed with sudo)
@@ -1915,12 +1927,13 @@ records the actor as none). Groups are addressed by path
 `--json`.
 
 ```sh
-# Create a group under /orgs and put a person in it
-fleet-hub realm group create platform --parent /orgs
-fleet-hub realm group add /orgs/platform ada
+# Create a top-level group and put a person in it (the groups under /orgs
+# are the orgs' own, managed by their memberships)
+fleet-hub realm group create platform
+fleet-hub realm group add /platform ada
 
 # Give the whole group the fleet-admin role (a person: --user ada)
-fleet-hub realm role map fleet-admin --group /orgs/platform
+fleet-hub realm role map fleet-admin --group /platform
 fleet-hub realm effective ada
 
 # Read the audit log: who changed what, newest first

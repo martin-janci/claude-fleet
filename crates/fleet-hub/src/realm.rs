@@ -691,6 +691,44 @@ mod tests {
         let _ = owner;
     }
 
+    /// Review w07-6: the example in docs/hub.md's *Groups, roles and the
+    /// audit log* runs as written (read at run time, not compiled in).
+    #[test]
+    fn the_documented_realm_example_runs() {
+        let doc =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/hub.md"))
+                .expect("docs/hub.md");
+        let section = doc
+            .split("### Groups, roles and the audit log")
+            .nth(1)
+            .expect("the section");
+        let block = section
+            .split("```sh")
+            .nth(1)
+            .and_then(|b| b.split("```").next())
+            .expect("its example");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let opts = HubOptions {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..HubOptions::default()
+        };
+        let store = crate::serve::open_store(&opts, &HashMap::new()).expect("store");
+        store.create_person("ada", None).expect("person");
+        let me = Mutex::new(store);
+        let mut ran = 0;
+        for line in block.lines().map(str::trim) {
+            let Some(rest) = line.strip_prefix("fleet-hub realm ") else {
+                continue;
+            };
+            let argv: Vec<&str> = rest.split_whitespace().collect();
+            let (a, _) = request(parse(&argv));
+            realm_admin::run(&a, &me, Me::LOCAL)
+                .unwrap_or_else(|e| panic!("{line}: {}", e.message));
+            ran += 1;
+        }
+        assert!(ran >= 4, "{block}");
+    }
+
     fn hub() -> (tempfile::TempDir, HubOptions) {
         let dir = tempfile::tempdir().expect("tempdir");
         let opts = HubOptions {

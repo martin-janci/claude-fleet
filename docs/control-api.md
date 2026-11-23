@@ -160,8 +160,8 @@ once, with **Copy token** and **Copy as env line** (`FLEET_MCP_TOKEN=…`); the
 store keeps only its SHA-256, and nothing logs it. The table lists each with
 its scope, hosts, expiry and when it was last used (to the minute);
 **Revoke** ends it on its next request. On a desktop paired with a hub the
-same panel creates the hub's tokens, from a fleet admin's trusted full device,
-Read or Act only.
+same panel creates the hub's tokens, from the hub owner's own trusted full
+device, Read or Act only.
 
 ## Connecting a client
 

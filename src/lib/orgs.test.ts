@@ -25,6 +25,8 @@ import {
   loadOrgs,
   createFromSuggestion,
   memberPairing,
+  memberGrantsTotal,
+  memberGrantsLine,
   type OrgDetail,
 } from './orgs';
 import { removeFleet } from './fleets';
@@ -391,5 +393,24 @@ describe('memberPairing', () => {
     await removeFleet('work');
     expect(get(memberPairing)).not.toBeNull();
     memberPairing.set(null);
+  });
+});
+
+describe('member grants on remove (review w07-2)', () => {
+  it('counts and names Answer shares, as the phone does', () => {
+    const answerOnly = { watch: 0, answer: 2, drive: 0 };
+    expect(memberGrantsTotal(answerOnly)).toBe(2);
+    expect(memberGrantsLine('Acme', answerOnly)).toBe(
+      '2 sessions of Acme are shared with them (0 to drive, 2 to answer, 0 to watch). What happens to those shares?',
+    );
+    expect(memberGrantsLine('Acme', { watch: 1, answer: 1, drive: 1 })).toContain('3 sessions');
+  });
+
+  it('reads a hub without the Answer tier as before', () => {
+    expect(memberGrantsTotal({ watch: 1, drive: 1 })).toBe(2);
+    expect(memberGrantsLine('Acme', { watch: 1, drive: 0 })).toBe(
+      '1 session of Acme is shared with them (0 to drive, 1 to watch). What happens to those shares?',
+    );
+    expect(memberGrantsLine('Acme', { watch: 0, answer: 0, drive: 0 })).toBe('');
   });
 });

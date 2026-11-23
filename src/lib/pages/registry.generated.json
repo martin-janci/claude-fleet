@@ -8897,6 +8897,29 @@
       }
     },
     {
+      "actions": [
+        {
+          "bind": [
+            [
+              "person_id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "enable_person",
+          "confirm": "They can pair a device and be given access again. Nothing revoked when they were disabled comes back: pair their devices, and add them to orgs and roles, again.",
+          "envelope": "args",
+          "id": "person.enable",
+          "label": "Enable",
+          "params": [],
+          "report": false,
+          "variants": [
+            "disabled"
+          ]
+        }
+      ],
       "create": {
         "bind": [
           [
@@ -8949,12 +8972,15 @@
           ]
         ],
         "command": "disable_person",
-        "confirm": "Revokes every device of theirs and every share made to them, at once. Their own sessions stay private and theirs. They can be re-enabled later (org_admin enable_person, or fleet-hub person enable), but nothing revoked comes back.",
+        "confirm": "Revokes every device of theirs and every share made to them, at once, pauses their routines and missions, and takes them out of every org, group and role. Their own sessions stay private and theirs. Re-enabling them later gives none of it back.",
         "envelope": "args",
         "id": "person.disable",
         "label": "Disable",
         "params": [],
-        "report": false
+        "report": false,
+        "variants": [
+          "live"
+        ]
       },
       "empty": "Nobody yet. Add a person, or pair a device to them.",
       "fields": [
@@ -9027,6 +9053,26 @@
           "id": "disabled_at",
           "label": "Disabled",
           "type": "time"
+        },
+        {
+          "help": "Active, disabled, or the hub's owner (who cannot be disabled).",
+          "id": "state",
+          "label": "Status",
+          "options": [
+            [
+              "live",
+              "Active"
+            ],
+            [
+              "disabled",
+              "Disabled"
+            ],
+            [
+              "owner",
+              "Owner"
+            ]
+          ],
+          "type": "choice"
         }
       ],
       "help": "The people this hub knows. A session belongs to the person whose device started it and is private to them unless they share it. The hub's owner cannot be disabled.",
@@ -9052,7 +9098,8 @@
         "label": "Apply",
         "params": [],
         "report": false
-      }
+      },
+      "variant_by": "state"
     },
     {
       "empty": "No groups yet. An org's groups appear when the org is added.",

@@ -1240,6 +1240,7 @@ const PERSON_RESOURCE: ResourceType = ResourceType {
         FieldSpec::new("roles_display", "Roles", "Every role they hold, and through which group, composite or direct mapping.", FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[], each: &[] }),
         FieldSpec::new("created_at", "Added", "When the hub first heard of them.", FieldKind::Time),
         FieldSpec::new("disabled_at", "Disabled", "When their devices and the shares made to them were revoked.", FieldKind::Time),
+        FieldSpec::new("state", "Status", "Active, disabled, or the hub's owner (who cannot be disabled).", FieldKind::Choice { options: PERSON_STATES }),
     ],
     create: Some(
         ActionSpec::new(
@@ -1254,14 +1255,25 @@ const PERSON_RESOURCE: ResourceType = ResourceType {
         ]),
     ),
     update: Some(ActionSpec::new("person.update", "Apply", "rename_person", &[("person_id", Bind::Record("id"))])),
+    // Review w07-4: Disable only on a live person who is not the owner,
+    // Enable only on a disabled one, and the confirm says all it does.
     delete: Some(
         ActionSpec::new("person.disable", "Disable", "disable_person", &[("person_id", Bind::Record("id"))])
-            .confirm("Revokes every device of theirs and every share made to them, at once. Their own sessions stay private and theirs. They can be re-enabled later (org_admin enable_person, or fleet-hub person enable), but nothing revoked comes back."),
+            .variants(&["live"])
+            .confirm("Revokes every device of theirs and every share made to them, at once, pauses their routines and missions, and takes them out of every org, group and role. Their own sessions stay private and theirs. Re-enabling them later gives none of it back."),
     ),
-    actions: &[],
+    actions: &[ActionSpec::new("person.enable", "Enable", "enable_person", &[("person_id", Bind::Record("id"))])
+        .variants(&["disabled"])
+        .confirm("They can pair a device and be given access again. Nothing revoked when they were disabled comes back: pair their devices, and add them to orgs and roles, again.")],
     create_flow: None,
-    variant_by: None,
+    variant_by: Some("state"),
 };
+
+const PERSON_STATES: &[(&str, &str)] = &[
+    ("live", "Active"),
+    ("disabled", "Disabled"),
+    ("owner", "Owner"),
+];
 
 /// The realm's groups (identity sub-project 1), read-only: membership and
 /// role mappings change on the org's page or through `realm_admin`.

@@ -620,6 +620,7 @@ pub fn run() {
             commands::org_devices::add_person,
             commands::org_devices::rename_person,
             commands::org_devices::disable_person,
+            commands::org_devices::enable_person,
             commands::sessions::session_history,
             commands::sessions::session_conversations,
             commands::sessions::session_conversation,

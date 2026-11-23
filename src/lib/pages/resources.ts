@@ -233,6 +233,15 @@ export function applies(r: ResourceType, a: ActionSpec, record: ResourceRecord):
   return a.variants.includes(String(record[r.variant_by] ?? ''));
 }
 
+/** The record offers its type's Remove: as [applies], except that a record
+ *  from an older hub without the `variant_by` field still offers it (Settings
+ *  → People's Disable before `state`, review w07-4). */
+export function deleteApplies(r: ResourceType, record: ResourceRecord): boolean {
+  if (!r.delete) return false;
+  if (r.variant_by && (record[r.variant_by] === undefined || record[r.variant_by] === null)) return true;
+  return applies(r, r.delete, record);
+}
+
 /** Record fields as the strings a `when` compares. */
 export function recordValues(r: ResourceType, record: ResourceRecord): Record<string, string> {
   const out: Record<string, string> = {};

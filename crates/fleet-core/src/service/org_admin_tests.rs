@@ -269,8 +269,10 @@ fn a_device_is_handed_to_a_person_created_on_first_use() {
     assert_eq!(v["person"], "ada");
     let people = list_people(&st.lock().unwrap()).unwrap();
     assert!(people[0].owner, "the owner first: {people:?}");
+    assert_eq!(people[0].state, "owner");
     let ada = people.iter().find(|p| p.name == "ada").unwrap();
     assert_eq!(ada.devices, vec!["laptop".to_string()]);
+    assert_eq!(ada.state, "live");
     // Nobody is not an answer: a device belongs to somebody.
     a.person = None;
     assert_eq!(err_code(run(&a, &st, Me::LOCAL)), "E_INVALID");
@@ -606,6 +608,30 @@ fn an_org_admin_sees_and_acts_on_their_orgs_devices_only() {
         "{members:?}"
     );
     assert!(members.iter().any(|m| m.name == "root2"), "{members:?}");
+    // Review w07-5: nor does the people list, and the rows the hub would
+    // refuse a change to (her own, a fleet admin's) say so.
+    let people = run(&args("list_people"), &c.st, me).unwrap();
+    let root2 = people
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "root2")
+        .expect("a member");
+    assert_eq!(root2["devices"], serde_json::json!([]), "{people}");
+    let locked: Vec<&str> = members
+        .iter()
+        .filter(|m| m.locked)
+        .map(|m| m.name.as_str())
+        .collect();
+    assert_eq!(locked.len(), 2, "{members:?}");
+    assert!(
+        locked.contains(&"jane") && locked.contains(&"root2"),
+        "{locked:?}"
+    );
+    assert!(list_members(&c.st.lock().unwrap(), c.acme, Me::LOCAL)
+        .unwrap()
+        .iter()
+        .all(|m| !m.locked));
     for name in ["owner-phone", "eve-phone", "root2-phone"] {
         let mut a = args("revoke_device");
         a.device = Some(name.into());

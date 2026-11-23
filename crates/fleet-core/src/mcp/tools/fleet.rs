@@ -658,8 +658,8 @@ impl FleetTools {
         (a reverse SSH tunnel when the hub is loopback-only). Returns \
         per-host status; each host must restart Claude to load it. host: \
         one alias; content_only: skills, CLAUDE.md and hooks only, no token. \
-        The master, or a fleet admin's own device for content_only on one \
-        host only.")]
+        The master, or a fleet admin's own device for one host only: \
+        content_only, or the first full run of a host never provisioned.")]
     pub(super) async fn provision_hosts(
         &self,
         Extension(caller): Extension<Caller>,
@@ -672,7 +672,30 @@ impl FleetTools {
                 p.rotate, p.host, p.content_only
             ),
         );
-        provision_scope_allowed(&caller, &p)?;
+        // A host that never had a full provisioning (no token yet, or one
+        // `install_agent` minted) has no MCP entry, which no content-only
+        // pass can write (review w13-1): its first run is a full one, and a
+        // trusted full device may ask for it ("Re-provision this host" sends
+        // content_only; an older desktop too).
+        let first_full = match p.host.as_deref() {
+            Some(h) => {
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                s.get_host_token(h).map_err(to_mcp_err)?.is_none()
+                    || s.get_host_row(h)
+                        .map_err(|e| to_mcp_err(e.into()))?
+                        .is_some_and(|row| !row.provisioned)
+            }
+            None => false,
+        };
+        let mut p = p;
+        if first_full
+            && p.content_only
+            && !p.rotate
+            && owner_device_admin(&caller, "provisioning a new host").is_ok()
+        {
+            p.content_only = false;
+        }
+        provision_scope_allowed(&caller, &p, first_full)?;
         let base = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             crate::service::hub::HubBase::read(&s).map_err(to_mcp_err)?
@@ -829,12 +852,16 @@ impl FleetTools {
                 }
             }
             // A device belongs to somebody or it is not minted at all
-            // (multi-user M1): with no `person` named, the code is for THIS
-            // HUB'S OWNER, by the owner's current name — the flag, not the
-            // name, is what `people` keys the owner on, so a renamed owner
-            // still pairs their own devices. A hub that cannot say whose it
-            // is refuses rather than minting a person-less token, which is
-            // the privilege level the milestone exists to remove.
+            // (multi-user M1): with no `person` named, the code is for the
+            // person who asked through their own device (`org_admin {
+            // pair_device }`: Settings' "you when empty"), and from the
+            // operator (master token) for THIS HUB'S OWNER — never the owner
+            // for a fleet admin who is somebody else (review w07-1). Both by
+            // the current name: the flag or id, not the name, is what keys
+            // them, so a renamed person still pairs their own devices. A hub
+            // that cannot say whose it is refuses rather than minting a
+            // person-less token, which is the privilege level the milestone
+            // exists to remove.
             //
             // A `peer` / `updater` code is the exception and stays `None`:
             // neither is anybody's device, and both were refused a `person`
@@ -842,14 +869,29 @@ impl FleetTools {
             let person = match (person, mode.as_str()) {
                 (some @ Some(_), _) => some,
                 (None, "peer" | "updater") => None,
-                (None, _) => Some(owner_name(&s).ok_or_else(|| {
-                    mcp_err(
-                        codes::E_PROVISION,
-                        "this hub has no personal owner, so a device cannot be paired to \
-                         anybody; run fleet-hub init (or name a person explicitly)",
-                        None,
-                    )
-                })?),
+                (None, _) => match minter.person {
+                    Some(me) => Some(
+                        s.get_person(me)
+                            .map_err(to_mcp_err)?
+                            .filter(|p| p.disabled_at.is_none())
+                            .map(|p| p.name)
+                            .ok_or_else(|| {
+                                mcp_err(
+                                    codes::E_NOTFOUND,
+                                    "the person this device belongs to is gone; name a person",
+                                    None,
+                                )
+                            })?,
+                    ),
+                    None => Some(owner_name(&s).ok_or_else(|| {
+                        mcp_err(
+                            codes::E_PROVISION,
+                            "this hub has no personal owner, so a device cannot be paired to \
+                             anybody; run fleet-hub init (or name a person explicitly)",
+                            None,
+                        )
+                    })?),
+                },
             };
             // The live person that name is now, so the redeem binds to
             // them and refuses once they are disabled (review R6); a new
@@ -1928,14 +1970,29 @@ pub(super) fn org_admin_writer(caller: &Caller) -> Result<(), McpError> {
 }
 
 /// `provision_hosts` reaches the hub owner's own device (`Access::Person`)
-/// for one thing: refreshing ONE host's content, the secret-free pass the hub
-/// also runs by itself for every stale host. A provisioning of every host,
-/// or one that mints tokens (a full run, or `rotate`), stays the master's.
+/// for refreshing ONE host's content, the secret-free pass the hub also runs
+/// by itself for every stale host; and, from a trusted full device
+/// ([`owner_device_admin`]), for the FIRST full provisioning of one host
+/// that never had one (`first_full`: no token yet, or not provisioned): a
+/// host added from the app could otherwise never get its MCP entry (review
+/// w13-1). That mints the host's first token, or reuses the one
+/// `install_agent` minted, and revokes nothing. A provisioning of every
+/// host, or a full run over a provisioned host, or `rotate`, stays the
+/// master's.
 pub(super) fn provision_scope_allowed(
     caller: &Caller,
     p: &ProvisionHostsParams,
+    first_full: bool,
 ) -> Result<(), McpError> {
     if caller.is_master() || (p.content_only && !p.rotate && p.host.is_some()) {
+        return Ok(());
+    }
+    if first_full
+        && !p.rotate
+        && !p.content_only
+        && p.host.is_some()
+        && owner_device_admin(caller, "provisioning a new host").is_ok()
+    {
         return Ok(());
     }
     Err(mcp_err(

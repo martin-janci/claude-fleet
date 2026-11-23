@@ -488,28 +488,57 @@ fn the_owners_device_may_refresh_one_hosts_content_and_nothing_wider() {
     };
     assert!(super::fleet::provision_scope_allowed(
         &desktop,
-        &params(Some("mefistos"), true, false)
+        &params(Some("mefistos"), true, false),
+        false
     )
     .is_ok());
-    for (p, what) in [
-        (params(None, true, false), "every host"),
+    for (p, first, what) in [
+        (params(None, true, false), false, "every host"),
         (
             params(Some("mefistos"), false, false),
-            "a full run mints a token",
+            false,
+            "a full run over a token replaces nothing the device may",
         ),
-        (params(Some("mefistos"), true, true), "a rotation"),
+        (params(Some("mefistos"), true, true), false, "a rotation"),
+        (
+            params(Some("mefistos"), false, true),
+            true,
+            "a rotation, even of none",
+        ),
+        (
+            params(None, false, false),
+            true,
+            "every host, even new ones",
+        ),
     ] {
-        let e = super::fleet::provision_scope_allowed(&desktop, &p).expect_err(what);
+        let e = super::fleet::provision_scope_allowed(&desktop, &p, first).expect_err(what);
         assert!(
             e.message.starts_with("E_FORBIDDEN"),
             "{what}: {}",
             e.message
         );
     }
-    assert!(
-        super::fleet::provision_scope_allowed(&Caller::master(), &params(None, false, true))
-            .is_ok()
-    );
+    // Review w13-1: a host added from the app has no token: its first full
+    // provisioning is the trusted full device's (it revokes nothing)…
+    assert!(super::fleet::provision_scope_allowed(
+        &trusted(desktop.clone()),
+        &params(Some("mefistos"), false, false),
+        true
+    )
+    .is_ok());
+    // …and never an untrusted one's.
+    assert!(super::fleet::provision_scope_allowed(
+        &desktop,
+        &params(Some("mefistos"), false, false),
+        true
+    )
+    .is_err());
+    assert!(super::fleet::provision_scope_allowed(
+        &Caller::master(),
+        &params(None, false, true),
+        false
+    )
+    .is_ok());
     // Never a host's own Claude, nor a readonly device.
     assert!(!guard::access_allows(
         &host_caller("mefistos", TokenMode::Full),
@@ -22201,6 +22230,68 @@ async fn org_admin_never_takes_over_a_person_who_already_exists() {
     role.person = Some("bob".into());
     role.role = Some("viewer".into());
     call(admin, role).await.expect("a member's role");
+}
+
+/// A trusted full device of `name`, a fleet admin who is not the hub's
+/// owner (`fleet-hub realm role map fleet-admin --user <name>`), resolved
+/// as `authorize` resolves it.
+fn non_owner_fleet_admin(store: &Arc<Mutex<Store>>, name: &str) -> (Caller, i64) {
+    use crate::mcp::auth::{apply_realm, resolve_token, sha256_hex, RealmSets};
+    use crate::store::{Principal, RoleRef, ROLE_FLEET_ADMIN};
+    let s = store.lock().unwrap();
+    let person = s.create_person(name, None).unwrap().id;
+    let device = format!("{name}-phone");
+    let tok = format!("{name}-phone-tok");
+    s.insert_client_token(&device, &sha256_hex(&tok), "full")
+        .unwrap();
+    s.set_client_person(&device, Some(person)).unwrap();
+    s.set_client_trust(&device, true).unwrap();
+    let fa = s
+        .role(RoleRef::Realm(ROLE_FLEET_ADMIN))
+        .unwrap()
+        .unwrap()
+        .id;
+    s.map_role(Principal::Person(person), fa).unwrap();
+    let rows = s.auth_client_tokens().unwrap();
+    let mut c = resolve_token(&tok, "master", &[], &rows, s.personal_owner_id().unwrap())
+        .expect("the device resolves");
+    apply_realm(&mut c, &RealmSets::from_vecs(s.realm_sets().unwrap()));
+    assert!(c.is_fleet_admin && !c.is_personal_owner);
+    (c, person)
+}
+
+/// Review w07-1: Settings' "Belongs to (optional; you when empty)" — a
+/// fleet admin who is not the hub's owner, naming nobody, pairs a device
+/// for THEMSELVES, never for the owner (whose private sessions it would
+/// read).
+#[tokio::test]
+async fn pair_device_with_no_person_is_for_the_caller_not_the_owner() {
+    let (tools, _guards, store) = client_tools();
+    let (ada, _) = non_owner_fleet_admin(&store, "ada");
+    let mut pair = org_admin_args("pair_device");
+    pair.device = Some("ada-laptop".into());
+    let v = result_json(
+        &tools
+            .org_admin(Extension(ada), Parameters(pair.clone()))
+            .await
+            .expect("her own device"),
+    );
+    assert_eq!(v["person"], "ada", "{v}");
+    // The owner's own device, naming nobody, still pairs for the owner.
+    let owner = trusted(client_caller("laptop", TokenMode::Full));
+    pair.device = Some("owner-tablet".into());
+    let v = result_json(
+        &tools
+            .org_admin(Extension(owner), Parameters(pair))
+            .await
+            .expect("the owner's"),
+    );
+    let owner_name = {
+        let s = store.lock().unwrap();
+        let id = s.personal_owner_id().unwrap().unwrap();
+        s.get_person(id).unwrap().unwrap().name
+    };
+    assert_eq!(v["person"], owner_name.as_str(), "{v}");
 }
 
 fn org_admin_args(action: &str) -> crate::service::org_admin::OrgAdminArgs {

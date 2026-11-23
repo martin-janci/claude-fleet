@@ -412,6 +412,28 @@ pub async fn disable_person(
     .await
 }
 
+/// Settings → People's Enable (review w07-4): a disabled person may pair
+/// and be given access again; nothing revoked comes back.
+#[tauri::command]
+pub async fn enable_person(
+    backend: State<'_, Arc<FleetBackend>>,
+    fleet: Option<String>,
+    fleets: State<'_, Arc<crate::backend::fleets::Fleets>>,
+    args: PersonIdArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    let backend = fleets.select(backend.inner(), fleet.as_deref())?;
+    routed::enable_person(
+        &backend,
+        &store,
+        OrgAdminArgs {
+            person_id: Some(args.person_id),
+            ..OrgAdminArgs::new("enable_person")
+        },
+    )
+    .await
+}
+
 pub(crate) mod routed {
     use super::*;
 
@@ -601,6 +623,17 @@ pub(crate) mod routed {
     ) -> Result<serde_json::Value, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("disable_person", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn enable_person(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("enable_person", &args).await,
             None => local(&args, store),
         }
     }

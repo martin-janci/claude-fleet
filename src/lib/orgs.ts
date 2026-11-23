@@ -130,6 +130,9 @@ export interface OrgMember {
   live_sessions?: number;
   /** Of those, how many you may not open: shown as existing, never named. */
   private_sessions?: number;
+  /** The hub refuses you a change to this membership (your own, or a fleet
+   *  admin's, as an org admin): no role change and no Remove (review w07-5). */
+  locked?: boolean;
 }
 
 /** A member's live sessions in words (redesign 11.7c), or '—' for none. A
@@ -143,10 +146,30 @@ export function memberSessionsWord(m: Pick<OrgMember, 'live_sessions' | 'private
   return `${live} live, ${priv} private`;
 }
 
-/** How many live shares TO a member stand on the org's sessions. */
+/** How many live shares TO a member stand on the org's sessions. `answer`
+ *  is absent from a hub that predates the Answer tier. */
 export interface MemberGrants {
   watch: number;
+  answer?: number;
   drive: number;
+}
+
+/** Every share in `g`, Answer included (review w07-2: leaving it out hid an
+ *  answer-only member's shares, so Remove took them back unasked). */
+export function memberGrantsTotal(g: MemberGrants): number {
+  return g.watch + (g.answer ?? 0) + g.drive;
+}
+
+/** The remove dialog's question, as the phone's `removeQuestion` words it;
+ *  '' when nothing is shared. */
+export function memberGrantsLine(org: string, g: MemberGrants): string {
+  const n = memberGrantsTotal(g);
+  if (n === 0) return '';
+  const levels = [`${g.drive} to drive`, ...((g.answer ?? 0) > 0 ? [`${g.answer} to answer`] : []), `${g.watch} to watch`];
+  return (
+    `${n} ${n === 1 ? 'session' : 'sessions'} of ${org} ${n === 1 ? 'is' : 'are'} shared with them ` +
+    `(${levels.join(', ')}). What happens to those shares?`
+  );
 }
 
 /** What happens to those shares when the member leaves: taken back, each

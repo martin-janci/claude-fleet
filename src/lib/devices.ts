@@ -53,6 +53,9 @@ export interface PersonSummary {
   owner: boolean;
   created_at: number;
   disabled_at?: number;
+  /** `owner`, `disabled` or `live`: which of Disable and Enable the row
+   *  offers (review w07-4). Absent from an older hub. */
+  state?: 'owner' | 'disabled' | 'live';
   devices: string[];
   /** The realm groups they are a direct member of, by path. */
   groups: string[];

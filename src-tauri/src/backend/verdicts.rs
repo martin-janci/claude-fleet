@@ -661,6 +661,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("add_person", Verdict::Routed { tool: "org_admin" }),
     ("rename_person", Verdict::Routed { tool: "org_admin" }),
     ("disable_person", Verdict::Routed { tool: "org_admin" }),
+    ("enable_person", Verdict::Routed { tool: "org_admin" }),
     (
         "session_summary_since",
         Verdict::Routed {
