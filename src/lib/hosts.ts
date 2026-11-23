@@ -272,15 +272,26 @@ export async function probeHost(alias: string): Promise<Result<HostRow>> {
 export type RemovedHost = HostRow & {
   /** Present when fleet's tokens and keys there were asked to go. */
   credentials?: { deleted: boolean; error?: string };
+  /** Present when fleet's login profiles there were asked to go. */
+  login_profiles?: { removed: string[]; error?: string };
   /** Made-up accounts no login uses any more, now deleted. */
   accounts_removed?: string[];
 };
 
 /** Remove a host. `deleteCredentials`: also delete fleet's token and key
- *  files from its login profiles first (best effort; `credentials` says). */
-export async function deleteHost(alias: string, opts: { deleteCredentials?: boolean } = {}): Promise<Result<RemovedHost>> {
+ *  files from its login profiles first (best effort; `credentials` says).
+ *  `deleteLoginProfiles`: also remove the login profiles fleet lists there
+ *  (best effort; `login_profiles` says). */
+export async function deleteHost(
+  alias: string,
+  opts: { deleteCredentials?: boolean; deleteLoginProfiles?: boolean } = {},
+): Promise<Result<RemovedHost>> {
   const r = await invokeCmd<RemovedHost>('remove_host', {
-    args: opts.deleteCredentials ? { alias, delete_credentials: true } : { alias },
+    args: {
+      alias,
+      ...(opts.deleteCredentials ? { delete_credentials: true } : {}),
+      ...(opts.deleteLoginProfiles ? { delete_login_profiles: true } : {}),
+    },
   });
   if (r.ok) {
     removeHost(r.value.alias);

@@ -767,11 +767,11 @@ Parameters (* required): `id`*
 
 ### `remove_host`
 
-Remove a host; its sessions are orphaned. Returns the removed row. delete_credentials: also delete fleet's token and key files from its login profiles first (best effort, reported as `credentials`).
+Remove a host; its sessions are orphaned. Returns the removed row. delete_credentials: also delete fleet's token and key files (setup tokens and API keys only) from its login profiles first (best effort, reported as `credentials`). delete_login_profiles: also remove the login profiles fleet lists there, which signs their subscription logins out (best effort, reported as `login_profiles`).
 
 Access: the master token only · deadline 60 s.
 
-Parameters (* required): `alias`*, `delete_credentials`
+Parameters (* required): `alias`*, `delete_credentials`, `delete_login_profiles`
 
 ### `rename_session`
 

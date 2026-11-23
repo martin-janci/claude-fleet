@@ -193,6 +193,8 @@
   let confirm = $state<'rotate' | 'remove' | 'restore' | null>(null);
   /** Remove host's "also delete fleet's tokens and keys there" (review w11-7). */
   let deleteCredentials = $state(false);
+  /** Remove host's "also delete fleet's login profiles there" (review w03-7). */
+  let deleteLoginProfiles = $state(false);
   /** The login profile whose Remove is being confirmed (review w11-7). */
   let removingProfile = $state<{ profile: string; kind: 'login' | 'setup_token' | 'api_key' } | null>(null);
   let busy = $state(false);
@@ -595,15 +597,19 @@
   async function confirmRemove() {
     const alias = host.alias;
     busy = true;
-    const r = await deleteHost(alias, { deleteCredentials });
+    const r = await deleteHost(alias, { deleteCredentials, deleteLoginProfiles });
     busy = false;
     confirm = null;
     deleteCredentials = false;
+    deleteLoginProfiles = false;
     if (r.ok) {
       const c = r.value.credentials;
       if (!c) push({ kind: 'info', message: `${alias} removed.` });
       else if (c.deleted) push({ kind: 'info', message: `${alias} removed, and fleet's tokens and keys there deleted.` });
       else push({ kind: 'warning', message: `${alias} removed, but fleet's tokens and keys there could not be deleted: ${c.error ?? 'no answer'}`, sticky: true });
+      const lp = r.value.login_profiles;
+      if (lp?.error) push({ kind: 'warning', message: `Fleet's login profiles on ${alias} were not all removed: ${lp.error}`, sticky: true });
+      else if (lp && lp.removed.length > 0) push({ kind: 'info', message: `Fleet's login profiles on ${alias} removed: ${lp.removed.join(', ')}.` });
     } else pushError(r.error, `Remove ${alias} failed`);
   }
 
@@ -1293,12 +1299,17 @@
     oncancel={() => {
       confirm = null;
       deleteCredentials = false;
+      deleteLoginProfiles = false;
     }}
   >
     {#if host.alias !== 'local'}
       <label class="remove-credentials">
         <input type="checkbox" data-testid="confirm-remove-credentials" bind:checked={deleteCredentials} disabled={busy} />
-        Also delete fleet’s tokens and keys there (setup tokens and API keys fleet wrote into its login profiles; best effort, the host must answer)
+        Also delete fleet’s tokens and keys there (setup tokens and API keys only; subscription logins stay signed in; best effort, the host must answer)
+      </label>
+      <label class="remove-credentials">
+        <input type="checkbox" data-testid="confirm-remove-login-profiles" bind:checked={deleteLoginProfiles} disabled={busy} />
+        Also delete fleet’s login profiles there (~/.claude-profiles/&lt;name&gt;, signing their subscription logins out; the host’s own login stays; best effort)
       </label>
     {/if}
   </ConfirmDialog>

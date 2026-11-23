@@ -76,9 +76,11 @@
   const sameAs = $derived.by(() => {
     const uuid = status?.logged_in ? (status.account_uuid ?? null) : null;
     const h = $hostByAlias.get(login.host);
-    // Signing a login in again adds no login: nothing new to compare.
-    if (!uuid || !h || again) return null;
-    if (h.account_uuid === uuid) return 'the host login';
+    if (!uuid || !h) return null;
+    // Signing a login in again adds no login: only a change of account
+    // there can make it share another login's limit (review w01-4).
+    if (again && uuid === storedUuid) return null;
+    if (login.profile && h.account_uuid === uuid) return 'the host login';
     const p = (h.claude_profiles ?? []).find((x) => x.name !== login.profile && x.account_uuid === uuid);
     return p ? `the ${p.name} login` : null;
   });

@@ -425,9 +425,15 @@ pub async fn probe_host(
 pub struct RemoveHostArgs {
     /// Host alias.
     pub alias: String,
-    /// Also delete fleet's tokens and keys there, best effort.
+    /// Also delete fleet's tokens and keys there (setup tokens and API
+    /// keys only), best effort.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub delete_credentials: bool,
+    /// Also remove the login profiles fleet lists there
+    /// (`~/.claude-profiles/<name>`, signing their subscription logins
+    /// out), best effort.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delete_login_profiles: bool,
 }
 
 /// What `remove_host` did: the removed row, and what it did beyond it.
@@ -439,6 +445,10 @@ pub struct RemovedHost {
     /// and key files left the host's login profiles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials: Option<CredentialsCleanup>,
+    /// Present when `delete_login_profiles` was asked: the profiles removed
+    /// there, and why the rest were not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_profiles: Option<LoginProfilesCleanup>,
     /// The accounts fleet made up for a key or a token on this host that no
     /// login uses any more, now deleted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -451,6 +461,16 @@ pub struct CredentialsCleanup {
     pub deleted: bool,
     /// Why not, when not: the host did not answer, say. The host is
     /// removed all the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Remove host's "also delete fleet's login profiles there", reported.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LoginProfilesCleanup {
+    /// The profiles removed from the host.
+    pub removed: Vec<String>,
+    /// Why one was not, when one was not. The host is removed all the same.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -495,6 +515,19 @@ pub async fn remove_host_with(
     } else {
         None
     };
+    let login_profiles = if args.delete_login_profiles && args.alias != "local" {
+        let names: Vec<String> = row
+            .claude_profiles
+            .iter()
+            .flatten()
+            .map(|p| p.name.clone())
+            .collect();
+        let (removed, error) =
+            crate::service::add_account::remove_login_profiles(tmux, &names).await;
+        Some(LoginProfilesCleanup { removed, error })
+    } else {
+        None
+    };
     let accounts_removed = {
         let s = lock(store)?;
         s.delete_host(&args.alias)?;
@@ -504,6 +537,7 @@ pub async fn remove_host_with(
     Ok(RemovedHost {
         row,
         credentials,
+        login_profiles,
         accounts_removed,
     })
 }
@@ -2290,6 +2324,7 @@ mod tests {
             RemoveHostArgs {
                 alias: "gone".into(),
                 delete_credentials: false,
+                delete_login_profiles: false,
             },
             &store,
             &tunnels,
@@ -2382,6 +2417,7 @@ mod tests {
         let args = |a: &str| RemoveHostArgs {
             alias: a.into(),
             delete_credentials: true,
+            delete_login_profiles: false,
         };
         let out = remove_host_with(args("mac"), &store, &tunnels, &tmux("mac"))
             .await
@@ -2418,5 +2454,72 @@ mod tests {
             .get_account_by_uuid("setuptoken-0123456789abcdef")
             .unwrap()
             .is_none());
+    }
+
+    /// Review w03-7: Remove host may also remove the login profiles fleet
+    /// lists there, as Remove login takes each (asked for explicitly: it
+    /// signs those subscription logins out). Best effort, reported.
+    #[tokio::test]
+    async fn remove_host_may_remove_fleets_login_profiles_there() {
+        use crate::ssh_fake::{FakeSsh, Match, Reply};
+        let tunnels = TunnelSupervisor::with_spawner(
+            Arc::new(|_argv| Box::pin(std::future::pending())),
+            Duration::from_secs(3600),
+        );
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("mac").unwrap();
+            let p = |name: &str| crate::store::HostProfileRow {
+                name: name.into(),
+                account_uuid: None,
+                email: None,
+                credential: None,
+            };
+            s.set_host_profiles("mac", &[p("work"), p("ci")]).unwrap();
+        }
+        let ssh = Arc::new(FakeSsh::new());
+        // The last matching rule answers.
+        ssh.on_host(
+            "mac",
+            Match::script_contains(".claude-profiles/"),
+            Reply::ok("__fleet_ok__\n"),
+        );
+        ssh.on_host(
+            "mac",
+            Match::script_contains(".claude-profiles/\"'ci'"),
+            Reply::Unreachable,
+        );
+        let tmux = crate::tmux::RemoteTmux {
+            client: Arc::clone(&ssh),
+            host: "mac".into(),
+        };
+        let out = remove_host_with(
+            RemoveHostArgs {
+                alias: "mac".into(),
+                delete_credentials: false,
+                delete_login_profiles: true,
+            },
+            &store,
+            &tunnels,
+            &tmux,
+        )
+        .await
+        .unwrap();
+        let c = out.login_profiles.expect("reported");
+        assert_eq!(c.removed, vec!["work".to_string()]);
+        assert!(c.error.is_some_and(|e| e.starts_with("profile ci")));
+        let scripts: Vec<String> = ssh
+            .calls_for("mac")
+            .iter()
+            .filter_map(|c| c.script())
+            .collect();
+        assert!(
+            scripts
+                .iter()
+                .any(|s| s.contains(".claude-profiles/\"'work'") && s.contains("[ -L")),
+            "{scripts:?}"
+        );
+        assert!(store.lock().unwrap().get_host_row("mac").unwrap().is_none());
     }
 }

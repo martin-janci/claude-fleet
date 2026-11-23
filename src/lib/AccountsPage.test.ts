@@ -365,6 +365,33 @@ describe('AccountsPage: spend, routines and paused sessions (4.1 / 4.2)', () => 
     expect(inv.mock.calls.some((c) => c[0] === 'restart_session')).toBe(false);
   });
 
+  it('Wait until shows for a model window alone and names the later reset (review w03-5)', async () => {
+    waitingOut.set(new Map());
+    sessions.set([
+      session('mefistos', 'admin-1', { account_uuid: ADMIN.uuid, launch_model: 'opus' }),
+      session('claude-fleet-oci', 'admin-2', { account_uuid: ADMIN.uuid, launch_model: 'opus' }),
+    ]);
+    accountUsage.set({
+      ...fleetUsage(),
+      [ADMIN.uuid]: snapshot(ADMIN.uuid, {
+        source_host: 'mefistos',
+        usage: {
+          five_hour: { utilization: 10, resets_at: FAR },
+          seven_day: { utilization: 60, resets_at: FAR + 86400 },
+          seven_day_opus: { utilization: 100, resets_at: FAR + 2 * 86400 },
+          seven_day_sonnet: null,
+        },
+      }),
+    });
+    render(AccountsPage, props);
+    const paused = await screen.findByTestId('account-paused');
+    expect(paused.textContent).toContain('2 paused sessions');
+    const wait = await screen.findByTestId('account-paused-wait');
+    await fireEvent.click(wait);
+    expect(get(waitingOut).size).toBe(2);
+    expect([...get(waitingOut).values()].every((at) => at === FAR + 2 * 86400)).toBe(true);
+  });
+
   it('the Switch target is asked again when usage moves, and says when no login has room (reviews w02-11, w03-8)', async () => {
     accountUsage.set(atLimit());
     render(AccountsPage, props);

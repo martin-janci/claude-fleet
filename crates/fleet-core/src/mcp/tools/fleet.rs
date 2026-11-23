@@ -590,8 +590,11 @@ impl FleetTools {
 
     #[tool(description = "Remove a host; its sessions are orphaned. Returns \
         the removed row. delete_credentials: also delete fleet's token and \
-        key files from its login profiles first (best effort, reported as \
-        `credentials`).")]
+        key files (setup tokens and API keys only) from its login profiles \
+        first (best effort, reported as `credentials`). \
+        delete_login_profiles: also remove the login profiles fleet lists \
+        there, which signs their subscription logins out (best effort, \
+        reported as `login_profiles`).")]
     pub(super) async fn remove_host(
         &self,
         Parameters(args): Parameters<hosts::RemoveHostArgs>,
@@ -599,8 +602,8 @@ impl FleetTools {
         audit(
             "remove_host",
             &format!(
-                "alias={} delete_credentials={}",
-                args.alias, args.delete_credentials
+                "alias={} delete_credentials={} delete_login_profiles={}",
+                args.alias, args.delete_credentials, args.delete_login_profiles
             ),
         );
         ok_json(

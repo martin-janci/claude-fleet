@@ -191,6 +191,15 @@ describe('hosts store', () => {
     expect(get(accounts).map((a) => a.uuid)).toEqual(['real']);
   });
 
+  it('deleteHost may ask for fleet\'s login profiles there (review w03-7)', async () => {
+    const mefistos = { ...sampleLocal, alias: 'mefistos', ssh_alias: 'mefistos' };
+    hosts.set([sampleLocal, mefistos]);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ ...mefistos, login_profiles: { removed: ['work'] } });
+    const r = await deleteHost('mefistos', { deleteLoginProfiles: true });
+    expect(mockedInvoke).toHaveBeenLastCalledWith('remove_host', { args: { alias: 'mefistos', delete_login_profiles: true } });
+    expect(r.ok && r.value.login_profiles?.removed).toEqual(['work']);
+  });
+
   it('hideHost passes the hidden flag and merges into store', async () => {
     const mefistos = { ...sampleLocal, alias: 'mefistos', ssh_alias: 'mefistos', hidden: false };
     const mefistosHidden = { ...mefistos, hidden: true };

@@ -499,6 +499,36 @@ impl Store {
             .filter(|p| *p != 0))
     }
 
+    /// What will start a session under the login profile `profile` on
+    /// `host` later, by name (review w03-4): routines, start rules that are
+    /// not dismissed, and live mission grants whose hosts include it (or
+    /// name none). Each as "routine <name>", "start rule <pattern>",
+    /// "mission <name>".
+    pub fn login_profile_named_by(
+        &self,
+        host: &str,
+        profile: &str,
+        now: i64,
+    ) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT 'routine ' || name FROM routines \
+              WHERE host_alias = ?1 AND profile = ?2 \
+             UNION ALL \
+             SELECT 'start rule ' || pattern FROM start_rules \
+              WHERE host_alias = ?1 AND profile = ?2 AND state <> 'dismissed' \
+             UNION ALL \
+             SELECT 'mission ' || p.name FROM orchestration_grants g \
+               JOIN orchestration_projects p ON p.id = g.orchestration_project_id \
+              WHERE g.profile = ?2 AND g.revoked_at IS NULL AND g.expires_at > ?3 \
+                AND (g.hosts IS NULL \
+                     OR EXISTS (SELECT 1 FROM json_each(g.hosts) WHERE value = ?1))",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![host, profile, now], |r| r.get(0))?;
+        let mut out: Vec<String> = rows.collect::<rusqlite::Result<_>>()?;
+        out.dedup();
+        Ok(out)
+    }
+
     /// Write the host's signed-out logins (migration 197,
     /// `service::login_health`) and announce the row, only when they changed.
     /// Returns whether they did. An unknown host changes nothing.
