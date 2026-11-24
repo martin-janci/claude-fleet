@@ -1583,7 +1583,11 @@ fn the_reply_text_consent_names_every_use_it_releases() {
         let words = f.reply_text_words();
         assert_eq!(
             words.is_some(),
-            f.sends_reply_text() || f == Feature::MissionTriage,
+            f.sends_reply_text()
+                || matches!(
+                    f,
+                    Feature::MissionTriage | Feature::Duplicate | Feature::QuickAnswer
+                ),
             "{f:?}"
         );
         if let Some(w) = words {

@@ -3647,10 +3647,10 @@
       "ai": "never",
       "danger": {
         "level": "confirm",
-        "message": "Claude's own text from sessions outside every organisation will be sent to TypeSafe too: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines) and mission triage (a worker's own summary)."
+        "message": "Claude's own text from sessions outside every organisation will be sent to TypeSafe too: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines), mission triage (a worker's own summary), the duplicate check (an agent's reasons for a proposed task) and quick answer (an agent's reasons on a chat form)."
       },
       "default": "false",
-      "help": "Also send Claude's own text from sessions that belong to no organisation, on top of sending unassigned sessions at all, for each of these use cases that is on: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines) and mission triage (a worker's own summary).",
+      "help": "Also send Claude's own text from sessions that belong to no organisation, on top of sending unassigned sessions at all, for each of these use cases that is on: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines), mission triage (a worker's own summary), the duplicate check (an agent's reasons for a proposed task) and quick answer (an agent's reasons on a chat form).",
       "key": "decide.jev.unassigned_reply",
       "kind": {
         "type": "bool"
@@ -7976,12 +7976,12 @@
             "text": "sends replies to Jev",
             "when": "true"
           },
-          "confirm": "Claude's text from this org's sessions (redacted) will be sent to TypeSafe when Decisions (Jev) is on, for each of these use cases that is on: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines) and mission triage (a worker's own summary).",
+          "confirm": "Claude's text from this org's sessions (redacted) will be sent to TypeSafe when Decisions (Jev) is on, for each of these use cases that is on: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines), mission triage (a worker's own summary), the duplicate check (an agent's reasons for a proposed task) and quick answer (an agent's reasons on a chat form).",
           "default": false,
           "edit": "jev_reply",
-          "help": "On top of Jev above: let Claude's text from this org's sessions, redacted and with code replaced by placeholders, go to TypeSafe's decision model for each of these use cases that is on: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines) and mission triage (a worker's own summary). Off by default (D48).",
+          "help": "On top of Jev above: let Claude's text from this org's sessions, redacted and with code replaced by placeholders, go to TypeSafe's decision model for each of these use cases that is on: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines), mission triage (a worker's own summary), the duplicate check (an agent's reasons for a proposed task) and quick answer (an agent's reasons on a chat form). Off by default (D48).",
           "id": "jev_reply_allowed",
-          "label": "Also allow Claude's own text (turn outcome, routines, summary check, mission triage)",
+          "label": "Also allow Claude's own text (outcomes, checks, triage, agents' reasons)",
           "on_off": true,
           "type": "bool"
         },

@@ -7,8 +7,9 @@
 //!   propose | propose_tree }`, a planner card that proposes a tree),
 //!   once per new proposal, off the caller's path ([`spawn_ask`]). A
 //!   proposal a person or a card accepts at once is never asked about.
-//! * **What is sent.** The proposal's title and its `why` (agent text,
-//!   through the envelope's redaction), and one Choice over at most
+//! * **What is sent.** The proposal's title, its `why` (agent text,
+//!   through the envelope's redaction) only with the org's reply-text
+//!   consent (D48), and one Choice over at most
 //!   [`MAX_CANDIDATES`] open tasks of the same org touched in the last
 //!   [`RECENT_DAYS`] days that share a title word with it
 //!   ([`candidates`]), each described by its key and title, plus `none`.
@@ -151,8 +152,13 @@ pub fn question(candidates: &[WorkItemRow]) -> Question {
     }
 }
 
-/// PURE: the state: the proposal's title and the start of its `why`.
-pub fn state(proposed: &WorkItemRow) -> Value {
+/// PURE: the state: the proposal's title and, when `reply_ok`, the start
+/// of its `why`. The `why` is the agent's own text: it goes only with the
+/// org's reply-text consent (D48, [`super::reply_text_allowed`]).
+pub fn state(proposed: &WorkItemRow, reply_ok: bool) -> Value {
+    if !reply_ok {
+        return json!({ "proposed": { "title": proposed.title } });
+    }
     let why: String = proposed
         .proposal_why
         .as_deref()
@@ -163,10 +169,11 @@ pub fn state(proposed: &WorkItemRow) -> Value {
     json!({ "proposed": { "title": proposed.title, "why": why } })
 }
 
-/// PURE: the request for `proposed` over `candidates`.
-pub fn request(proposed: &WorkItemRow, candidates: &[WorkItemRow]) -> JevRequest {
+/// PURE: the request for `proposed` over `candidates`; `reply_ok` as in
+/// [`state`].
+pub fn request(proposed: &WorkItemRow, candidates: &[WorkItemRow], reply_ok: bool) -> JevRequest {
     JevRequest {
-        state: state(proposed),
+        state: state(proposed, reply_ok),
         question: question(candidates),
         order_salt: None,
     }
@@ -217,7 +224,7 @@ fn plan(s: &Store, item_id: i64, now: i64) -> Result<Option<Planned>, IpcError> 
     if found.is_empty() {
         return Ok(None);
     }
-    let request = request(&item, &found);
+    let request = request(&item, &found, super::reply_text_allowed(s, org_id));
     let fp_key = s.decision_fp_key()?;
     let fp = fingerprint(&fp_key, &request.redacted());
     let subject = item_id.to_string();

@@ -37,9 +37,12 @@ and nothing is sent:
    default; either missing is `org_off`. It covers `turn_outcome` (J2) and
    `routine_run_outcome` (N6), the end of a session's screen;
    `summary_check` (J9), up to 80 KB of a session's transcript (prompts,
-   replies and tool lines); and `mission_triage`, which asks without a
+   replies and tool lines); `mission_triage`, which asks without a
    worker's own summary when it is missing (the rest of its question still
-   goes). The consent's copy names each (`decide::REPLY_TEXT_USES`).
+   goes); and `duplicate` and `quick_answer`, which ask without the agent's
+   `why` (a proposal's reasons, a chat form's reasons) when it is missing.
+   The agent's question line, a title and the options' labels stay under
+   D31. The consent's copy names each (`decide::REPLY_TEXT_USES`).
 5. **A key is configured** (`no_key`): `fleet-hub decide set-key` (on a
    standalone desktop, pointed at the app's data folder — see
    [the key on a standalone desktop](#the-key-on-a-standalone-desktop)).
@@ -451,7 +454,9 @@ empty. *Keep the order* (question) or *Change* (form) puts the options back.
   the card checks the same words again before it moves anything
   (`src/lib/quick_answer.ts`).
 - **What is sent.** The question's text (600 characters at most) and the
-  safe options' labels, redacted. Nothing from the pane or the repository.
+  safe options' labels, redacted. A form's `why` (the agent's own reasons)
+  goes only with the org's reply-text consent (D48); its title and the
+  field's label always do. Nothing from the pane or the repository.
 - **Shadow / assist.** Always asked off the path a person waits on: the
   reconcile tick asks about a new question after its pass, and `ask { form }`
   asks after it opened the form. A proposal appears when it is ready, or not
@@ -781,8 +786,9 @@ telling title word with the proposal, most alike first, at most 10; with
 none, nothing is asked. A proposal accepted at once (a planner card with
 "accept created") is never asked about.
 
-- **What is sent.** The proposal's title and the start of the agent's `why`
-  (600 characters), redacted; each candidate's key and title.
+- **What is sent.** The proposal's title, redacted, and each candidate's
+  key and title. The start of the agent's `why` (600 characters) goes only
+  with the org's reply-text consent (D48): it is the agent's own text.
 - **Shadow.** Asked off the proposing call's path and only recorded, with
   `none` as the baseline (today nothing flags a duplicate).
 - **Assist.** A usable answer (at least 50%, not `none`) stays on the

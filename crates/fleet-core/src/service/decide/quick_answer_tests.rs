@@ -375,3 +375,24 @@ async fn a_forms_proposal_names_the_options_value() {
     withdraw(&s, SUBJECT_FORM, "f_a", NOON);
     assert_eq!(form_proposal(&s, &fc), None);
 }
+
+#[test]
+fn a_forms_why_goes_only_with_the_orgs_reply_text_consent() {
+    let w = world();
+    let s = w.store.lock().unwrap();
+    s.set_org_jev_allowed(w.org, true).unwrap();
+    // D31 alone: the agent's reasons stay home, the title and label go.
+    let why = form_why(&s, Some(w.org), Some("to pick a target"));
+    assert_eq!(why, None);
+    let fc = form_choice("f_a", Some(w.org), "Deploy", why, &spec()).unwrap();
+    assert_eq!(fc.input.question, "Deploy\nEnvironment");
+    s.set_org_jev_reply_allowed(w.org, true).unwrap();
+    assert_eq!(
+        form_why(&s, Some(w.org), Some("to pick a target")),
+        Some("to pick a target")
+    );
+    // No org: the unassigned reply setting decides.
+    assert_eq!(form_why(&s, None, Some("x")), None);
+    settings::set(&s, settings::DECIDE_JEV_UNASSIGNED_REPLY, "true").unwrap();
+    assert_eq!(form_why(&s, None, Some("x")), Some("x"));
+}

@@ -884,7 +884,7 @@ const ORG: ResourceType = ResourceType {
         .confirm("This org's redacted prompts and ticket titles will be sent to TypeSafe when Decisions (Jev) is on."),
         FieldSpec::new(
             "jev_reply_allowed",
-            "Also allow Claude's own text (turn outcome, routines, summary check, mission triage)",
+            "Also allow Claude's own text (outcomes, checks, triage, agents' reasons)",
             concat!(
                 "On top of Jev above: let Claude's text from this org's sessions, redacted and with code replaced by placeholders, go to TypeSafe's decision model for each of these use cases that is on: ",
                 crate::service::decide::reply_text_uses!(),

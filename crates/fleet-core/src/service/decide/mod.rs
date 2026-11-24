@@ -60,7 +60,9 @@ macro_rules! reply_text_uses {
     () => {
         "the turn outcome and a routine run's outcome (the end of a session's screen, \
          a few lines), the summary check (up to 80 KB of a session's transcript: \
-         prompts, replies and tool lines) and mission triage (a worker's own summary)"
+         prompts, replies and tool lines), mission triage (a worker's own summary), \
+         the duplicate check (an agent's reasons for a proposed task) and quick answer \
+         (an agent's reasons on a chat form)"
     };
 }
 pub(crate) use reply_text_uses;
@@ -324,14 +326,17 @@ impl Feature {
 
     /// How [`REPLY_TEXT_USES`] names this feature, for one that needs the
     /// reply-text consent for some of what it sends: every
-    /// [`Feature::sends_reply_text`] feature, and mission triage (it drops
-    /// a worker's summary without the consent). `None` for the others.
+    /// [`Feature::sends_reply_text`] feature, and the ones that drop the
+    /// agent's own text without the consent (mission triage a worker's
+    /// summary, duplicate and quick answer a `why`). `None` for the others.
     pub fn reply_text_words(self) -> Option<&'static str> {
         match self {
             Feature::TurnOutcome => Some("the turn outcome"),
             Feature::RoutineRunOutcome => Some("a routine run's outcome"),
             Feature::SummaryCheck => Some("the summary check"),
             Feature::MissionTriage => Some("mission triage"),
+            Feature::Duplicate => Some("the duplicate check"),
+            Feature::QuickAnswer => Some("quick answer"),
             _ => None,
         }
     }
