@@ -91,6 +91,15 @@ fn run(args: cli::RunArgs) -> ExitCode {
         .with(fmt)
         .with(fleet_agent::report::ReportLayer)
         .init();
+    // Settled before the runtime's threads exist: it may set
+    // `RUNTIME_DIRECTORY`, which the hub's `update_now` line reads to know
+    // where to drop `update-now`. And before the config is read: a new
+    // build that cannot start (one that refuses the config) is rolled back
+    // here, never reaching its pass (review w09-2).
+    let self_update = self_update_plan();
+    if let Some(plan) = &self_update {
+        plan.guard_start();
+    }
     // With no flags: the user's own config if there is one, else the system's.
     let default_config = config_home()
         .map(|h| Layout::user(&h).config_path)
@@ -100,10 +109,6 @@ fn run(args: cli::RunArgs) -> ExitCode {
         Ok(c) => c,
         Err(why) => return fail(&why),
     };
-    // Settled before the runtime's threads exist: it may set
-    // `RUNTIME_DIRECTORY`, which the hub's `update_now` line reads to know
-    // where to drop `update-now`.
-    let self_update = self_update_plan();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

@@ -588,7 +588,11 @@ entrypoint loop, and agents installed without `--auto-update`.
   state file, must be connected within the soak, and otherwise points
   `current` back and `exec`s the previous build. A candidate that keeps
   dying while it is validated (a crash, then the service manager starting
-  it again) is rolled back after three resumes.
+  it again) is rolled back after three resumes. Each start is counted
+  before the config is read, so a candidate that dies before its pass ever
+  runs (a config it refuses) is rolled back too: past four starts the
+  process points `current` back and `exec`s the previous build, whose pass
+  reports the rollback.
 - **State** is in `~/.local/state/fleet-agent-update/` (as root:
   `/var/lib/fleet-agent-update/`), releases in `~/.local/lib/fleet-agent/`
   (as root: `/opt/fleet-agent/`); the binary the agent was started as
