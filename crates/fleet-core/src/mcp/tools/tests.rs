@@ -3426,6 +3426,21 @@ fn task_delivery_body_keeps_the_fleet_instruction_outside_the_untrusted_block() 
     assert!(task_delivery_body("x", 7, "n", &agent, true).is_err());
 }
 
+/// Review w16-2: a prompt that would not fit once fleet's lines are around
+/// it is refused before any worker is started; one that fits is not.
+#[test]
+fn a_task_prompt_too_long_to_deliver_is_refused_up_front() {
+    use crate::service::sessions::MAX_PROMPT_BYTES;
+    let agent = host_caller("mefistos", TokenMode::Full);
+    assert!(check_task_prompt_fits("fix the test", &agent, false).is_ok());
+    assert!(check_task_prompt_fits("  \n", &agent, false).is_err());
+    assert!(check_task_prompt_fits(&"x".repeat(MAX_PROMPT_BYTES + 1), &agent, false).is_err());
+    // Under the cap alone, over it with the marker and the instruction.
+    let near = "x".repeat(MAX_PROMPT_BYTES - 100);
+    assert!(crate::service::sessions::normalize_prompt_body(&near).is_ok());
+    assert!(check_task_prompt_fits(&near, &agent, false).is_err());
+}
+
 // ---- orchestration helpers ----
 
 #[test]

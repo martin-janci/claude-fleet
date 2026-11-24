@@ -459,6 +459,22 @@ pub fn remote_worktree_path(label: &str, value: &str) -> Result<(), IpcError> {
     path_component("worktree name", name)
 }
 
+/// The furthest ahead a "not before" / "until" unix time may lie.
+pub const MAX_AHEAD_SECS: i64 = 366 * 86_400;
+
+/// `{label}` is a unix time in SECONDS no more than a year ahead of `now`.
+/// A value in milliseconds (`Date.now()`) lies tens of thousands of years
+/// out: it would be accepted and never come due (reviews w15-5, w16-4).
+pub fn unix_seconds_ahead(label: &str, value: i64, now: i64) -> Result<(), IpcError> {
+    if value > now.saturating_add(MAX_AHEAD_SECS) {
+        return Err(IpcError::new(
+            codes::E_VALIDATE,
+            format!("{label} is unix seconds, not milliseconds: {value} is more than a year away"),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -766,5 +782,16 @@ mod tests {
             let err = remote_worktree_path("worktree_path", bad).expect_err(bad);
             assert_eq!(err.code, "E_INVALID", "{bad}");
         }
+    }
+
+    #[test]
+    fn a_time_in_milliseconds_is_refused_and_a_year_ahead_is_not() {
+        let now = 1_795_514_400;
+        assert!(unix_seconds_ahead("not_before", now + 3600, now).is_ok());
+        assert!(unix_seconds_ahead("not_before", now + MAX_AHEAD_SECS, now).is_ok());
+        assert!(unix_seconds_ahead("not_before", 5, now).is_ok());
+        let e = unix_seconds_ahead("not_before", now * 1000, now).unwrap_err();
+        assert_eq!(e.code, codes::E_VALIDATE);
+        assert!(e.message.contains("not milliseconds"), "{}", e.message);
     }
 }

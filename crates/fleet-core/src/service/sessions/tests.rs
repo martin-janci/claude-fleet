@@ -2184,6 +2184,69 @@ fn send_script_with_an_empty_body_is_a_bare_enter() {
     );
 }
 
+/// Review w09-1: an agent row's typing script refuses a pane that holds a
+/// bare login shell, before anything is loaded or pasted; a bare Enter and
+/// the unguarded script (a `shell` row) carry no such step.
+#[test]
+fn send_script_for_an_agent_row_refuses_a_bare_shell_before_the_paste() {
+    let s = build_send_script_guarded(
+        "dev-x",
+        Some("%3"),
+        "why `git push`?",
+        "fleet-1",
+        true,
+        true,
+    );
+    let guard = s.find("exit 97").expect("the guard");
+    assert!(guard < s.find("load-buffer").unwrap(), "{s}");
+    assert!(s.contains("'#{pane_pid} #{pane_current_command}'"), "{s}");
+    // The launcher (`sh -c '<several words>'`) is never read as a shell.
+    assert!(s.contains("in *' '*' '*) ;;"), "{s}");
+    let bare = build_send_script_guarded("dev-x", Some("%3"), "", "fleet-1", true, true);
+    assert!(!bare.contains("exit 97"), "{bare}");
+    let shell = build_send_script("dev-x", Some("%3"), "ls", "fleet-1", true);
+    assert!(!shell.contains("exit 97"), "{shell}");
+}
+
+/// Review w09-4: a typing script run twice types once. The paste leaves the
+/// buffer's name on the session, and a second run stops on it before loading
+/// anything; a failed marker write never stops the Enter.
+#[test]
+fn send_script_run_again_after_its_paste_types_nothing() {
+    let s = build_send_script("dev-x", None, "body", "fleet-1", true);
+    let check = s
+        .find("@fleet_sent 2>/dev/null)\" = 'fleet-1' ]; then exit 98; fi; ")
+        .expect("the check");
+    let paste = s.find("paste-buffer").unwrap();
+    let mark = s
+        .find("&& { tmux set-option -t \"$t\" @fleet_sent 'fleet-1' 2>/dev/null; true; }")
+        .expect("the mark");
+    let enter = s.rfind("send-keys").unwrap();
+    assert!(check < paste && paste < mark && mark < enter, "{s}");
+}
+
+/// Review w09-4: ssh's own exit 255 on a connection it had made may have
+/// typed; one that never connected did not.
+#[cfg(unix)]
+#[test]
+fn an_ssh_drop_mid_run_may_have_typed_and_a_failed_connect_did_not() {
+    use std::os::unix::process::ExitStatusExt;
+    let out = |code: i32, stderr: &str| std::process::Output {
+        status: std::process::ExitStatus::from_raw(code << 8),
+        stdout: Vec::new(),
+        stderr: stderr.as_bytes().to_vec(),
+    };
+    assert!(prompt::dropped_mid_run(&out(
+        255,
+        "client_loop: send disconnect: Broken pipe"
+    )));
+    assert!(!prompt::dropped_mid_run(&out(
+        255,
+        "ssh: connect to host h port 22: Connection refused"
+    )));
+    assert!(!prompt::dropped_mid_run(&out(1, "can't find pane: %3")));
+}
+
 #[test]
 fn send_script_with_an_empty_body_and_no_submit_presses_nothing() {
     let s = build_send_script("dev-x", Some("%3"), "", "fleet-1", false);

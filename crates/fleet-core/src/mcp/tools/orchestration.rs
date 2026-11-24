@@ -621,6 +621,9 @@ impl FleetTools {
                 None,
             ));
         }
+        // Before the confirm card and before a worker is started: a prompt
+        // refused later left the fresh worker running with no task.
+        check_task_prompt_fits(&p.prompt, &caller, p.raw)?;
         // The requester (when given) must exist and, for a per-host caller,
         // live on that host — otherwise any agent could file tasks as anyone.
         // Its OWNER is kept (multi-user M1, T5): a worker spawned for a task
