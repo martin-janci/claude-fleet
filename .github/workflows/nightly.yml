@@ -83,7 +83,10 @@ jobs:
   # Releases and tags of older dev releases. The channels list only what they
   # keep (fleet-release channel-add trims them to 15), so a pruned release is
   # one nothing points at any more — except what nightly.json still lists,
-  # which spans more than the newest 15 pushes and is kept.
+  # which spans more than the newest 15 pushes and is kept, as is anything
+  # dev.json lists. The keep list fails CLOSED: a channel file that cannot be
+  # read or parsed (anything but "it does not exist yet") skips the pruning,
+  # because an empty keep list would delete releases nightly still offers.
   prune:
     needs: cut
     if: ${{ !cancelled() }}
@@ -95,8 +98,20 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          gh api "repos/$GH_REPO/contents/nightly.json?ref=update-channels" --jq .content 2>/dev/null \
-            | base64 -d 2>/dev/null | jq -r '.releases[].version | "v" + .' >keep.txt || true
+          : >keep.txt
+          for channel in nightly dev; do
+            if content="$(gh api "repos/$GH_REPO/contents/$channel.json?ref=update-channels" --jq .content 2>err.txt)"; then
+              if ! printf '%s' "$content" | base64 -d | jq -r '.releases[].version | "v" + .' >>keep.txt; then
+                echo "::warning::could not parse $channel.json; not pruning this time"
+                exit 0
+              fi
+            elif grep -q 'HTTP 404' err.txt; then
+              echo "no $channel.json yet: it keeps nothing"
+            else
+              echo "::warning::could not read $channel.json ($(tr '\n' ' ' <err.txt)); not pruning this time"
+              exit 0
+            fi
+          done
           gh release list --limit 200 --json tagName,createdAt \
             --jq 'sort_by(.createdAt) | reverse | .[].tagName' >tags.txt
           grep -E -- '-dev\.[0-9]+\.(desktop\.)?g[0-9a-f]+$' tags.txt | tail -n +16 >old.txt || true

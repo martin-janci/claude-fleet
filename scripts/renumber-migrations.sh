@@ -89,7 +89,10 @@ done < <(git ls-tree --name-only "$base" -- "$DIR/" | sed 's#.*/##')
 
 on_base="$(git ls-tree --name-only "$base" -- "$DIR/" | sed 's#.*/##' | sort)"
 here="$(ls -1 "$DIR" | sort)"
-mapfile -t added < <(comm -13 <(printf '%s\n' "$on_base") <(printf '%s\n' "$here") | grep -E '^[0-9]+_.*\.sql$' | sort -n)
+# `while read`, not `mapfile`: macOS ships bash 3.2, which has no mapfile, and
+# ci-local.sh runs this script's test there.
+added=()
+while IFS= read -r line; do added+=("$line"); done < <(comm -13 <(printf '%s\n' "$on_base") <(printf '%s\n' "$here") | grep -E '^[0-9]+_.*\.sql$' | sort -n)
 
 if [[ ${#added[@]} -eq 0 ]]; then
   echo "renumber-migrations: this branch adds no migration"
@@ -98,7 +101,8 @@ fi
 
 # Files this branch changed, for the doc comments (not the SQL, not schema's
 # MIGRATIONS entry, both handled on their own).
-mapfile -t touched < <(git diff --name-only "$base" -- crates src src-tauri docs | grep -v "^$DIR/" || true)
+touched=()
+while IFS= read -r line; do touched+=("$line"); done < <(git diff --name-only "$base" -- crates src src-tauri docs | grep -v "^$DIR/" || true)
 
 next=$((base_max + 1))
 moved=0
@@ -126,7 +130,7 @@ for f in "${added[@]}"; do
     s{(version:\s*)$ENV{OLD}(,\s*sql:\s*include_str!\("\.\./\.\./migrations/)$of}{${1}$ENV{NEW}${2}$nf}g;
   ' "$SCHEMA"
   # Doc comments: only the lines this branch added, never main's own.
-  for t in "${touched[@]}"; do
+  for t in ${touched[@]+"${touched[@]}"}; do
     [[ -f "$t" ]] || continue
     before="$(git hash-object "$t")"
     git show "$base:$t" > "$t.renumber-base" 2>/dev/null || : > "$t.renumber-base"

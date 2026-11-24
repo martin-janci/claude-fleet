@@ -24,14 +24,17 @@
 #   2. a draft release older than --draft-max-age-hours (the habit T10 exists
 #      to end: six drafts had accumulated, each one a version nobody can
 #      download);
-#   3. the newest --verify-tags releases are complete and fully checksummed
-#      (bounded on purpose: this is the expensive check, two API calls plus a
-#      download per release, and old releases do not spontaneously rot);
+#   3. the newest --verify-tags stable / rc releases, and the newest
+#      --verify-dev-tags published dev releases, are complete and fully
+#      checksummed (bounded on purpose: this is the expensive check, two API
+#      calls plus a download per release, and old releases do not
+#      spontaneously rot). A draft younger than --draft-max-age-hours is a
+#      release still being built and is left alone;
 #   4. a release pointing at a tag that no longer exists;
 #   5. the hub image this tree pins is actually in the registry. This is the
 #      one check that looks outside GitHub, and it exists because nothing else
 #      does: `scripts/release.sh` writes the `image:` pin into the release
-#      commit and `git push --follow-tags` puts that commit on `main` at the
+#      commit and `git push --atomic … --follow-tags` puts that commit on `main` at the
 #      same instant it STARTS hub-image.yml. Until both container legs finish
 #      the pin names a tag ghcr does not have yet — and permanently so if the
 #      amd64 leg or `merge` ever fails for that tag. docs/hub.md tells every
@@ -41,8 +44,13 @@
 #      `scripts/check-version-consistency.sh` cannot cover this: it compares
 #      the pin with package.json and never touches a registry.
 #
-# Usage: scripts/check-release-drift.sh [--verify-tags N] [--draft-max-age-hours H]
+# Usage: scripts/check-release-drift.sh [--verify-tags N] [--verify-dev-tags N]
+#                                       [--draft-max-age-hours H]
 # Env:   REPO         owner/repo (default: derived from `origin`)
+#        DRIFT_SEES_DRAFTS=1  the caller states that this token lists draft
+#                     releases (release-drift.yml: its job holds
+#                     `contents: write`), so "no drafts returned" means "none
+#                     exist" and no permission probe is made
 #        IGNORE_FILE  tags known to have no release, one per line, `#` comments
 #                     (default: .github/release-drift-ignore)
 # Needs `gh` authenticated, and `curl` for check 5 (an anonymous ghcr pull
@@ -60,16 +68,19 @@ here="$(cd "$(dirname "$0")" && pwd)"
 die() { echo "$self: $1" >&2; exit "${2:-1}"; }
 
 VERIFY_TAGS=10
+VERIFY_DEV_TAGS=2
 DRAFT_MAX_AGE_HOURS=6
 while [ $# -gt 0 ]; do
   case "$1" in
     --verify-tags) VERIFY_TAGS="${2:?--verify-tags needs a number}"; shift 2 ;;
+    --verify-dev-tags) VERIFY_DEV_TAGS="${2:?--verify-dev-tags needs a number}"; shift 2 ;;
     --draft-max-age-hours) DRAFT_MAX_AGE_HOURS="${2:?--draft-max-age-hours needs a number}"; shift 2 ;;
     -h | --help) sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//; $d'; exit 0 ;;
     *) die "unknown argument: '$1'" 2 ;;
   esac
 done
 case "$VERIFY_TAGS" in *[!0-9]* | '') die "--verify-tags must be a number, got '$VERIFY_TAGS'" 2 ;; esac
+case "$VERIFY_DEV_TAGS" in *[!0-9]* | '') die "--verify-dev-tags must be a number, got '$VERIFY_DEV_TAGS'" 2 ;; esac
 case "$DRAFT_MAX_AGE_HOURS" in *[!0-9]* | '') die "--draft-max-age-hours must be a number, got '$DRAFT_MAX_AGE_HOURS'" 2 ;; esac
 
 command -v gh >/dev/null 2>&1 || die "gh is not installed" 2
@@ -141,6 +152,15 @@ gh api --paginate "repos/$REPO/releases?per_page=100" --jq "
 if awk -F'\t' '$3 == "true" { found = 1 } END { exit !found }' "$work/releases"; then
   sees_drafts=true
   sees_drafts_why="the release listing returned at least one draft"
+elif [ "${DRIFT_SEES_DRAFTS:-0}" = 1 ]; then
+  # The probe below cannot answer for an Actions token: `repos/{repo}` gives it
+  # `.permissions.push` = `false` (or no block at all) even while the job holds
+  # `contents: write`, which is what lists drafts. Zero drafts is the healthy
+  # state, so every clean day was reported as "not checked" and the tracked
+  # issue never closed (#494). The workflow knows what it was granted and says
+  # so; the script takes its word.
+  sees_drafts=true
+  sees_drafts_why="no drafts exist, and the caller states this token lists drafts (DRIFT_SEES_DRAFTS=1)"
 else
   probe="$(gh api "repos/$REPO" \
     --jq 'if has("permissions") then (.permissions.push | tostring) else "absent" end' \
@@ -191,6 +211,23 @@ comm -13 "$work/tags" "$work/released_tags" >"$work/dangling"
 
 # --- 3. the newest N releases are complete ------------------------------------
 # Newest by version, not by API order: `sort -V` keeps 0.2.9 below 0.2.10.
+#
+# Stable / rc and dev releases are counted apart. A per-push dev release
+# (`v0.6.5-dev.17.g1a2b3c4`, scripts/cut-nightly.sh) sorts above every stable
+# one, and there are more of them than N: one list would verify dev releases
+# only and never look at a stable one again. Dev drafts are left to check 2.
+#
+# A draft younger than the cutoff is a release whose legs are still uploading;
+# verify-release.sh would call it incomplete for a day. Once it is older,
+# check 2 reports it and this one says what it lacks.
+awk -F'\t' '!($3 == "true" && $6 != "true") && $2 ~ /^v[0-9]/ { print $2 }' "$work/releases" \
+  | LC_ALL=C sort -urV >"$work/verifiable"
+awk -F'\t' '$3 != "true" && $2 ~ /^v[0-9]/ { print $2 }' "$work/releases" \
+  | LC_ALL=C sort -urV >"$work/published"
+{
+  { grep -v -e '-dev\.' "$work/verifiable" || true; } | head -n "$VERIFY_TAGS"
+  { grep -e '-dev\.' "$work/published" || true; } | head -n "$VERIFY_DEV_TAGS"
+} >"$work/to_verify"
 : >"$work/incomplete"
 : >"$work/verified"
 while IFS= read -r tag; do
@@ -211,7 +248,7 @@ while IFS= read -r tag; do
     printf 't\t%s\n' "$tag"
     printf '%s\n' "$out" | sed -n 's/^::error title=[^:]*:://p' | sed 's/^/m\t/'
   } >>"$work/incomplete"
-done < <(LC_ALL=C sort -rV "$work/released_tags" | grep -E '^v[0-9]' | head -n "$VERIFY_TAGS")
+done <"$work/to_verify"
 
 # --- 5. the hub image pin resolves in the registry ----------------------------
 # The pin, read from the tree this script is running in (the workflow checks
@@ -270,7 +307,7 @@ problems=0
   echo "\`scripts/check-release-drift.sh\` on \`$REPO\`."
   echo
   echo "$(wc -l <"$work/tags" | tr -d ' ') release-shaped tags, $(wc -l <"$work/releases" | tr -d ' ') releases;" \
-       "completeness verified on the newest $VERIFY_TAGS ($(wc -l <"$work/verified" | tr -d ' ') checked)."
+       "completeness verified on the newest $VERIFY_TAGS stable / rc and the newest $VERIFY_DEV_TAGS published dev ($(wc -l <"$work/verified" | tr -d ' ') checked)."
   echo
 
   if [ -s "$work/no_release" ]; then
@@ -345,7 +382,7 @@ problems=0
   fi
 
   if [ "$problems" -eq 0 ]; then
-    echo "No drift: every release-shaped tag has a release, no draft is older than ${DRAFT_MAX_AGE_HOURS}h, the newest $VERIFY_TAGS releases are complete and fully checksummed, and \`$pin_ref\` resolves in ghcr."
+    echo "No drift: every release-shaped tag has a release, no draft is older than ${DRAFT_MAX_AGE_HOURS}h, the newest $VERIFY_TAGS stable / rc and $VERIFY_DEV_TAGS published dev releases are complete and fully checksummed, and \`$pin_ref\` resolves in ghcr."
     echo
   fi
 

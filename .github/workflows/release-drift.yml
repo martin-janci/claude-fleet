@@ -43,9 +43,11 @@ permissions:
   # `contents: write` for a job that writes no content: GitHub only lists DRAFT
   # releases to a token with push access, and an unpublished draft is one of
   # the two things this check exists to find. With `contents: read` the draft
-  # check would silently see nothing and pass. The script asserts the access it
-  # actually got (`repos/{repo}.permissions.push`) and reports "not checked"
-  # rather than "clean" if it is ever downgraded.
+  # check would silently see nothing and pass. The script cannot read that
+  # grant back (`repos/{repo}.permissions.push` is `false` for an Actions token
+  # whatever `contents:` says), so the step below states it with
+  # DRIFT_SEES_DRAFTS=1. Downgrade this line and that variable goes with it:
+  # the script then reports "not checked" rather than "clean".
   contents: write
   issues: write
 
@@ -64,6 +66,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+          # True only while `permissions.contents` above is `write`.
+          DRIFT_SEES_DRAFTS: '1'
         # `|| code=$?`, not a bare call followed by `code=$?`. A `run:` with no
         # `shell:` key is executed as `bash -e {0}`, and `set -uo pipefail`
         # does NOT clear that inherited `-e` (verified: `bash -e -c 'set -uo

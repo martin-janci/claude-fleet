@@ -274,6 +274,9 @@ step bash scripts/buildkite-verify-test.sh
 # scripts/release-mobile.sh's contract guard against a fake gh: a second.
 step bash scripts/release-mobile-test.sh
 
+# scripts/check-release-drift.sh against a fake gh and curl: a second.
+step bash scripts/check-release-drift-test.sh
+
 # tools/ag (the agent launcher) against fake claude/codex binaries. bash +
 # a few seconds; see .github/workflows/ci.yml's ag job for the matching
 # macOS-under-bash-3.2 leg CI runs that this local step doesn't.
@@ -282,7 +285,13 @@ step bash scripts/ag-test.sh
 # tools/voice/arecord (the /voice recorder stand-in) against fake servers,
 # and its shellcheck when shellcheck is installed (CI's ag job runs both on
 # Linux). bash + python3, a few seconds.
-step bash scripts/voice-arecord-test.sh
+# The test uses coreutils' `timeout`, which a stock Mac lacks (CI runs it on
+# Linux only): skipped there, as the shellcheck below is without shellcheck.
+if command -v timeout >/dev/null; then
+  step bash scripts/voice-arecord-test.sh
+else
+  echo "ci-local: timeout (coreutils) not installed; skipping scripts/voice-arecord-test.sh"
+fi
 if command -v shellcheck >/dev/null; then
   step shellcheck -s bash tools/voice/arecord scripts/voice-arecord-test.sh
 else
