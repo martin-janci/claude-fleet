@@ -733,7 +733,14 @@ mod tests {
         assert!(s.get_project(pid).unwrap().is_none());
         assert!(s.get_session_by_id(sid).unwrap().is_none());
         assert!(crate::service::work::detect::trusted_projects(&s).is_empty());
-        // And a merged project hands its trust to the one it went into.
+        drop(s);
+        assert_eq!(
+            forget_project(&store, pid).unwrap_err().code,
+            codes::E_NOTFOUND
+        );
+        // And a merged project hands its trust to the one it went into
+        // (after the check above: `from` takes the forgotten id).
+        let s = store.lock().unwrap();
         let from = s.upsert_project("o", "from", "/p/o/from").unwrap();
         let into = s.upsert_project("o", "into", "/p/o/into").unwrap();
         crate::service::work::detect::set_project_trust(&s, from, true).unwrap();
@@ -743,13 +750,6 @@ mod tests {
                 .into_iter()
                 .collect::<Vec<_>>(),
             vec![into]
-        );
-        s.set_setting(settings::WORK_TRUSTED_BRANCH_PROJECTS, "[]")
-            .unwrap();
-        drop(s);
-        assert_eq!(
-            forget_project(&store, pid).unwrap_err().code,
-            codes::E_NOTFOUND
         );
     }
 
