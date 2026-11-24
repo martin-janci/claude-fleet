@@ -6,6 +6,7 @@
   the parent's `mission_state` move back to paused.
 -->
 <script lang="ts">
+  import { linkHref } from './open_external';
   import { onDestroy } from 'svelte';
   import { sessions as sessionRows } from './sessions';
   import { bulkTargets, sessionBlocked } from './share';
@@ -173,7 +174,7 @@
         {#each [prBlock.lead, ...prBlock.rest] as pr (pr.url)}
           <li data-testid="mission-finish-pr">
             <span class="badge">{prStateLabel(pr)}</span>
-            <a href={pr.url} target="_blank" rel="noreferrer noopener">{prRef(pr)}</a>
+            <a href={linkHref(pr.url)} target="_blank" rel="noreferrer noopener">{prRef(pr)}</a>
             {#if pr.title}<span class="title">{pr.title}</span>{/if}
             {#if pr.head_ref}<span class="muted small">{pr.head_ref}</span>{/if}
             {#if prFactsLine(pr)}<span class="muted small" data-testid="mission-finish-pr-facts">{prFactsLine(pr)}</span>{/if}
@@ -184,7 +185,7 @@
         <p class="muted small" data-testid="mission-finish-also-merged">
           Also merged:
           {#each prBlock.alsoMerged as pr, i (pr.url)}{#if i > 0},{/if}
-            <a href={pr.url} target="_blank" rel="noreferrer noopener">{alsoMergedLabel(pr)}</a>{/each}
+            <a href={linkHref(pr.url)} target="_blank" rel="noreferrer noopener">{alsoMergedLabel(pr)}</a>{/each}
         </p>
       {/if}
     </div>

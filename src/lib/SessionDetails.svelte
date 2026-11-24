@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { linkHref } from './open_external';
   import { errorText } from './error_copy';
   import { onDestroy, tick, untrack } from 'svelte';
   import {
@@ -971,7 +972,7 @@
 
 {#snippet prValue()}
   {#if session.pr_url}
-    <a class="pr-link" href={session.pr_url} target="_blank" rel="noreferrer">{prNumber ? `#${prNumber}` : session.pr_url.replace(/^https:\/\/github\.com\//, '')}</a>
+    <a class="pr-link" href={linkHref(session.pr_url)} target="_blank" rel="noreferrer">{prNumber ? `#${prNumber}` : session.pr_url.replace(/^https:\/\/github\.com\//, '')}</a>
     {#if session.ci_status}
       <span
         class="chip"
@@ -988,7 +989,7 @@
         Also opened:
         {#each otherPrs as pr (pr.id)}
           <span class="pr-other"
-            ><a class="pr-link" href={pr.url} target="_blank" rel="noreferrer" title={pr.title ?? pr.url}
+            ><a class="pr-link" href={linkHref(pr.url)} target="_blank" rel="noreferrer" title={pr.title ?? pr.url}
               >{pr.number != null ? `#${pr.number}` : pr.url}</a
             ><span class="pr-state">{prStateLabel(pr).toLowerCase()}</span></span
           >
@@ -1086,7 +1087,7 @@
         <dd data-testid="inspector-task">
           {#if session.work.key}
             {#if session.work.url}
-              <a class="mono task-link" href={session.work.url} target="_blank" rel="noreferrer" data-testid="inspector-task-link"
+              <a class="mono task-link" href={linkHref(session.work.url)} target="_blank" rel="noreferrer" data-testid="inspector-task-link"
                 >{session.work.key}</a
               >
             {:else}

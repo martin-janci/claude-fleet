@@ -2,7 +2,7 @@
   // Redesign step 3.15, "After an update": the Wordmark reveal plays once with
   // "Orbit Fleet <version> · What's new". A card in the corner, not a modal:
   // the app is usable under it, and it stays until closed.
-  import { openUrl } from '@tauri-apps/plugin-opener';
+  import { linkHref, openExternal } from './open_external';
   import Loader from './Loader.svelte';
   import { releaseNotesUrl } from './startup';
 
@@ -14,11 +14,11 @@
   <p>
     Orbit Fleet {version} ·
     <a
-      href={releaseNotesUrl(version)}
+      href={linkHref(releaseNotesUrl(version))}
       data-testid="update-reveal-notes"
       onclick={(e) => {
         e.preventDefault();
-        void openUrl(releaseNotesUrl(version));
+        void openExternal(releaseNotesUrl(version));
       }}>What's new</a
     >
   </p>

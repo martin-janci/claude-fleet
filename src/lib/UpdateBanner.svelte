@@ -4,7 +4,7 @@
   // this build needs. A strip above the layout like the hub banners, never
   // an overlay. The decision and the install are the backend's
   // (src/lib/updates.ts); this only shows them.
-  import { openUrl } from '@tauri-apps/plugin-opener';
+  import { openExternal } from './open_external';
   import {
     bannerFor,
     desktopUpdate,
@@ -25,7 +25,7 @@
   async function act() {
     if (!banner || !u) return;
     if (banner.action === 'restart') await installUpdate();
-    else if (banner.action === 'download' && u.download_url) await openUrl(u.download_url);
+    else if (banner.action === 'download' && u.download_url) await openExternal(u.download_url);
   }
 </script>
 
@@ -42,7 +42,7 @@
       </button>
     {/if}
     {#if u?.notes_url}
-      <button type="button" class="link" onclick={() => u?.notes_url && openUrl(u.notes_url)}>What's new</button>
+      <button type="button" class="link" onclick={() => u?.notes_url && openExternal(u.notes_url)}>What's new</button>
     {/if}
     {#if $updateError}<span class="error" data-testid="update-error">{$updateError}</span>{/if}
     {#if banner.dismissible && !progress}

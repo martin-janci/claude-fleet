@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { linkHref } from './open_external';
   import { errorText } from './error_copy';
   import { viewKey } from './shortcuts';
   // Work graph M7.3: Tidy up and Reopened, in the attention strip.
@@ -562,7 +563,7 @@
           <span class="name">{rowName(c)}</span>
           <span class="meta">{[c.host_alias, c.branch].filter(Boolean).join(' · ')}</span>
           {#if c.key}<span class="key">{c.key}{c.item_status ? ` · ${c.item_status}` : ''}</span>{/if}
-          {#if c.pr_url}<a class="meta" href={c.pr_url} target="_blank" rel="noreferrer">PR</a>{/if}
+          {#if c.pr_url}<a class="meta" href={linkHref(c.pr_url)} target="_blank" rel="noreferrer">PR</a>{/if}
           {#if c.expires_at}
             <span class="meta">expires {formatIdle(c.expires_at - Math.floor(Date.now() / 1000))}</span>
           {:else}

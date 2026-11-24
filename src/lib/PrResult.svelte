@@ -3,6 +3,7 @@
   // from the reading the row already carries (`pr_evidence`,
   // `pr_checked_at`). The rule is `evidence.ts` (Rust `service::evidence`'s
   // mirror); this only draws it. Nothing here gates or merges anything.
+  import { linkHref } from './open_external';
   import type { SessionRow } from './sessions';
   import { assessRow, describeReason, hasReading, shortSha, verdictLabel, verdictState } from './evidence';
   import StatusChip from './kit/StatusChip.svelte';
@@ -35,7 +36,7 @@
       <ul class="checks" data-testid="pr-result-failing">
         {#each failing as f, i (i)}
           <li>
-            {#if f.url}<a href={f.url} target="_blank" rel="noreferrer">{f.name}</a>{:else}{f.name}{/if}
+            {#if f.url}<a href={linkHref(f.url)} target="_blank" rel="noreferrer">{f.name}</a>{:else}{f.name}{/if}
           </li>
         {/each}
       </ul>

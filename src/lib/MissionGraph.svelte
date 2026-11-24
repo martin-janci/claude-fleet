@@ -9,6 +9,7 @@
   // Read-only: every write (an edge, a hold, Start wave) stays in the list,
   // so this view adds a picture, never a second way to change the mission.
   // Text a person or a tracker wrote is rendered as text, never as markup.
+  import { linkHref } from './open_external';
   import type { FinishSession, MissionDetail } from './missions';
   import { attemptLine, nodeCountWord, nodeLabel, verificationLabel } from './missions';
   import StatusChip from './kit/StatusChip.svelte';
@@ -199,7 +200,7 @@
       {#if chosen.node.verification}
         <span class="muted small">{verificationLabel(chosen.node.verification.state)}</span>
       {/if}
-      {#if chosen.url}<a class="small" href={chosen.url} target="_blank" rel="noreferrer">Open in tracker</a>{/if}
+      {#if chosen.url}<a class="small" href={linkHref(chosen.url)} target="_blank" rel="noreferrer">Open in tracker</a>{/if}
     </div>
   {/if}
 </div>

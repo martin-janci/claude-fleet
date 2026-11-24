@@ -3,6 +3,7 @@
   // SessionRowItem (redesign step 3.6): host, the name line 1 does not show,
   // elapsed, context, cost, effort, PR and CI, and the last prompt. This is
   // the Comfortable row's second line; a Compact row draws SessionRowMeta.
+  import { linkHref } from './open_external';
   import {
     formatCostMicros,
     formatTokens,
@@ -78,7 +79,7 @@
     <span class="sep" aria-hidden="true">·</span>
     <a
       class="pr-link"
-      href={sess.pr_url}
+      href={linkHref(sess.pr_url)}
       onclick={(e) => e.stopPropagation()}
       title="Open pull request"
       target="_blank"

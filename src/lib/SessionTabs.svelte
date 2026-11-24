@@ -3,6 +3,7 @@
 </script>
 
 <script lang="ts">
+  import { linkHref } from './open_external';
   import { tablistKeys } from './tablist_keys';
   // The session header and its one tab bar (Orbit Fleet
   // redesign step 3.5, Main board): the session's name, state and where it
@@ -224,7 +225,7 @@
       {#if session.work?.key}<span class="sep" aria-hidden="true">·</span><span>{session.work.key}</span>{/if}
       {#if session.pr_url}
         <span class="sep" aria-hidden="true">·</span>
-        <a href={session.pr_url} target="_blank" rel="noreferrer">{prNumber ? `PR #${prNumber}` : 'PR'}</a>
+        <a href={linkHref(session.pr_url)} target="_blank" rel="noreferrer">{prNumber ? `PR #${prNumber}` : 'PR'}</a>
       {/if}
     </div>
   {/if}
