@@ -38,6 +38,7 @@
   import { failingCount } from './routines';
   import { reviewRequestCount } from './review_requests';
   import { fleetInboxCount } from './fleets';
+  import { waitsOnMeOf } from './access';
   import { landOn } from './workspace';
   import Skeleton from './states/Skeleton.svelte';
   import { errorText } from './error_copy';
@@ -172,6 +173,8 @@
     failedRoutines: $failingCount,
     reviewAsks: $reviewRequestCount,
     fleets: $fleetInboxCount,
+    // A Read share or a teammate's row waits on its owner (review w03-5).
+    notMine: new Set($sessions.filter((s) => !$waitsOnMeOf(s)).map((s) => s.id)),
   });
   const kpis = $derived(view ? todayKpis(view, extras) : null);
   const dateLine = $derived(

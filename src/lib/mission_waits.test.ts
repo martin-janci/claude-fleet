@@ -37,6 +37,13 @@ describe('mission waits', () => {
     expect(waitWords({ reason: 'confirm', since: 0, open_cards: 3 })).toBe('3 to confirm');
   });
 
+  it('w11-9: a read that fails in passing keeps the last list', async () => {
+    waitingMissions.set(waitingOf([m(1, { waiting_on: { reason: 'confirm', since: 1, open_cards: 1 } })]));
+    await loadWaitingMissions(async () => ({ ok: false, error: { code: 'E_NETWORK', message: 'timed out' } }) as never);
+    expect(get(waitingMissions).map((x) => x.id)).toEqual([1]);
+    waitingMissions.set([]);
+  });
+
   it('reads nothing from a hub that refuses, rather than keeping a stale list', async () => {
     waitingMissions.set(waitingOf([m(1, { waiting_on: { reason: 'confirm', since: 1, open_cards: 1 } })]));
     await loadWaitingMissions(async () => ({ ok: false, error: { code: 'E_INVALID', message: 'no' } }) as never);

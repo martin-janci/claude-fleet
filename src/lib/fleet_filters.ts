@@ -20,6 +20,7 @@
 //
 // Search, Last active, Needs you, Agent and Background agents are not
 // per-hub: they apply to every fleet's rows alike.
+import { isLostRow } from './lost_fold';
 import { derived, writable, get } from 'svelte/store';
 import {
   PRIMARY,
@@ -256,7 +257,7 @@ export function fleetListView(
   const q = ctx.search.trim();
   const shared = [...rows.sessions.values()].filter(
     (s) =>
-      s.status !== 'lost' &&
+      !isLostRow(s) &&
       (ctx.showBg || s.kind !== 'bg') &&
       withinRecency(s.last_activity_at, ctx.recency, ctx.nowSec) &&
       (ctx.agent === 'any' || sessionAgent(s) === ctx.agent) &&

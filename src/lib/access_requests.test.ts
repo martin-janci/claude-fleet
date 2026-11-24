@@ -68,6 +68,10 @@ describe('shared_view wording (Watch board)', () => {
     expect(recipientStateLabel('action_required', 'Martin', 'answer')).toBeNull();
     expect(recipientStateLabel('blocked', 'Martin', 'drive')).toBeNull();
     expect(sharedRowLine('answer', info, 'Martin', 'action_required')).toBe('Martin · Answer · waiting for you');
+    expect(sharedRowLine('answer', info, 'Martin', 'action_required', 'waiting')).toBe('Martin · Answer · waiting for you');
+    // Review w04-2: what only the owner can move waits on the owner.
+    expect(sharedRowLine('answer', info, 'Martin', 'blocked', 'account_limit')).toBe('Martin · Answer · waiting for Martin');
+    expect(sharedRowLine('drive', info, 'Martin', 'action_required', 'stuck')).toBe('Martin · Steer · waiting for Martin');
   });
   it('writes the meta lead and the Inbox row', () => {
     expect(sharedByMeta('watch', info, 'Martin Janči')).toBe('Shared by Martin Janči · level Read');

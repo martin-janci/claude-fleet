@@ -132,7 +132,7 @@
     activeWorkViewId.set(null);
     workViewFilters.update((f) => {
       const n = normalizeFilters(f);
-      return normalizeFilters({ archived: n.archived, group_by: n.group_by });
+      return normalizeFilters({ archived: n.archived, group_by: n.group_by, sort: n.sort });
     });
   }
   function setArchived(on: boolean) {

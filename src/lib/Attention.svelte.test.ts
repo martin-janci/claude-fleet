@@ -16,6 +16,7 @@ import { fleetSettings } from './fleet_settings';
 import { failing, type FailingRoutine } from './routines';
 import { PRIMARY, fleetSelection, _resetFleetsForTest, _setFleetRowsForTest, _setFleetsForTest, emptyRows, type FleetInfo } from './fleets';
 import { fleetInfo } from './fleets_fixture';
+import { hosts, type HostRow } from './hosts';
 
 let nextId = 1;
 function row(over: Partial<SessionRow> = {}): SessionRow {
@@ -151,9 +152,16 @@ class FakeNotification {
   static permission = 'granted';
   static requestPermission = async () => 'granted';
   onclick: ((e: Event) => void) | null = null;
-  constructor(title: string) {
+  closed = false;
+  constructor(
+    public title: string,
+    public opts?: { tag?: string },
+  ) {
     shown.push(title);
     made.push(this);
+  }
+  close() {
+    this.closed = true;
   }
 }
 
@@ -209,6 +217,96 @@ describe('Attention: the notifications matrix (11.9)', () => {
     sessions.set([{ ...a, claude_status: 'blocked' }, { ...b, claude_status: 'failed' }]);
     await tick();
     expect(shown).toEqual([]);
+  });
+
+  describe('review w11: a cause is announced once, and old news is not repeated', () => {
+    const hostRow = (alias: string, reachable: boolean) => ({ alias, reachable, last_pinged_at: 1, hidden: false }) as unknown as HostRow;
+    beforeEach(() => {
+      made.length = 0;
+      fleetSettings.set({ ...get(fleetSettings), 'notify.desktop': 'needs_you,failed,blocked,done' });
+    });
+    afterEach(() => hosts.set([]));
+
+    it('w11-2: a host going down is one notification for all its sessions', async () => {
+      hosts.set([hostRow('trn', true)]);
+      const rows = [1, 2, 3].map((i) => row({ tmux_name: `dev-${i}`, host_alias: 'trn', claude_status: 'working' }));
+      sessions.set(rows);
+      render(Attention);
+      await tick();
+      sessions.set([...rows]);
+      await tick();
+      hosts.set([hostRow('trn', false)]);
+      sessions.set([...rows]);
+      await tick();
+      expect(shown).toEqual(['trn is down · 3 sessions']);
+      expect(made[0].opts?.tag).toBe('blocked-host-trn');
+      // w11-10: taken down when the host answers again.
+      hosts.set([hostRow('trn', true)]);
+      sessions.set([...rows]);
+      await tick();
+      expect(made[0].closed).toBe(true);
+      expect(shown).toHaveLength(1);
+    });
+
+    it('w11-2: rows already blocked when the hosts first answer are the baseline', async () => {
+      const a = row({ tmux_name: 'dev-a', host_alias: 'trn', claude_status: 'working' });
+      sessions.set([a]);
+      render(Attention);
+      await tick();
+      hosts.set([hostRow('trn', false)]);
+      sessions.set([{ ...a }]);
+      await tick();
+      expect(shown).toEqual([]);
+    });
+
+    it('w11-3: a block lifting does not announce the Failed underneath again', async () => {
+      hosts.set([hostRow('trn', true)]);
+      const a = row({ tmux_name: 'dev-f', host_alias: 'trn', claude_status: 'failed', kind: 'bg' });
+      sessions.set([a]);
+      render(Attention);
+      await tick();
+      sessions.set([{ ...a }]);
+      await tick();
+      hosts.set([hostRow('trn', false)]);
+      sessions.set([{ ...a }]);
+      await tick();
+      hosts.set([hostRow('trn', true)]);
+      sessions.set([{ ...a }]);
+      await tick();
+      expect(shown).toEqual(['trn is down · 1 session']);
+    });
+
+    it('w11-10: a notification is taken down once its session no longer waits', async () => {
+      const a = row({ tmux_name: 'dev-w', claude_status: 'working' });
+      sessions.set([a]);
+      render(Attention);
+      await tick();
+      sessions.set([{ ...a, claude_status: 'blocked' }]);
+      await tick();
+      expect(made).toHaveLength(1);
+      expect(made[0].closed).toBe(false);
+      sessions.set([{ ...a, claude_status: 'working' }]);
+      await tick();
+      expect(made[0].closed).toBe(true);
+    });
+
+    it("w11-1: a teammate's row on an extra fleet does not notify", async () => {
+      const base = fleetInfo(PRIMARY, { label: 'home' });
+      _setFleetsForTest([base, { ...base, id: 'company', label: 'company', primary: false, local: false, connection: { state: 'connected' } }]);
+      const mine = row({ tmux_name: 'mine', claude_status: 'working', owner_person_id: 3 });
+      const theirs = row({ tmux_name: 'theirs', claude_status: 'working', owner_person_id: 7 });
+      const rowsOf = (list: SessionRow[]) => ({ ...emptyRows(), loaded: true, me: 3, sessions: new Map(list.map((r) => [r.id, r])) });
+      try {
+        render(Attention);
+        _setFleetRowsForTest('company', rowsOf([mine, theirs]));
+        await tick();
+        _setFleetRowsForTest('company', rowsOf([{ ...mine, claude_status: 'blocked' }, { ...theirs, claude_status: 'blocked' }]));
+        await tick();
+        expect(shown).toEqual(['mine needs you']);
+      } finally {
+        _resetFleetsForTest();
+      }
+    });
   });
 
   describe('extra fleets (review w01)', () => {
@@ -281,6 +379,10 @@ describe('Attention: the notifications matrix (11.9)', () => {
     await tick();
     expect(shown).toEqual([]);
     failing.set([{ routine, run: { id: 10, started_at: now, finished_at: now + 1 } as FailingRoutine['run'], may_change: true }]);
+    await tick();
+    expect(shown).toEqual(['Routine nightly failed']);
+    // Review w11-7: a teammate's routine is not in this person's Inbox.
+    failing.set([{ routine, run: { id: 11, started_at: now, finished_at: now + 2 } as FailingRoutine['run'], may_change: false }]);
     await tick();
     expect(shown).toEqual(['Routine nightly failed']);
   });

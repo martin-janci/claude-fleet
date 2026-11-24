@@ -493,9 +493,19 @@ export const PERSON_OUTCOMES: readonly { value: PersonOutcome; label: string }[]
 export const failing = writable<FailingRoutine[]>([]);
 
 export async function loadFailing(): Promise<void> {
-  const r = await failingRoutines();
-  failing.set(r.ok && Array.isArray(r.value) ? r.value : []);
+  setFailing(await failingRoutines());
 }
+
+/** A read that answered replaces the list. One that failed in passing (the
+ *  hub restarting, a timeout) keeps the last one: "nothing failed" would
+ *  drop the Inbox's rows and the badge until the next good poll (review
+ *  w11-9). A hub that refuses the read has nothing to list. */
+function setFailing(r: Result<FailingRoutine[]>): void {
+  if (r.ok) failing.set(Array.isArray(r.value) ? r.value : []);
+  else if (REFUSED.has(r.error.code)) failing.set([]);
+}
+
+const REFUSED: ReadonlySet<string> = new Set(['E_INVALID', 'E_FORBIDDEN']);
 
 /** The scheduled routine that runs next (G7.15, States board "Inbox
  *  empty"): the calm Inbox names it. Null when none is scheduled or the
@@ -1085,7 +1095,7 @@ export function trackFailingRoutines(
       lastRead = Date.now();
       const r = await load();
       if (stopped) return false;
-      failing.set(r.ok && Array.isArray(r.value) ? r.value : []);
+      setFailing(r);
       if (!r.ok && r.error.code === 'E_INVALID') return stop();
     },
     { every: deps.every ?? FAILING_EVERY_MS, doc: deps.doc, win: deps.win },

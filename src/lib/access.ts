@@ -62,6 +62,23 @@ export function waitsOnMe(a: SessionAccess): boolean {
   return a !== 'watch';
 }
 
+/**
+ * Review w11-1: the same question asked of the row. A row seen through team
+ * reach has another owner and no grant, so its access is `null`, which
+ * `waitsOnMe` alone reads as "unknown, so mine". When the owner is known and
+ * is somebody else, only an Answer or Steer grant makes its waits mine; an
+ * owner the hub did not name, or a viewer it has not named yet, stays mine.
+ */
+export function rowWaitsOnMe(
+  row: Pick<SessionRow, 'owner_person_id'>,
+  a: SessionAccess,
+  me: number | null,
+): boolean {
+  if (a === 'watch') return false;
+  if (a !== null) return true;
+  return me === null || row.owner_person_id == null || row.owner_person_id === me;
+}
+
 function isGrantLevel(v: unknown): v is GrantLevel {
   return typeof v === 'string' && (GRANT_LEVELS as readonly string[]).includes(v);
 }
@@ -245,6 +262,16 @@ export const accessOf = derived(
   ([$status, $person, $grants]) =>
     (row: Pick<SessionRow, 'id' | 'owner_person_id'> | null | undefined): SessionAccess =>
       sessionAccess(row, $status, $person, $grants),
+);
+
+/** `(row) → whether its waits are this person's` (`rowWaitsOnMe`), with the
+ *  viewer applied: what the badge, the Inbox and the notifier ask. A
+ *  standalone desktop owns every row, so it never asks who the viewer is. */
+export const waitsOnMeOf = derived(
+  [hubStatus, myPersonId, myGrants],
+  ([$status, $person, $grants]) =>
+    (row: Pick<SessionRow, 'id' | 'owner_person_id'>): boolean =>
+      rowWaitsOnMe(row, sessionAccess(row, $status, $person, $grants), backendMode($status) === 'remote' ? $person : null),
 );
 
 /**

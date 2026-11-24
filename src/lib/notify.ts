@@ -9,7 +9,7 @@
 import { writable } from 'svelte/store';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { readPref, writePref } from './prefs';
-import { attentionState, type AttentionOptions, type AttentionState } from './attention';
+import { attentionState, classify, type AttentionOptions, type AttentionState } from './attention';
 import type { SessionRow } from './sessions';
 
 const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
@@ -78,6 +78,30 @@ export function focusAppWindow(): void {
   }
 }
 
+type ShownNotification = {
+  onclick?: ((e: Event) => void) | null;
+  onclose?: (() => void) | null;
+  close?: () => void;
+};
+
+/** The notifications still up, by tag (review w11-10): what
+ *  `closeOsNotification` takes down once its row no longer waits. */
+const shown = new Map<string, ShownNotification>();
+
+/** Take down the notification posted under `tag`, if it is still up: the
+ *  session was answered elsewhere, so a later click would open a row that
+ *  is working. */
+export function closeOsNotification(tag: string): void {
+  const n = shown.get(tag);
+  if (!n) return;
+  shown.delete(tag);
+  try {
+    n.close?.();
+  } catch {
+    /* already gone */
+  }
+}
+
 /** Fire an OS notification if permitted. Returns true when one was shown.
  *  `onclick` runs when the person clicks it, after the window comes forward
  *  (review w11-4: a click used to do nothing visible). */
@@ -85,13 +109,20 @@ export function showOsNotification(title: string, body: string, tag?: string, on
   const api = notificationApi();
   if (!api || api.permission !== 'granted') return false;
   try {
-    const n = new api(title, { body, tag }) as { onclick?: ((e: Event) => void) | null } | undefined;
+    const n = new api(title, { body, tag }) as ShownNotification | undefined;
     if (n && typeof n === 'object') {
       n.onclick = (e: Event) => {
         e?.preventDefault?.();
         focusAppWindow();
+        if (tag) closeOsNotification(tag);
         onclick?.();
       };
+      if (tag) {
+        shown.set(tag, n);
+        n.onclose = () => {
+          if (shown.get(tag) === n) shown.delete(tag);
+        };
+      }
     }
     return true;
   } catch {
@@ -175,6 +206,7 @@ export function newlyNotifiable(
   prev: ReadonlyMap<number, AttentionState>,
   rows: readonly SessionRow[],
   opts: AttentionOptions,
+  prevOwn?: ReadonlyMap<number, AttentionState>,
 ): { row: SessionRow; state: NotifyState }[] {
   const out: { row: SessionRow; state: NotifyState }[] = [];
   for (const s of rows) {
@@ -189,9 +221,99 @@ export function newlyNotifiable(
     // one a day per routine would otherwise ring like a person's session.
     // Its failures and questions still announce.
     if (state === 'done' && s.origin === 'routine') continue;
+    // Review w11-3: a host coming back (or a limit resetting) uncovers the
+    // Failed or Done the row already was. That is news only when the row's
+    // own state moved, apart from the fleet's facts.
+    if ((state === 'failed' || state === 'done') && prevOwn && opts.facts) {
+      if (prevOwn.get(s.id) === attentionState(s, { ...opts, facts: undefined })) continue;
+    }
     out.push({ row: s, state });
   }
   return out;
+}
+
+/** `notifySnapshot` without the fleet's facts: each row's own state, which a
+ *  host going down or an account limit does not move (review w11-3). */
+export function notifyOwnSnapshot(rows: readonly SessionRow[], opts: AttentionOptions): Map<number, AttentionState> {
+  return notifySnapshot(rows, { ...opts, facts: undefined });
+}
+
+/** What blocks a row that is not the row's own doing: a host or a login. */
+export interface BlockCause {
+  /** Stable per cause; the notification's tag is `blocked-${key}`. */
+  key: string;
+  kind: 'host_down' | 'account_limit' | 'no_credentials';
+  /** The host alias, or the account's uuid ('' when the row names none). */
+  subject: string;
+}
+
+/** The fact that blocks `row`, if it is blocked by one (review w11-2): a
+ *  down host, an account at its limit, a signed-out login. One cause holds
+ *  every session on that host or login, so it is announced once. */
+export function blockCause(row: SessionRow, opts: AttentionOptions): BlockCause | null {
+  const bucket = classify(row, opts);
+  if (bucket === 'host_down') return { key: `host-${row.host_alias}`, kind: bucket, subject: row.host_alias };
+  if (bucket === 'account_limit') {
+    const subject = row.account_uuid ?? '';
+    return { key: `limit-${subject}`, kind: bucket, subject };
+  }
+  if (bucket === 'no_credentials') {
+    const subject = row.account_uuid ?? '';
+    return { key: `login-${subject || row.host_alias}`, kind: bucket, subject };
+  }
+  return null;
+}
+
+/** Every cause blocking some row of `rows` now, by key, with its rows. */
+export function blockCauses(
+  rows: readonly SessionRow[],
+  opts: AttentionOptions,
+): Map<string, { cause: BlockCause; rows: SessionRow[] }> {
+  const out = new Map<string, { cause: BlockCause; rows: SessionRow[] }>();
+  if (!opts.facts) return out;
+  for (const s of rows) {
+    if (s.kind === 'external' || s.stuck_kind) continue;
+    const cause = blockCause(s, opts);
+    if (!cause) continue;
+    const g = out.get(cause.key) ?? { cause, rows: [] };
+    g.rows.push(s);
+    out.set(cause.key, g);
+  }
+  return out;
+}
+
+/** Split what `newlyNotifiable` found into the rows to announce one by one
+ *  and the causes to announce once each (review w11-2). A cause is listed
+ *  with EVERY row it holds now, not only the new ones, so the line can say
+ *  how many sessions wait on it. */
+export function coalesceByCause(
+  fresh: readonly { row: SessionRow; state: NotifyState }[],
+  rows: readonly SessionRow[],
+  opts: AttentionOptions,
+): { single: { row: SessionRow; state: NotifyState }[]; causes: { cause: BlockCause; rows: SessionRow[] }[] } {
+  const single: { row: SessionRow; state: NotifyState }[] = [];
+  const keys = new Set<string>();
+  for (const f of fresh) {
+    const cause = f.state === 'blocked' ? blockCause(f.row, opts) : null;
+    if (cause) keys.add(cause.key);
+    else single.push(f);
+  }
+  if (keys.size === 0) return { single, causes: [] };
+  const all = blockCauses(rows, opts);
+  return { single, causes: [...keys].flatMap((k) => (all.has(k) ? [all.get(k)!] : [])) };
+}
+
+/** The title of a cause's one notification: "trn is down · 12 sessions". */
+export function causeTitle(cause: BlockCause, count: number, accountName: (uuid: string) => string): string {
+  const n = `${count} session${count === 1 ? '' : 's'}`;
+  switch (cause.kind) {
+    case 'host_down':
+      return `${cause.subject} is down · ${n}`;
+    case 'account_limit':
+      return `${cause.subject ? accountName(cause.subject) : 'An account'} is at its limit · ${n}`;
+    case 'no_credentials':
+      return `${cause.subject ? accountName(cause.subject) : 'A login'} is signed out · ${n}`;
+  }
 }
 
 /** A short two-note chime through Web Audio, for the matrix's Sound column.

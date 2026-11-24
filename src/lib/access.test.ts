@@ -364,3 +364,19 @@ describe('attachCommandFor', () => {
     expect(attachCommandFor(s('wsl-ubuntu'), 'ssh', STANDALONE, true)).toMatchObject({ command: null, why: expect.stringMatching(/WSL/) });
   });
 });
+
+describe('review w11-1: whose wait a row is', () => {
+  it("leaves out a teammate's row seen with no grant, and a Read share", async () => {
+    const { rowWaitsOnMe } = await import('./access');
+    expect(rowWaitsOnMe({ owner_person_id: 7 }, null, 3)).toBe(false);
+    expect(rowWaitsOnMe({ owner_person_id: 7 }, 'watch', 3)).toBe(false);
+    expect(rowWaitsOnMe({ owner_person_id: 7 }, 'answer', 3)).toBe(true);
+    expect(rowWaitsOnMe({ owner_person_id: 7 }, 'drive', 3)).toBe(true);
+    expect(rowWaitsOnMe({ owner_person_id: 3 }, 'own', 3)).toBe(true);
+  });
+  it('keeps a row whose owner, or whose viewer, the hub has not named', async () => {
+    const { rowWaitsOnMe } = await import('./access');
+    expect(rowWaitsOnMe({ owner_person_id: null }, null, 3)).toBe(true);
+    expect(rowWaitsOnMe({ owner_person_id: 7 }, null, null)).toBe(true);
+  });
+});

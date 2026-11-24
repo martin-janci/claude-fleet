@@ -87,7 +87,7 @@ function companyRows(): FleetRows {
     sessions: new Map([
       [1, sess(1, { kind: 'bg', org_id: 3 })],
       [2, sess(2, { host_alias: 'papayapos-dev', org_id: 3 })],
-      [3, sess(3, { host_alias: 'papayapos-dev', status: 'lost' })],
+      [3, sess(3, { host_alias: 'papayapos-dev', status: 'ghost', lost_at: 1 })],
     ]),
     hosts: new Map([
       ['eva-air', host('eva-air')],
