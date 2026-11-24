@@ -206,6 +206,44 @@ describe('parseMarkdown', () => {
   });
 });
 
+describe('review r4 w10-9 / w10-10', () => {
+  it('starts a table right under a text line', () => {
+    const blocks = parseMarkdown('Results:\n| a | b |\n|---|---|\n| 1 | 2 |');
+    expect(blocks.map((b) => b.t)).toEqual(['para', 'table']);
+  });
+
+  it('lets only an ordered item starting at 1 interrupt a paragraph', () => {
+    expect(parseMarkdown('released back in\n2021. It was a good year.').map((b) => b.t)).toEqual(['para']);
+    expect(parseMarkdown('Steps:\n1. one\n2. two').map((b) => b.t)).toEqual(['para', 'list']);
+    expect(parseMarkdown('Things:\n- one').map((b) => b.t)).toEqual(['para', 'list']);
+  });
+
+  it('keeps a balanced closing parenthesis in a bare URL', () => {
+    const url = 'https://en.wikipedia.org/wiki/Rust_(programming_language)';
+    expect(parseInline(`see ${url}.`)).toContainEqual({ t: 'link', href: url, c: [{ t: 'text', v: url }] });
+    expect(parseInline('(see https://example.com/a)')).toContainEqual({
+      t: 'link',
+      href: 'https://example.com/a',
+      c: [{ t: 'text', v: 'https://example.com/a' }],
+    });
+  });
+
+  it('reads headings as before, closing run included', () => {
+    const text = (src: string) => parseMarkdown(src)[0];
+    expect(text('## Title ##')).toEqual({ t: 'heading', level: 2, c: [{ t: 'text', v: 'Title' }] });
+    expect(text('# C#')).toEqual({ t: 'heading', level: 1, c: [{ t: 'text', v: 'C#' }] });
+    expect(text('###')).toEqual({ t: 'heading', level: 3, c: [] });
+    expect(text('## ##')).toEqual({ t: 'heading', level: 2, c: [] });
+    expect(text('#tag').t).toBe('para');
+  });
+
+  it('a heading with a long run of spaces parses in linear time', () => {
+    const t0 = performance.now();
+    parseMarkdown('text\n# a' + ' '.repeat(40000) + 'b');
+    expect(performance.now() - t0).toBeLessThan(500);
+  });
+});
+
 describe('fenceLang', () => {
   it('maps common fence names onto highlighter languages', () => {
     expect(fenceLang('ts')).toBe('clike');

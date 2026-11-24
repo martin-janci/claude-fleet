@@ -47,8 +47,14 @@ export interface SendLaterPlan {
   error: string | null;
 }
 
-function whenAt(d: Date, locale?: string): string {
-  const day = new Intl.DateTimeFormat(locale, { weekday: 'short' }).format(d);
+/** "Sat 09:00"; from six days ahead "Sat 12 Dec 09:00", so a time three
+ *  weeks out does not read as this Saturday (review r4 w15-6; the rule of
+ *  `resetText` in account_limits.ts). */
+function whenAt(d: Date, nowMs: number, locale?: string): string {
+  const far = d.getTime() - nowMs >= 6 * 86_400_000;
+  const day = new Intl.DateTimeFormat(locale, far ? { weekday: 'short', day: 'numeric', month: 'short' } : { weekday: 'short' })
+    .format(d)
+    .replace(',', '');
   const p = (n: number) => String(n).padStart(2, '0');
   return `${day} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
@@ -68,11 +74,11 @@ export function sendLaterPlan(
       return { timing: { ...skip }, when: 'when it is idle', error: null };
     case 'hour': {
       const d = new Date(nowMs + 3600_000);
-      return { timing: { notBefore: Math.floor(d.getTime() / 1000), ...skip }, when: `at ${whenAt(d, locale)}`, error: null };
+      return { timing: { notBefore: Math.floor(d.getTime() / 1000), ...skip }, when: `at ${whenAt(d, nowMs, locale)}`, error: null };
     }
     case 'tomorrow': {
       const d = tomorrowAtNine(nowMs);
-      return { timing: { notBefore: Math.floor(d.getTime() / 1000), ...skip }, when: `at ${whenAt(d, locale)}`, error: null };
+      return { timing: { notBefore: Math.floor(d.getTime() / 1000), ...skip }, when: `at ${whenAt(d, nowMs, locale)}`, error: null };
     }
     case 'limit':
       return { timing: { untilLimitReset: true, ...skip }, when: 'when the usage limit resets', error: null };
@@ -80,7 +86,7 @@ export function sendLaterPlan(
       const d = parseLocalDateTime(at);
       if (!d) return { timing: {}, when: '', error: 'Pick a day and a time.' };
       if (d.getTime() <= nowMs) return { timing: {}, when: '', error: 'That time has passed. Pick a later one.' };
-      return { timing: { notBefore: Math.floor(d.getTime() / 1000), ...skip }, when: `at ${whenAt(d, locale)}`, error: null };
+      return { timing: { notBefore: Math.floor(d.getTime() / 1000), ...skip }, when: `at ${whenAt(d, nowMs, locale)}`, error: null };
     }
   }
 }
@@ -100,7 +106,7 @@ export function scheduledWhen(
   locale?: string,
 ): string {
   if (q.not_before && q.not_before * 1000 > nowMs) {
-    const at = `at ${whenAt(new Date(q.not_before * 1000), locale)}`;
+    const at = `at ${whenAt(new Date(q.not_before * 1000), nowMs, locale)}`;
     return q.until_limit_reset ? `${at}, after the usage limit resets` : at;
   }
   if (q.until_limit_reset) return 'when the usage limit resets';

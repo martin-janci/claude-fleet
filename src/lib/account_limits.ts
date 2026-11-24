@@ -4,6 +4,7 @@
 // answers from the usage it followed (hub contract 14).
 import { get, writable } from 'svelte/store';
 import { accounts, accountsForbiddenFor } from './accounts';
+import { modelFamily } from './attention';
 import { hosts } from './hosts';
 import { orgs, projectOrgId } from './orgs';
 import { projects } from './projects';
@@ -181,20 +182,30 @@ export async function switchCheck(
 /** The soonest a login on the host frees up, for the "no room" line (review
  *  w03-9): per signed-in login, the latest reset among its windows at or
  *  past the line (the login is over until all of them reset), then the
- *  soonest of those that is still ahead. `null` without one. */
+ *  soonest of those that is still ahead. `null` without one. `launchModel`
+ *  is the session's: its family's own weekly window counts, as it counted
+ *  in the headroom this line explains (review r4 w07-5). */
 export function nextReset(
   h: Headroom,
-  usage: Readonly<Record<string, { usage: { five_hour: Win; seven_day: Win } | null } | undefined>>,
+  usage: Readonly<
+    Record<
+      string,
+      { usage: { five_hour: Win; seven_day: Win; seven_day_opus?: Win; seven_day_sonnet?: Win } | null } | undefined
+    >
+  >,
   now: number,
+  launchModel?: string | null,
 ): { login: HostLogin; at: number } | null {
   let best: { login: HostLogin; at: number } | null = null;
   const seen = new Set<string>();
+  const family = modelFamily(launchModel);
   for (const l of h.logins) {
     if (l.signed_out || seen.has(l.account_uuid)) continue;
     seen.add(l.account_uuid);
     const u = usage[l.account_uuid]?.usage;
     if (!u) continue;
-    const over = [u.five_hour, u.seven_day].filter(
+    const own = family === 'opus' ? u.seven_day_opus : family === 'sonnet' ? u.seven_day_sonnet : null;
+    const over = [u.five_hour, u.seven_day, own ?? null].filter(
       (w): w is NonNullable<Win> => w != null && w.utilization >= h.pause_at_pct && w.resets_at != null,
     );
     if (over.length === 0) continue;

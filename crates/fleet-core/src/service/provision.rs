@@ -1643,6 +1643,23 @@ pub async fn provision_hosts(
             provision_host_with_token(store, ssh, tunnels, &h.alias, base, scope.rotate).await
         };
         match outcome {
+            // A content-only pass over a host that never had a full run
+            // refreshes its content and leaves it unprovisioned (w13-1).
+            // "provisioned" would read as done ("h re-provisioned") for a
+            // host with no MCP entry (review r4 w03-2): it is `skipped`,
+            // with the reason.
+            Ok(Some(warning))
+                if scope.content_only
+                    && !lock(store)?
+                        .get_host_row(&h.alias)?
+                        .is_some_and(|row| row.provisioned) =>
+            {
+                results.push(HostProvisionResult {
+                    host: h.alias,
+                    status: "skipped".into(),
+                    detail: Some(warning),
+                });
+            }
             Ok(warning) => {
                 // A warning is appended: the host still needs (or not) its
                 // Claude restart, whatever else went wrong.
@@ -5718,6 +5735,43 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(plain, "restart Claude on this host to load the MCP server");
+        tunnels.stop_all();
+    }
+
+    /// Review r4 w03-2: a content-only pass over a host with a token and no
+    /// full run leaves it unprovisioned, so the answer must not say
+    /// "provisioned" (the desktop then toasts "re-provisioned").
+    #[tokio::test]
+    async fn content_only_over_a_never_provisioned_host_is_skipped_with_the_reason() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("h", Some("h")).unwrap();
+            s.update_host_probe("h", true, None, None, 1).unwrap();
+            s.upsert_host_token("h", "tok-h-0123456789abcdef").unwrap();
+        }
+        let tunnels = quiet_tunnels();
+        let results = provision_hosts(
+            &store,
+            &fresh_host(),
+            &tunnels,
+            &base(),
+            ProvisionScope {
+                content_only: true,
+                ..ProvisionScope::default()
+            },
+        )
+        .await
+        .unwrap();
+        let r = results.into_iter().find(|r| r.host == "h").unwrap();
+        assert_eq!(r.status, "skipped");
+        assert!(
+            r.detail
+                .as_deref()
+                .is_some_and(|d| d.contains("never had a full provisioning")),
+            "{:?}",
+            r.detail
+        );
         tunnels.stop_all();
     }
 }

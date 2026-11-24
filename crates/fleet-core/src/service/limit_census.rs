@@ -71,7 +71,7 @@ pub const NOT_COUNTED: &[&str] = &[
     "a login that could not be used for another reason while its account had room (signed out, host down)",
     "the minutes between a limit being hit and the next reading (readings are 5 to 30 minutes apart)",
     "extra usage: an account with it on keeps working past its limit on pay-as-you-go money, and is counted at its limit all the same",
-    "a weekly limit on one model only (Opus, Sonnet): fleet does not pause a row for it, and it is not counted here either",
+    "a weekly limit on one model only (Opus, Sonnet): fleet pauses only the sessions launched on that model for it, and it is not counted here",
 ];
 
 /// What to count.

@@ -1399,9 +1399,12 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
-    // The New session picker (phase 1): a person's preference, so a person's
-    // own device only, under the desktop commands' own names. Not served to
-    // the master — nothing an agent needs, and its surface is budgeted.
+    // The New session picker (phase 1), under the desktop commands' own
+    // names. The pins are ONE list for the fleet (`project_picks` has no
+    // person column), and `PersonDevice` serves them to the fleet admin's
+    // device only: a colleague's or an org-bound device is refused, and the
+    // desktop says so (`project_picks.ts`). Not served to the master —
+    // nothing an agent needs, and its surface is budgeted.
     ToolPolicy {
         name: "project_picks",
         access: Access::PersonDevice,

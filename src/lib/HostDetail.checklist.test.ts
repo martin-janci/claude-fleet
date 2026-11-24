@@ -94,6 +94,25 @@ describe('HostDetail: health checklist', () => {
     expect(prov[1]).toEqual({ rotate: false, host: 'mercury' });
   });
 
+  it('review r4 w03-2: a provisioned row\'s warning is shown, not dropped', async () => {
+    const { toasts } = await import('./toasts');
+    const { get } = await import('svelte/store');
+    toasts.set([]);
+    const real = inv.getMockImplementation() as (cmd: string, payload?: unknown) => Promise<unknown>;
+    let answer: unknown[] = [
+      { host: 'mercury', status: 'provisioned', detail: 'restart Claude on this host to load the MCP server; ag launcher not installed: no curl' },
+    ];
+    inv.mockImplementation(async (cmd: string, payload?: unknown) => (cmd === 'provision_hosts' ? answer : real(cmd, payload)));
+    mount();
+    await fireEvent.click(screen.getByTestId('detail-reprovision'));
+    await waitFor(() => expect(get(toasts).some((t) => t.kind === 'warning' && /ag launcher not installed/.test(t.sub ?? ''))).toBe(true));
+    // The stock sentence alone is success, with the restart hint under it.
+    answer = [{ host: 'mercury', status: 'provisioned', detail: 'restart Claude on this host to load the MCP server' }];
+    toasts.set([]);
+    await fireEvent.click(screen.getByTestId('detail-reprovision'));
+    await waitFor(() => expect(get(toasts).some((t) => t.kind === 'success' && /restart Claude/.test(t.sub ?? ''))).toBe(true));
+  });
+
   it('review w13-4: a skipped or missing host is not reported as re-provisioned', async () => {
     const { toasts } = await import('./toasts');
     const { get } = await import('svelte/store');

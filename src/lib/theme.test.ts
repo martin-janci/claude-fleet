@@ -1,7 +1,19 @@
 import { readFileSync } from 'node:fs';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
-import { theme, applyTheme, cycleTheme, sunFor, resolveContrast, paint, BOOT_KEY, initTheme, accentPref } from './theme';
+import {
+  theme,
+  applyTheme,
+  cycleTheme,
+  sunFor,
+  resolveContrast,
+  paint,
+  BOOT_KEY,
+  initTheme,
+  accentPref,
+  contrastPref,
+  CONTRAST_PREFS,
+} from './theme';
 
 describe('theme store', () => {
   beforeEach(() => {
@@ -18,6 +30,18 @@ describe('theme store', () => {
     const accent = get(accentPref);
     window.dispatchEvent(new StorageEvent('storage', { key: 'cf:pref:ui.accent', newValue: '"nope"' }));
     expect(get(accentPref)).toBe(accent);
+  });
+
+  // r4 w04-5: contrast follows too, and an unknown value is ignored.
+  it('takes a contrast pick another window wrote', () => {
+    initTheme();
+    const before = get(contrastPref);
+    const other = CONTRAST_PREFS.find((c) => c !== before)!;
+    window.dispatchEvent(new StorageEvent('storage', { key: 'cf:pref:ui.contrast', newValue: JSON.stringify(other) }));
+    expect(get(contrastPref)).toBe(other);
+    window.dispatchEvent(new StorageEvent('storage', { key: 'cf:pref:ui.contrast', newValue: '"nope"' }));
+    expect(get(contrastPref)).toBe(other);
+    contrastPref.set(before);
   });
 
   it('defaults to "sun"', () => {

@@ -107,6 +107,33 @@ describe('limit-hit toast', () => {
   });
 });
 
+// r4 w07-5: a model's own weekly window pauses that model's sessions, and
+// the toast said nothing.
+describe('limit-hit toast for a model window', () => {
+  const opus = (uuid: string, used: number): AccountUsageSnapshot => {
+    const s = snap(uuid, 40);
+    return { ...s, usage: { ...s.usage!, seven_day_opus: { utilization: used, resets_at: nowSec() + 2 * 86400 } } };
+  };
+
+  it('names the window and counts only the sessions launched on that model', () => {
+    sessions.set([
+      session('mac', 'a', { account_uuid: SILVESTER.uuid, launch_model: 'opus' }),
+      session('mac', 'b', { account_uuid: SILVESTER.uuid, launch_model: 'sonnet' }),
+      session('mac', 'c', { account_uuid: SILVESTER.uuid }),
+    ]);
+    stop = startLimitToasts();
+    accountUsage.set({ [SILVESTER.uuid]: opus(SILVESTER.uuid, 80) });
+    expect(get(toasts)).toEqual([]);
+    accountUsage.set({ [SILVESTER.uuid]: opus(SILVESTER.uuid, 100) });
+    const [t] = get(toasts);
+    expect(t.message).toBe('tech.silvester hit the weekly Opus limit');
+    expect(t.sub).toMatch(/^1 session paused until /);
+    // Held: said once.
+    accountUsage.set({ [SILVESTER.uuid]: { ...opus(SILVESTER.uuid, 100), fetched_at: nowSec() + 1 } });
+    expect(get(toasts)).toHaveLength(1);
+  });
+});
+
 describe('limitHitLines / newlyLimited', () => {
   it('names the window and says when it resets, or that it does not know', () => {
     const now = 1_000_000;

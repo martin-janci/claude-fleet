@@ -111,7 +111,7 @@
       return;
     }
     const next = r.value.headroom
-      ? nextReset(r.value.headroom, get(accountUsage), Math.floor(Date.now() / 1000))
+      ? nextReset(r.value.headroom, get(accountUsage), Math.floor(Date.now() / 1000), sess.launch_model)
       : null;
     push({
       kind: 'info',

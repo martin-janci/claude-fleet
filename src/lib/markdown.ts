@@ -56,7 +56,21 @@ export function safeHref(raw: string): string | null {
 // `\s*([^`\s]*)[^`]*$` tail lets two runs match the same spaces, so a long
 // line of spaces ending in a backtick took quadratic time (~1 s at 40k).
 const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
+// Only the prefix is a pattern; the text and a closing `#` run are cut in
+// code. A lazy `(.*?)` before `(?:[ \t]+#+)?[ \t]*$` rescanned a long run of
+// spaces from every position (review r4 w10-10: 1.3 s at 40k).
+const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+|$)/;
+
+/** An ATX heading: its level and text (a closing `#` run dropped), or null. */
+function headingOf(line: string): { level: number; text: string } | null {
+  const m = HEADING.exec(line);
+  if (!m) return null;
+  let text = line.slice(m[0].length).trimEnd();
+  let end = text.length;
+  while (end > 0 && text[end - 1] === '#') end--;
+  if (end < text.length && (end === 0 || text[end - 1] === ' ' || text[end - 1] === '\t')) text = text.slice(0, end).trimEnd();
+  return { level: m[1].length, text };
+}
 const HR = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 const QUOTE = /^ {0,3}> ?(.*)$/;
 const LIST_ITEM = /^( *)([-*+]|\d{1,9}[.)])[ \t]+(.*)$/;
@@ -76,9 +90,45 @@ function isBlank(line: string): boolean {
   return line.trim() === '';
 }
 
-/** A line that starts a new block and therefore ends a paragraph. */
+/** A line that starts a new block. */
 function startsBlock(line: string): boolean {
   return fenceOpen(line) !== null || HEADING.test(line) || HR.test(line) || QUOTE.test(line) || LIST_ITEM.test(line);
+}
+
+/** A line that ends the paragraph above it. An ordered item does so only
+ *  when it starts at 1 (CommonMark, and the phone's parser): "…back in\n2021.
+ *  It was a good year." is one paragraph (review r4 w10-9). Inside a list
+ *  the next item, whatever its number, still starts a block (`parseList`). */
+function interruptsParagraph(line: string): boolean {
+  if (!startsBlock(line)) return false;
+  const item = LIST_ITEM.exec(line);
+  if (!item || !/\d/.test(item[2])) return true;
+  return parseInt(item[2], 10) === 1 || fenceOpen(line) !== null || HEADING.test(line) || HR.test(line) || QUOTE.test(line);
+}
+
+/** A table starts at `i`: a row with a `|` and a separator row under it. */
+function tableAt(lines: string[], i: number): boolean {
+  return lines[i].includes('|') && i + 1 < lines.length && TABLE_SEP.test(lines[i + 1].trim()) && lines[i + 1].includes('-');
+}
+
+/** A bare URL without the sentence punctuation after it. A closing `)` is
+ *  kept while it has its `(` inside the URL (a Wikipedia link). */
+function trimBareUrl(url: string): string {
+  let end = url.length;
+  let open = 0;
+  let close = 0;
+  for (const ch of url) {
+    if (ch === '(') open++;
+    else if (ch === ')') close++;
+  }
+  while (end > 0 && /[.,;:!?'")\]]/.test(url[end - 1])) {
+    if (url[end - 1] === ')') {
+      if (close <= open) break;
+      close--;
+    }
+    end--;
+  }
+  return url.slice(0, end);
 }
 
 export function parseMarkdown(src: string): Block[] {
@@ -113,9 +163,9 @@ function parseBlocks(lines: string[], depth: number): Block[] {
       continue;
     }
 
-    const heading = HEADING.exec(line);
+    const heading = headingOf(line);
     if (heading) {
-      out.push({ t: 'heading', level: heading[1].length, c: parseInline(heading[2] ?? '') });
+      out.push({ t: 'heading', level: heading.level, c: parseInline(heading.text) });
       i++;
       continue;
     }
@@ -135,14 +185,15 @@ function parseBlocks(lines: string[], depth: number): Block[] {
       continue;
     }
 
-    if (line.includes('|') && i + 1 < lines.length && TABLE_SEP.test(lines[i + 1].trim()) && lines[i + 1].includes('-')) {
+    if (tableAt(lines, i)) {
       i = parseTable(lines, i, out);
       continue;
     }
 
     const para: string[] = [line.trim()];
     i++;
-    while (i < lines.length && !isBlank(lines[i]) && !startsBlock(lines[i])) {
+    // A table may follow a text line with no blank line between (w10-9).
+    while (i < lines.length && !isBlank(lines[i]) && !interruptsParagraph(lines[i]) && !tableAt(lines, i)) {
       para.push(lines[i].trim());
       i++;
     }
@@ -408,7 +459,7 @@ export function parseInline(src: string): Inline[] {
     if (c === 'h' && (i === 0 || /[\s(]/.test(src[i - 1]))) {
       const m = BARE_URL.exec(src.slice(i));
       if (m) {
-        const url = m[0].replace(/[.,;:!?'")\]]+$/, '');
+        const url = trimBareUrl(m[0]);
         if (safeHref(url)) {
           flush();
           out.push({ t: 'link', href: url, c: [{ t: 'text', v: url }] });

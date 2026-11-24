@@ -16,6 +16,26 @@ describe('Motion pref', () => {
     }
   });
 
+  // r4 w04-5: the pref another window wrote is followed, on <html> too.
+  it('follows a Motion pick made in another window (review w14-2)', () => {
+    const stop = initMotion();
+    try {
+      motionPref.set('full');
+      window.dispatchEvent(new StorageEvent('storage', { key: 'cf:pref:ui.motion', newValue: '"off"' }));
+      expect(get(motionPref)).toBe('off');
+      expect(document.documentElement.getAttribute('data-motion')).toBe('off');
+      // Written back by the store's own subscriber: the same value, no loop.
+      expect(localStorage.getItem('cf:pref:ui.motion')).toBe('"off"');
+      window.dispatchEvent(new StorageEvent('storage', { key: 'cf:pref:ui.motion', newValue: '"sideways"' }));
+      expect(get(motionPref)).toBe('off');
+    } finally {
+      stop();
+    }
+    // Stopped: another window's write is no longer followed.
+    window.dispatchEvent(new StorageEvent('storage', { key: 'cf:pref:ui.motion', newValue: '"reduced"' }));
+    expect(get(motionPref)).toBe('off');
+  });
+
   it('writes the effective level to <html data-motion> and keeps it live', () => {
     const stop = initMotion();
     try {

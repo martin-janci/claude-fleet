@@ -72,6 +72,26 @@ export function provisionHost(alias: string): Promise<Result<HostProvisionResult
   return invokeCmd<HostProvisionResult[]>('provision_hosts', { rotate: false, host: alias });
 }
 
+/** What a `provisioned` row's detail opens with (`provision_hosts` in
+ *  service/provision.rs): the stock sentence of a content-only run and of a
+ *  full one. Anything after it is a warning the run left. */
+const PROVISION_DONE = [
+  'skills, CLAUDE.md block and hooks refreshed (no restart needed)',
+  'restart Claude on this host to load the MCP server',
+];
+
+/** PURE: the warning in a `provisioned` row's detail, or null when it holds
+ *  only the stock sentence (review r4 w03-2). */
+export function provisionWarning(detail: string | null | undefined): string | null {
+  const d = (detail ?? '').trim();
+  if (d === '') return null;
+  for (const done of PROVISION_DONE) {
+    if (d === done) return null;
+    if (d.startsWith(`${done}; `)) return d.slice(done.length + 2);
+  }
+  return d;
+}
+
 // --- per-host tokens ---------------------------------------------------------
 
 /** A host's control-API token row, minus the token itself. Mirrors the
