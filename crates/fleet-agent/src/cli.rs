@@ -428,10 +428,7 @@ mod tests {
 
     #[test]
     fn uninstall_parses_its_scope() {
-        match parse(&["fleet-agent", "uninstall", "--user"])
-            .unwrap()
-            .command
-        {
+        match parse(&["uninstall", "--user"]).unwrap().command {
             Command::Uninstall(a) => assert!(a.user && a.config.is_none()),
             other => panic!("{other:?}"),
         }

@@ -133,8 +133,37 @@ use crate::store::now_unix as unix_now;
 /// read only at shutdown, so reconcile stopped for good while the process
 /// (and its readiness heartbeat) stayed up.
 pub(crate) async fn run_cancellable_tick<F, Fut>(
+    ticker: tokio::time::Interval,
+    token: CancellationToken,
+    on_tick: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    tick_loop(ticker, token, None, on_tick).await
+}
+
+/// [`run_cancellable_tick`] for a pass that reports a loop's health: a
+/// panicked pass is also [`report`](service::loops::report)ed as `name`'s
+/// error (`next_in` the next look), so the Automation view does not keep the
+/// loop's last "ok" while every pass dies (review w17-3).
+pub(crate) async fn run_reporting_tick<F, Fut>(
+    ticker: tokio::time::Interval,
+    token: CancellationToken,
+    name: &'static str,
+    next_in: Option<Duration>,
+    on_tick: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    tick_loop(ticker, token, Some((name, next_in)), on_tick).await
+}
+
+async fn tick_loop<F, Fut>(
     mut ticker: tokio::time::Interval,
     token: CancellationToken,
+    report_as: Option<(&'static str, Option<Duration>)>,
     mut on_tick: F,
 ) where
     F: FnMut() -> Fut,
@@ -149,8 +178,13 @@ pub(crate) async fn run_cancellable_tick<F, Fut>(
             }
             _ = ticker.tick() => {}
         }
-        // A panicked pass is logged; the next tick runs another.
-        let _ = crate::service::loops::caught("the tick pass", on_tick()).await;
+        // A panicked pass is logged (and reported, for a reporting loop);
+        // the next tick runs another.
+        if let Err(why) = crate::service::loops::caught("the tick pass", on_tick()).await {
+            if let Some((name, next_in)) = report_as {
+                service::loops::report(name, Err::<(), _>(why), next_in);
+            }
+        }
     }
 }
 
@@ -198,7 +232,7 @@ pub fn spawn_reconcile_tick(
         // Drop missed ticks rather than firing them back-to-back after a slow
         // pass (the default Burst behaviour would defeat the overlap guard).
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        run_cancellable_tick(ticker, token, || {
+        run_reporting_tick(ticker, token, "reconcile", Some(period), || {
             let store = &store;
             let quick = &quick;
             let ssh = &ssh;
@@ -404,47 +438,53 @@ pub fn spawn_account_usage_tick(
     crate::rt::spawn(async move {
         let mut ticker = tokio::time::interval(USAGE_POLL_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        run_cancellable_tick(ticker, token, || {
-            let store = &store;
-            let ssh = &ssh;
-            let cache = &cache;
-            let bus = &bus;
-            let poller = &poller;
-            async move {
-                let next = Some(USAGE_POLL_INTERVAL);
-                let hosts: Vec<HostRow> = match store.lock() {
-                    Ok(s) => match s.list_hosts() {
-                        // One hidden/local rule for every host loop (hub-ops F6).
-                        Ok(h) => crate::service::hosts::active_hosts(
-                            h,
-                            crate::service::hub::local_host_enabled(),
-                        ),
+        run_reporting_tick(
+            ticker,
+            token,
+            "account_usage",
+            Some(USAGE_POLL_INTERVAL),
+            || {
+                let store = &store;
+                let ssh = &ssh;
+                let cache = &cache;
+                let bus = &bus;
+                let poller = &poller;
+                async move {
+                    let next = Some(USAGE_POLL_INTERVAL);
+                    let hosts: Vec<HostRow> = match store.lock() {
+                        Ok(s) => match s.list_hosts() {
+                            // One hidden/local rule for every host loop (hub-ops F6).
+                            Ok(h) => crate::service::hosts::active_hosts(
+                                h,
+                                crate::service::hub::local_host_enabled(),
+                            ),
+                            Err(e) => {
+                                tracing::warn!("account usage tick: list_hosts failed: {e}");
+                                service::loops::report("account_usage", Err(e), next);
+                                return;
+                            }
+                        },
                         Err(e) => {
-                            tracing::warn!("account usage tick: list_hosts failed: {e}");
-                            service::loops::report("account_usage", Err(e), next);
+                            tracing::warn!("account usage tick: store mutex poisoned: {e}");
+                            service::loops::report("account_usage", Err(e.to_string()), next);
                             return;
                         }
-                    },
-                    Err(e) => {
-                        tracing::warn!("account usage tick: store mutex poisoned: {e}");
-                        service::loops::report("account_usage", Err(e.to_string()), next);
-                        return;
-                    }
-                };
-                let ssh_dyn: Arc<dyn SshExec> = Arc::clone(ssh) as Arc<dyn SshExec>;
-                // Fire-and-forget: the handles are only useful to tests, which
-                // call `account_usage_poll::poll_due_accounts` directly.
-                let _handles = account_usage_poll::poll_due_accounts(
-                    poller,
-                    Arc::new(hosts),
-                    ssh_dyn,
-                    Arc::clone(cache),
-                    Arc::clone(bus),
-                    Some(Arc::clone(store)),
-                );
-                service::loops::report("account_usage", Ok::<_, String>(()), next);
-            }
-        })
+                    };
+                    let ssh_dyn: Arc<dyn SshExec> = Arc::clone(ssh) as Arc<dyn SshExec>;
+                    // Fire-and-forget: the handles are only useful to tests, which
+                    // call `account_usage_poll::poll_due_accounts` directly.
+                    let _handles = account_usage_poll::poll_due_accounts(
+                        poller,
+                        Arc::new(hosts),
+                        ssh_dyn,
+                        Arc::clone(cache),
+                        Arc::clone(bus),
+                        Some(Arc::clone(store)),
+                    );
+                    service::loops::report("account_usage", Ok::<_, String>(()), next);
+                }
+            },
+        )
         .await;
     })
 }
@@ -520,6 +560,40 @@ mod tests {
             2,
             "the pass after the panicking one must still run"
         );
+    }
+
+    /// Review w17-3: a reporting loop's panicked pass is its loop's error,
+    /// not only a log line, and the loop still goes on.
+    #[tokio::test(start_paused = true)]
+    async fn a_reporting_tick_reports_a_panicked_pass() {
+        let failures = || {
+            crate::service::loops::registry()
+                .snapshot()
+                .into_iter()
+                .find(|r| r.name == "account_usage")
+                .expect("account_usage is a loop")
+        };
+        let before = failures().failures;
+        let token = CancellationToken::new();
+        let ticker = tokio::time::interval(Duration::from_millis(1));
+        let ran = Arc::new(AtomicUsize::new(0));
+        let ran2 = Arc::clone(&ran);
+        let token2 = token.clone();
+        run_reporting_tick(ticker, token, "account_usage", None, move || {
+            let ran = Arc::clone(&ran2);
+            let token = token2.clone();
+            async move {
+                if ran.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("first pass fails");
+                }
+                token.cancel();
+            }
+        })
+        .await;
+        assert_eq!(ran.load(Ordering::SeqCst), 2);
+        let row = failures();
+        assert!(row.failures > before, "the panic counts as a failure");
+        assert_eq!(row.last_error.as_deref(), Some("the tick pass panicked"));
     }
 
     /// (b) Cancelling WHILE a pass is running must let that pass finish

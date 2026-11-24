@@ -1579,6 +1579,9 @@ fn every_feature_that_sends_free_text_frames_it_as_quoted_data() {
 /// there (and in `reply_text_words`) or this fails.
 #[test]
 fn the_reply_text_consent_names_every_use_it_releases() {
+    let unassigned =
+        crate::service::settings::spec(crate::service::settings::DECIDE_JEV_UNASSIGNED_REPLY)
+            .unwrap();
     for f in Feature::ALL.iter().copied() {
         let words = f.reply_text_words();
         assert_eq!(
@@ -1592,10 +1595,13 @@ fn the_reply_text_consent_names_every_use_it_releases() {
         );
         if let Some(w) = words {
             assert!(REPLY_TEXT_USES.contains(w), "{f:?}: {w}");
+            assert!(unassigned.help.contains(w), "{f:?}: {}", unassigned.help);
         }
     }
-    let spec =
-        crate::service::settings::spec(crate::service::settings::DECIDE_JEV_UNASSIGNED_REPLY)
-            .unwrap();
-    assert!(spec.help.contains(REPLY_TEXT_USES), "{}", spec.help);
+    // The help names every use case (it is capped at one short paragraph);
+    // the confirmation turning it on says what each one sends.
+    let crate::service::settings::Danger::Confirm(confirm) = unassigned.danger else {
+        panic!("{}: turning it on is confirmed", unassigned.key);
+    };
+    assert!(confirm.contains(REPLY_TEXT_USES), "{confirm}");
 }

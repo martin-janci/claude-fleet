@@ -2203,11 +2203,9 @@ pub const SPECS: &[Spec] = &[
         "false",
         Kind::Bool,
         "Jev: send unassigned replies",
-        concat!(
-            "Also send Claude's own text from sessions that belong to no organisation, on top of sending unassigned sessions at all, for each of these use cases that is on: ",
-            crate::service::decide::reply_text_uses!(),
-            "."
-        ),
+        // Every use case by name (review w12-1); what each one sends is in
+        // the confirmation below, longer than a setting's help may be.
+        "Also send Claude's own text from sessions in no organisation, on top of the sessions themselves, for whichever of the turn outcome, a routine run's outcome, the summary check, mission triage, the duplicate check and quick answer is on. The confirmation says what each sends.",
     )
     .tags(&[Tag::Experimental, Tag::Network])
     .danger(concat!(

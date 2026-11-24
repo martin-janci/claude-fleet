@@ -1310,19 +1310,25 @@ pub(crate) mod git_fixture {
 
     /// Run `body` with `$root` set to `root`, as `run_git` would on a host.
     pub fn run_body(root: &Path, body: &str) -> std::process::Output {
-        let script = format!("set -e\nroot={}\n{body}", quote(&root.to_string_lossy()));
-        let out = crate::proc::std_command("bash")
-            .arg("-c")
-            .arg(script)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .output()
-            .expect("run bash");
+        let out = run_body_unchecked(root, body);
         assert!(
             out.status.success(),
             "body failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
         out
+    }
+
+    /// [`run_body`] for a body that is meant to fail: the output, whatever
+    /// its status.
+    pub fn run_body_unchecked(root: &Path, body: &str) -> std::process::Output {
+        let script = format!("set -e\nroot={}\n{body}", quote(&root.to_string_lossy()));
+        crate::proc::std_command("bash")
+            .arg("-c")
+            .arg(script)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("run bash")
     }
 
     /// `origin` (bare) and a clone-like `work` repo:
@@ -1730,7 +1736,7 @@ mod tests {
         assert_eq!(out.stdout.len(), MAX_DIFF_BYTES + 1);
         let (_, _, truncated) = diff_from_bytes(&out.stdout);
         assert!(truncated);
-        let bad = git_fixture::run_body(dir, &commit_diff_body("deadbeef", "a.txt"));
+        let bad = git_fixture::run_body_unchecked(dir, &commit_diff_body("deadbeef", "a.txt"));
         assert!(!bad.status.success(), "{bad:?}");
     }
 

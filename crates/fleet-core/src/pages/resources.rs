@@ -1766,6 +1766,7 @@ mod tests {
                 "debug_device_logs",
                 "debug_device_screenshot",
                 "disable_person",
+                "enable_person",
                 "env_var_set",
                 "env_var_unset",
                 "env_vars_list",

@@ -2164,7 +2164,8 @@ async fn recreate_reclones_a_missing_remote_checkout_into_the_resolved_root() {
         "{script}"
     );
     assert!(
-        script.contains("if [ ! -d '/home/dev/projects/github.com/o/pos-frontend'/.git ]"),
+        // `-e`, not `-d`: a linked checkout's `.git` is a file (review w10-9).
+        script.contains("if [ ! -e '/home/dev/projects/github.com/o/pos-frontend'/.git ]"),
         "{script}"
     );
     assert!(!script.contains("worktree add"), "{script}");

@@ -4168,7 +4168,9 @@ mod tests {
         {
             let s = store.lock().unwrap();
             s.insert_host("h3", Some("h3")).unwrap();
-            s.upsert_host_token("h3", TOKEN).unwrap();
+            // Its own token: `host_tokens.token` is unique across hosts.
+            s.upsert_host_token("h3", "tok-h3-0123456789abcdef")
+                .unwrap();
         }
         let warning = provision_content_only(&store, &fresh_host(), "h3", &base())
             .await
@@ -4869,9 +4871,13 @@ mod tests {
             s.set_host_hidden("hid", true).unwrap();
         }
         let fake = fresh_host();
+        // It fails before any file carries its new token (the MCP entry's
+        // `~/.claude.json` does not parse): a failure after that commits the
+        // token (review w13-2, `rotate_mints_a_new_token_*` below); this one keeps
+        // none.
         fake.on_host(
             "broken",
-            Match::script(&remote_read_script(SETTINGS_JSON)),
+            Match::script(&remote_read_script(CLAUDE_JSON)),
             Reply::ok("not json"),
         );
         let tunnels = quiet_tunnels();

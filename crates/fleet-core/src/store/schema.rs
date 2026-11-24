@@ -6644,7 +6644,12 @@ mod tests {
                 "created_at",
                 // Liveness, left out of auth_epoch_control_tokens_update.
                 "last_used_at",
-                "revoked_at"
+                "revoked_at",
+                // Migration 230: set at insert and never changed, and not
+                // part of the caller a token resolves to; disabling its
+                // person revokes the token through `revoked_at`, which the
+                // trigger knows. Left out like last_used_at.
+                "created_by_person"
             ],
             "control_tokens changed: add the column to auth_epoch_control_tokens_update \
              (migration 157) unless it is liveness-only like last_used_at"

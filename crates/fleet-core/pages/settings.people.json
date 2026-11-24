@@ -21,6 +21,10 @@
         {
           "type": "field",
           "key": "owner"
+        },
+        {
+          "type": "field",
+          "key": "state"
         }
       ]
     },

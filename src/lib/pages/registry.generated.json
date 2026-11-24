@@ -3692,7 +3692,7 @@
         "message": "Claude's own text from sessions outside every organisation will be sent to TypeSafe too: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines), mission triage (a worker's own summary), the duplicate check (an agent's reasons for a proposed task) and quick answer (an agent's reasons on a chat form)."
       },
       "default": "false",
-      "help": "Also send Claude's own text from sessions that belong to no organisation, on top of sending unassigned sessions at all, for each of these use cases that is on: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines), mission triage (a worker's own summary), the duplicate check (an agent's reasons for a proposed task) and quick answer (an agent's reasons on a chat form).",
+      "help": "Also send Claude's own text from sessions in no organisation, on top of the sessions themselves, for whichever of the turn outcome, a routine run's outcome, the summary check, mission triage, the duplicate check and quick answer is on. The confirmation says what each sends.",
       "key": "decide.jev.unassigned_reply",
       "kind": {
         "type": "bool"
@@ -6490,6 +6490,10 @@
             },
             {
               "key": "owner",
+              "type": "field"
+            },
+            {
+              "key": "state",
               "type": "field"
             }
           ],

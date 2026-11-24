@@ -415,10 +415,30 @@ mod tests {
         let mut raw = Vec::new();
         for f in files {
             let text = std::fs::read_to_string(&f).unwrap();
-            for (at, _) in text.match_indices("crate::rt::spawn(async move {") {
-                let body: String = text[at..].lines().take(40).collect::<Vec<_>>().join("\n");
-                let body = body.split("\n    });").next().unwrap_or(&body);
-                if body.contains("loops::report(") && !body.contains("caught") {
+            for (at, m) in text.match_indices("crate::rt::spawn(async move {") {
+                // The spawned block itself, to its matching brace: what runs
+                // after the spawn returns is not in the task.
+                let open = at + m.len();
+                let mut depth = 1;
+                let mut end = text.len();
+                for (i, c) in text[open..].char_indices() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => depth -= 1,
+                        _ => {}
+                    }
+                    if depth == 0 {
+                        end = open + i;
+                        break;
+                    }
+                }
+                let body = &text[open..end];
+                // A tick loop reports through `run_reporting_tick`, which
+                // catches each pass and reports its panic.
+                if body.contains("loops::report(")
+                    && !body.contains("caught")
+                    && !body.contains("run_reporting_tick(")
+                {
                     raw.push(format!("{}", f.display()));
                 }
             }

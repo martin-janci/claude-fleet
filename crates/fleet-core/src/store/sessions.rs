@@ -952,12 +952,15 @@ impl Store {
     /// which has not run a prompt yet: also forgets the conversation id and
     /// transcript the creating reconcile pass may have paired it with while
     /// the row still said Claude (a terminal `claude` in the same checkout,
-    /// review 23b w01-2). The agent's own id comes from its next pass.
+    /// review 23b w01-2), and the status that pass took from that
+    /// conversation. The agent's own id and status come from its next pass.
     pub fn set_new_session_agent(&self, id: i64, agent: &str) -> Result<(), rusqlite::Error> {
         self.set_session_agent(id, agent)?;
         let changed = self.conn.execute(
-            "UPDATE sessions SET claude_session_id = NULL, transcript_path = NULL \
-             WHERE id = ?1 AND (claude_session_id IS NOT NULL OR transcript_path IS NOT NULL)",
+            "UPDATE sessions SET claude_session_id = NULL, transcript_path = NULL, \
+               claude_status = NULL \
+             WHERE id = ?1 AND (claude_session_id IS NOT NULL OR transcript_path IS NOT NULL \
+               OR claude_status IS NOT NULL)",
             rusqlite::params![id],
         )?;
         if changed > 0 {
