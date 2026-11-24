@@ -1411,9 +1411,24 @@ export function countItems(conv: Conversation | null): number {
   return conv.turns.reduce((n, t) => n + (t.prompt !== null ? 1 : 0) + t.items.length, 0);
 }
 
-/** How many items a poll added. Never negative: a re-read that trimmed
- *  older turns is not "new" content. */
+/** How many items a poll added, counted from the tail: the growth of the
+ *  turn that was last before, plus every turn after it. Counting the whole
+ *  window (review r4 w10-7) gave 0 as soon as a new turn pushed an older,
+ *  longer one out of it. Never negative: a re-read that trimmed older turns
+ *  is not "new" content. */
 export function newItemCount(prev: Conversation | null, next: Conversation): number {
+  const size = (t: ConvTurn) => (t.prompt !== null ? 1 : 0) + t.items.length;
+  const last = prev?.turns[prev.turns.length - 1];
+  const anchor = last ? turnAnchor(last) : null;
+  if (last && anchor !== null) {
+    for (let j = next.turns.length - 1; j >= 0; j--) {
+      if (turnAnchor(next.turns[j]) !== anchor) continue;
+      let n = Math.max(0, size(next.turns[j]) - size(last));
+      for (let k = j + 1; k < next.turns.length; k++) n += size(next.turns[k]);
+      return n;
+    }
+  }
+  // No turn to line up on (nothing before, or no anchor): the window's growth.
   return Math.max(0, countItems(next) - countItems(prev));
 }
 

@@ -2602,6 +2602,7 @@ impl FleetTools {
                     submit,
                     keys: None,
                     expect: None,
+                    client_msg_id: None,
                 },
                 &self.store,
                 &self.ssh,

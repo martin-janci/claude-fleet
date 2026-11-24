@@ -2266,6 +2266,29 @@ describe('NewSessionDialog in the New layout', () => {
     }
   });
 
+  // r4 w06-5: the account is forbidden for the org the HOST is filed under;
+  // the project is in no org. The hub refuses it (`E_ACCOUNT_FORBIDDEN`), so
+  // the dialog must not offer it.
+  it('never defaults to a login on an account the chosen host\'s org forbids', async () => {
+    accounts.set([
+      { uuid: 'acc-spare', email: null, display_name: null, organization_name: null, organization_uuid: null, seat_tier: null, last_seen_at: null, nickname: null, has_extra_usage: false, forbidden_org_ids: [9] },
+    ]);
+    const before = get(hosts);
+    hosts.update((hs) => hs.map((h) => (h.alias === 'local' ? { ...h, org_id: 9 } : h)));
+    try {
+      render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+      const select = (await vi.waitFor(() => screen.getByTestId('launch-account'))) as HTMLSelectElement;
+      await vi.waitFor(() => expect(calls('check_account_headroom').length).toBeGreaterThan(0));
+      await tick();
+      expect(select.value).toBe('');
+      const spare = Array.from(select.options).find((o) => o.value === 'spare') as HTMLOptionElement;
+      expect(spare.disabled).toBe(true);
+    } finally {
+      accounts.set([]);
+      hosts.set(before);
+    }
+  });
+
   it('offers Claude Code and Shell; Codex only where it is on the PATH, Agy as coming', async () => {
     const { container } = render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());

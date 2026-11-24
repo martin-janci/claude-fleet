@@ -57,7 +57,7 @@
   import TerminalStrip from './TerminalStrip.svelte';
   import ContextHelp from './ContextHelp.svelte';
   import { askContextHelp, helpModel, screenHistory } from './context_help';
-  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
+  import { fleetSettings, SETTING_KEYS, hubGated } from './fleet_settings';
   import { AGENT_LABELS } from './row_groups';
   import { agentTabLabel, agentTabName, sessionView } from './prefs';
   import Self from './TerminalView.svelte';
@@ -370,7 +370,7 @@
   // followed by Enter.
   let helpOpen = $state(false);
   /** Writing help's "Context help" toggle, off by default. */
-  const helpOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workContextHelp));
+  const helpOn = $derived($hubGated(SETTING_KEYS.workContextHelp));
   $effect(() => {
     void activeShell;
     helpOpen = false;

@@ -224,6 +224,7 @@ describe('Steer: the composer routes to Control', () => {
         tmux_name: 'fleet-operator',
         prompt: 'About mission #4 "Receipts export":\n\nRetry step 2 on htz',
         keys: null,
+        client_msg_id: expect.any(String),
       },
     });
     // Control follows the mission from now on (w04-11).

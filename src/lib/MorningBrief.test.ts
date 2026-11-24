@@ -6,7 +6,7 @@ import { tick } from 'svelte';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import MorningBrief from './MorningBrief.svelte';
-import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
+import { fleetSettings, hubSettingKeys, SETTING_DEFAULTS } from './fleet_settings';
 
 async function flush() {
   for (let i = 0; i < 10; i++) await tick();
@@ -32,5 +32,19 @@ describe('MorningBrief', () => {
     await flush();
     expect(screen.getByTestId('morning-brief-at')).toBeTruthy();
     expect(screen.queryByTestId('morning-brief-draft-btn')).toBeNull();
+  });
+
+  // r4 w03-6: a hub older than the toggle serves the brief and has no key.
+  it('is offered when the hub answered without the toggle', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS });
+    hubSettingKeys.set(new Set(['work.prompt_tune']));
+    vi.mocked(invoke).mockImplementation(async () => ({ draft: null }));
+    try {
+      render(MorningBrief);
+      await flush();
+      expect(screen.getByTestId('morning-brief-draft-btn')).toBeTruthy();
+    } finally {
+      hubSettingKeys.set(null);
+    }
   });
 });

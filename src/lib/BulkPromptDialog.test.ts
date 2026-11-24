@@ -57,8 +57,8 @@ describe('BulkPromptDialog', () => {
     expect(screen.getByTestId('bulk-sent-1')).toHaveTextContent('sent');
     const sent = vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'queue_prompt').map((c) => (c[1] as { args: unknown }).args);
     expect(sent).toEqual([
-      { session_id: 1, prompt: 'status?' },
-      { session_id: 2, prompt: 'status?' },
+      { session_id: 1, prompt: 'status?', client_msg_id: expect.any(String) },
+      { session_id: 2, prompt: 'status?', client_msg_id: expect.any(String) },
     ]);
     expect(vi.mocked(invoke).mock.calls.some((c) => c[0] === 'send_prompt')).toBe(false);
     expect(screen.getByTestId('bulk-prompt-send')).toHaveTextContent('Done');

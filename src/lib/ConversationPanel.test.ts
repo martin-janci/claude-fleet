@@ -61,7 +61,7 @@ import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { myGrants, myPersonId, type GrantLevel } from './access';
 import { hubConnection } from './hub_connection';
 import { invoke } from '@tauri-apps/api/core';
-import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
+import { fleetSettings, settingsUnreadable, SETTING_DEFAULTS } from './fleet_settings';
 import type { PickedFile } from './attachments';
 import { outbox } from './outbox';
 import { resetHeldForTests } from './composer_hold';
@@ -82,6 +82,8 @@ const REMOTE: HubStatus = {
 
 const mockedConv = sessionConversation as unknown as ReturnType<typeof vi.fn>;
 const mockedSend = sendPrompt as unknown as ReturnType<typeof vi.fn>;
+// Every outbox send carries the message's `client_msg_id` (r4 w09-2).
+const SENT_ID = { clientMsgId: expect.any(String) };
 const mockedAct = sessionActivity as unknown as ReturnType<typeof vi.fn>;
 const mockedList = listConversations as unknown as ReturnType<typeof vi.fn>;
 const mockedDetail = toolDetail as unknown as ReturnType<typeof vi.fn>;
@@ -775,7 +777,7 @@ describe('ConversationPanel composer', () => {
     await settle();
 
     // On the wire, and already on screen: the box is empty and usable.
-    expect(mockedSend).toHaveBeenCalledWith('trn', 'dev-x', 'run the tests');
+    expect(mockedSend).toHaveBeenCalledWith('trn', 'dev-x', 'run the tests', SENT_ID);
     const bubble = screen.getByTestId('conv-outgoing');
     expect(bubble.textContent).toContain('run the tests');
     expect(bubble.dataset.state).toBe('sending');
@@ -848,7 +850,7 @@ describe('ConversationPanel composer', () => {
     expect(button.disabled).toBe(false);
     await fireEvent.click(button);
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'hello');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'hello', SENT_ID);
   });
 
   it('Shift+Enter does not send', async () => {
@@ -906,7 +908,7 @@ describe('ConversationPanel composer', () => {
     await view.rerender({ session: idle, visible: true, blockWhileBusy: true });
     await settle();
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'while you work');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'while you work', SENT_ID);
     expect(screen.queryByTestId('conv-held')).toBeNull();
   });
 
@@ -938,7 +940,7 @@ describe('ConversationPanel composer', () => {
     await back.rerender({ session: idle, visible: true, blockWhileBusy: true });
     await settle();
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'keep me');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'keep me', SENT_ID);
   });
 
   it('a typed prompt is not sent into a dialog; it stays in the box with a note (w13-3)', async () => {
@@ -1156,7 +1158,7 @@ describe('ConversationPanel composer', () => {
     expect((screen.getByTestId('conv-composer-send') as HTMLButtonElement).disabled).toBe(false);
     await fireEvent.keyDown(box, { key: 'Enter' });
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'queue this');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'queue this', SENT_ID);
   });
 });
 
@@ -1212,7 +1214,7 @@ describe('ConversationPanel model / effort pickers', () => {
     expect(pick.options[0].textContent).toBe('opus 5.5');
     await fireEvent.change(pick, { target: { value: 'sonnet' } });
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/model sonnet');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/model sonnet', SENT_ID);
     expect(pick.value).toBe('');
   });
 
@@ -1221,7 +1223,7 @@ describe('ConversationPanel model / effort pickers', () => {
     const pick = screen.getByTestId('conv-effort-pick') as HTMLSelectElement;
     await fireEvent.change(pick, { target: { value: 'high' } });
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/effort high');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/effort high', SENT_ID);
     expect(pick.value).toBe('high');
   });
 
@@ -1348,7 +1350,7 @@ describe('ConversationPanel slash commands', () => {
     expect(box.value).toBe('/clear');
     await fireEvent.keyDown(box, { key: 'Enter' });
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/clear');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/clear', SENT_ID);
   });
 
   it('Enter on an exact name sends it straight away', async () => {
@@ -1356,7 +1358,7 @@ describe('ConversationPanel slash commands', () => {
     expect(screen.getByTestId('conv-slash-menu')).toBeTruthy();
     await fireEvent.keyDown(box, { key: 'Enter' });
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/clear');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/clear', SENT_ID);
   });
 
   it('arrows move the highlight and Tab accepts the highlighted command', async () => {
@@ -1396,7 +1398,7 @@ describe('ConversationPanel slash commands', () => {
     // Enter now sends the literal draft rather than completing
     await fireEvent.keyDown(box, { key: 'Enter' });
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/cle');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/cle', SENT_ID);
   });
 });
 
@@ -1431,7 +1433,7 @@ describe('ConversationPanel quick actions', () => {
     await mount({ host_alias: 'trn', tmux_name: 'dev-x' });
     await fireEvent.click(screen.getByTestId('conv-chip'), { shiftKey: true });
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('trn', 'dev-x', '/status');
+    expect(mockedSend).toHaveBeenCalledWith('trn', 'dev-x', '/status', SENT_ID);
     expect((screen.getByTestId('conv-composer-input') as HTMLTextAreaElement).value).toBe('');
   });
 
@@ -1448,7 +1450,7 @@ describe('ConversationPanel quick actions', () => {
     await fireEvent.input(box);
     await fireEvent.click(chip);
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('trn', 'dev-x', 'go on');
+    expect(mockedSend).toHaveBeenCalledWith('trn', 'dev-x', 'go on', SENT_ID);
   });
 
   it('an auto-send chip is named as one for a screen reader', async () => {
@@ -1515,7 +1517,7 @@ describe('ConversationPanel quick actions', () => {
     await fireEvent.input(box);
     await fireEvent.click(screen.getByTestId('conv-chip-suggestion'), { shiftKey: true });
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'run the tests');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'run the tests', SENT_ID);
     // The row still reads idle with the proposal: no second offer to send.
     expect(screen.queryByTestId('conv-chip-suggestion')).toBeNull();
     expect(box.placeholder).not.toContain('run the tests');
@@ -2437,6 +2439,35 @@ describe('ConversationPanel new-item count', () => {
     await fireEvent.scroll(scroller);
     expect(screen.getByTestId('conv-latest').textContent).toContain('Latest');
   });
+
+  // r4 w10-8: where the reader is counts when the answer lands, not when
+  // the read began.
+  it('a reader who scrolled up while a read was in flight is not pulled back down', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const scroller = screen.getByTestId('conv-scroller');
+    Object.defineProperty(scroller, 'scrollHeight', { value: 2000, configurable: true });
+    Object.defineProperty(scroller, 'clientHeight', { value: 500, configurable: true });
+    scroller.scrollTop = 1500;
+    await fireEvent.scroll(scroller);
+    expect(screen.queryByTestId('conv-latest')).toBeNull();
+
+    const grown = conv();
+    grown.turns.push({ prompt: 'more', at: null, ended_at: null, items: [{ kind: 'text', text: 'x' }] });
+    let land: (() => void) | undefined;
+    mockedConv.mockReturnValue(new Promise((res) => (land = () => res(ok(grown)))));
+    vi.advanceTimersByTime(CONVERSATION_POLL_MS);
+    await settle();
+    // The read is out; the reader scrolls up.
+    scroller.scrollTop = 100;
+    await fireEvent.scroll(scroller);
+    land?.();
+    await settle();
+    expect(scroller.scrollTop).toBe(100);
+    expect(screen.getByTestId('conv-latest').textContent).toContain('2 new');
+  });
 });
 
 describe('ConversationPanel load older', () => {
@@ -2511,7 +2542,7 @@ describe('ConversationPanel review-round fixes', () => {
     await fireEvent.input(box, { target: { value: '/status' } });
     await fireEvent.keyDown(box, { key: 'Enter' });
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/status');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/status', SENT_ID);
     expect(box.value).toBe('');
     expect(screen.queryByTestId('conv-outgoing')).toBeNull();
     expect(screen.queryByTestId('conv-indicator')).toBeNull();
@@ -2609,7 +2640,7 @@ describe('ConversationPanel second review-round fixes', () => {
     await fireEvent.input(box, { target: { value: 'my long prompt' } });
     await fireEvent.click(screen.getByTestId('conv-chip'), { shiftKey: true });
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'Continue where you left off.');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'Continue where you left off.', SENT_ID);
     expect(box.value).toBe('my long prompt');
   });
 
@@ -2792,7 +2823,7 @@ describe('ConversationPanel prompt recall', () => {
     await fireEvent.keyDown(box, { key: 'ArrowUp' });
     await fireEvent.keyDown(box, { key: 'Enter' });
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'second');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'second', SENT_ID);
     expect(box.value).toBe('');
   });
 });
@@ -4796,6 +4827,42 @@ describe('ConversationPanel attachments', () => {
     }
   });
 
+  // r4 w04-4: the note names every reason Rust leaves a path out, and stays
+  // with the session the drop was made on.
+  it('says what a drop left out, and not on another session\'s composer', async () => {
+    const rerender = await renderPanel({ id: 1, host_alias: 'alpha', tmux_name: 'a' });
+    placeShell();
+    let release: (() => void) | undefined;
+    let hold = false;
+    mockedInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'attachment_describe')
+        return (args?.paths as string[]).slice(0, 1).map((path) => ({ path, name: path.split('/').pop(), size: 1024, kind: 'image' }));
+      if (cmd === 'attachment_preview') {
+        if (hold) await new Promise<void>((res) => (release = res));
+        return null;
+      }
+      return baseInvoke(cmd, args);
+    });
+
+    drag({ type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/a.png', '/tmp/folder'] });
+    for (let i = 0; i < 4; i++) await settle();
+    expect(screen.getAllByTestId('conv-attachment')).toHaveLength(1);
+    const note = screen.getByTestId('conv-attach-error').textContent ?? '';
+    expect(note).toContain('Left out 1 item');
+    expect(note).toContain('folder');
+    expect(note).toContain('unreadable');
+
+    // The same drop, with the person gone to another session mid-preview.
+    hold = true;
+    drag({ type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/b.png', '/tmp/folder2'] });
+    for (let i = 0; i < 3; i++) await settle();
+    await rerender({ session: session({ id: 2, host_alias: 'beta', tmux_name: 'b' }), visible: true });
+    await settle();
+    release?.();
+    for (let i = 0; i < 4; i++) await settle();
+    expect(screen.queryByTestId('conv-attach-error')).toBeNull();
+  });
+
   it('the drag veil follows the Tauri event, and only over the shell', async () => {
     await renderPanel();
     const shell = placeShell();
@@ -4897,7 +4964,7 @@ describe('ConversationPanel attachments', () => {
 
     expect(mockedInvoke).not.toHaveBeenCalledWith('upload_attachments', expect.anything());
     // The prompt goes out on its own, with no attachment block bolted on.
-    expect(mockedSend).toHaveBeenCalledWith('beta', 'b', 'hello beta');
+    expect(mockedSend).toHaveBeenCalledWith('beta', 'b', 'hello beta', SENT_ID);
   });
 
   // `.view-slot` is `position: absolute; inset: 0`, so App.svelte's Hosts and
@@ -5043,6 +5110,7 @@ describe('ConversationPanel attachments', () => {
       'local',
       'ctl',
       'look\n\nAttached files:\n/w/p/.claude-fleet-attachments/a.png',
+      SENT_ID,
     );
     expect(order).toEqual(['upload_attachments', 'send_prompt']);
     // Sent successfully: the tray is spent along with the draft.
@@ -5065,7 +5133,7 @@ describe('ConversationPanel attachments', () => {
     await fireEvent.keyDown(screen.getByTestId('conv-composer-input'), { key: 'Enter' });
     await settle();
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'Attached files:\n/w/p/.claude-fleet-attachments/a.log');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'Attached files:\n/w/p/.claude-fleet-attachments/a.log', SENT_ID);
     expect(mockedSend).not.toHaveBeenCalledWith('local', 'ctl', '', expect.anything());
   });
 
@@ -5137,6 +5205,7 @@ describe('ConversationPanel attachments', () => {
       'local',
       'ctl',
       'look\n\nAttached files:\n/w/p/.claude-fleet-attachments/a.png',
+      SENT_ID,
     );
     // The pasted tile was never part of the upload: it must still be there,
     // not silently cleared along with the one that sent.
@@ -5166,7 +5235,7 @@ describe('ConversationPanel attachments', () => {
 
     // Nothing uploadable was ever in the tray, so nothing was attempted and
     // nothing can have failed: the text goes out on its own.
-    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'look');
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'look', SENT_ID);
     expect(mockedInvoke).not.toHaveBeenCalledWith('upload_attachments', expect.anything());
     // Never sent, never cleared: the pasted tile is the only record it was
     // excluded, and it must still be there afterwards.
@@ -5335,6 +5404,19 @@ describe('ConversationPanel composer access (multi-user M1)', () => {
       }
     });
   }
+
+  // r4 w19-2: a device the hub refuses its settings cannot know the tuner
+  // is off, so it offers it and the hub's own refusal says so.
+  it('offers Tune when this device may not read the fleet\'s settings', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS });
+    settingsUnreadable.set(true);
+    try {
+      await renderShared('answer');
+      expect(screen.getByTestId('conv-tune-button')).toBeTruthy();
+    } finally {
+      settingsUnreadable.set(false);
+    }
+  });
 
   // The prompt tuner on a shared session: the hub runs it
   // (`session_prompt_tune`), and the rewrite lands in the box only on
@@ -5789,6 +5871,7 @@ describe('ConversationPanel Send later', () => {
         prompt: 'Rebase on main and re-run the e2e suite.',
         not_before: Math.floor(nine.getTime() / 1000),
         skip_if_archived: true,
+        client_msg_id: expect.any(String),
       },
     ]);
     expect(screen.queryByTestId('send-later-sheet')).toBeNull();
@@ -5817,7 +5900,7 @@ describe('ConversationPanel Send later', () => {
     await fireEvent.click(screen.getByTestId('send-later-skip'));
     await fireEvent.click(schedule);
     await settle();
-    expect(queued()).toEqual([{ session_id: 1, prompt: 'continue', until_limit_reset: true }]);
+    expect(queued()).toEqual([{ session_id: 1, prompt: 'continue', until_limit_reset: true, client_msg_id: expect.any(String) }]);
   });
 
   it('is off for a watcher, with the reason, and on for a driver', async () => {

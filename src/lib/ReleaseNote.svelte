@@ -9,12 +9,12 @@
   import DraftField from './DraftField.svelte';
   import { copyText } from './clipboard';
   import { draftReleaseNote, type Draft } from './drafts';
-  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
+  import { SETTING_KEYS, hubGated } from './fleet_settings';
 
   let { missionId }: { missionId: number } = $props();
 
   /** Writing help's "Draft release notes" (G4.6), off by default. */
-  const on = $derived(settingBool($fleetSettings, SETTING_KEYS.workDraftReleaseNotes));
+  const on = $derived($hubGated(SETTING_KEYS.workDraftReleaseNotes));
 
   let draft = $state<Draft | null>(null);
   let text = $state('');

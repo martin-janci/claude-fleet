@@ -35,13 +35,13 @@
   import {
     fleetSettings,
     loadFleetSettings,
-    settingBool,
     SETTING_KEYS,
     settingPathMap,
     settingLayout,
     projectDir,
     projectsDefaultRoot,
     PROJECTS_RESOLVED_KEY,
+    hubGated,
   } from './fleet_settings';
   import { hubStatus, ownsTheFleet, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
@@ -384,9 +384,15 @@
   });
   // Accounts this project may not run on (docs/accounts.md, *Keep an
   // account off a project*): never the default pick, and shown disabled.
-  const forbiddenHere = $derived(
-    accountsForbiddenFor(project.project.id, $accounts, projectOrgId(project.project, $orgs)),
-  );
+  // The org the chosen host is filed under counts as well, as the hub's
+  // refusal counts it (`project_forbidden_accounts_on`; `forbiddenOf` in
+  // account_limits.ts does the same for Switch account, review r4 w06-5).
+  const forbiddenHere = $derived.by(() => {
+    const own = accountsForbiddenFor(project.project.id, $accounts, projectOrgId(project.project, $orgs));
+    const hostOrg = $hosts.find((h) => h.alias === chosenHost)?.org_id ?? null;
+    if (hostOrg == null) return own;
+    return [...new Set([...own, ...accountsForbiddenFor(project.project.id, $accounts, hostOrg)])];
+  });
   function allowedLogins(logins: readonly HostLogin[]): HostLogin[] {
     const forbidden = untrack(() => forbiddenHere);
     return logins.filter((l) => !forbidden.includes(l.account_uuid));
@@ -1688,7 +1694,7 @@
     void submit();
   }
   /** Writing help's "Draft agent briefs" (G4.6), off by default. */
-  const draftsBriefs = $derived(settingBool($fleetSettings, SETTING_KEYS.workDraftBriefs));
+  const draftsBriefs = $derived($hubGated(SETTING_KEYS.workDraftBriefs));
 </script>
 
 <Modal label="New session" onclose={onCancel} width="520px">

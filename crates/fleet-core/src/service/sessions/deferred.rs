@@ -47,6 +47,13 @@ pub struct QueuePromptArgs {
     /// "Skip it if the session is archived first".
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub skip_if_archived: bool,
+    /// Mirrors `QueuePromptParams.client_msg_id` for the hub wire (the
+    /// hub-client route serialises this struct as the tool's arguments): a
+    /// retry with the same id answers the first call's result instead of
+    /// queueing the prompt again (reviews r4 w01-4, w09-3). Ignored here: the
+    /// dedupe lives in the tool layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_msg_id: Option<String>,
 }
 
 impl QueuePromptArgs {

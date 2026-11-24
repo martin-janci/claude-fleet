@@ -576,6 +576,17 @@ describe('countItems / newItemCount', () => {
     expect(newItemCount(b, a)).toBe(0);
     expect(newItemCount(null, a)).toBe(base);
   });
+
+  // r4 w10-7: a new turn pushes a longer, older one out of the window.
+  it('counts from the tail when the window slid', () => {
+    const text = (n: number) => Array.from({ length: n }, () => ({ kind: 'text' as const, text: 'x' }));
+    const old = { prompt: 'old', at: '2026-01-01T00:00:00Z', ended_at: null, items: text(15) };
+    const mid = { prompt: 'mid', at: '2026-01-01T01:00:00Z', ended_at: null, items: text(1) };
+    const fresh = { prompt: 'new', at: '2026-01-01T02:00:00Z', ended_at: null, items: text(3) };
+    const before = conv({ turns: [old, mid] });
+    const after = conv({ turns: [{ ...mid, items: text(2) }, fresh] });
+    expect(newItemCount(before, after)).toBe(1 + 4);
+  });
 });
 
 describe('promptHistory', () => {

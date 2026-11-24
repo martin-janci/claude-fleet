@@ -12,7 +12,7 @@
   import StatusChip from './kit/StatusChip.svelte';
   import { preselect } from './ai_proposal';
   import type { Draft } from './drafts';
-  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
+  import { SETTING_KEYS, hubGated } from './fleet_settings';
   import {
     HUB_HAS_NO_TRIAGE,
     NEXT_STEPS,
@@ -40,7 +40,7 @@
   } = $props();
 
   /** Its Draft rides Writing help's "Draft release notes" (review 23b w12-8). */
-  const draftOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workDraftReleaseNotes));
+  const draftOn = $derived($hubGated(SETTING_KEYS.workDraftReleaseNotes));
   let triage = $state<Triage | null>(null);
   let draft = $state<Draft | null>(null);
   let text = $state('');

@@ -275,6 +275,8 @@ impl FleetTools {
                     not_before: p.not_before,
                     until_limit_reset: p.until_limit_reset,
                     skip_if_archived: p.skip_if_archived,
+                    // Deduped above, in this tool.
+                    client_msg_id: None,
                 },
                 &self.store,
                 &self.ssh,

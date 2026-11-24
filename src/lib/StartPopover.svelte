@@ -15,7 +15,7 @@
   import DraftField from './DraftField.svelte';
   import { startWork, type StartWorkArgs } from './trackers';
   import { acceptStartRule, dismissStartRule, ruleLine } from './start_rules';
-  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
+  import { SETTING_KEYS, hubGated } from './fleet_settings';
   import {
     argsWithChoice,
     choiceFromPreview,
@@ -163,7 +163,7 @@
   // svelte-ignore state_referenced_locally
   let draftMeta = $state<BriefDraft | null>(held?.draft ?? null);
   /** Writing help's "Draft agent briefs" (G4.6), off by default. */
-  const draftsBriefs = $derived(settingBool($fleetSettings, SETTING_KEYS.workDraftBriefs));
+  const draftsBriefs = $derived($hubGated(SETTING_KEYS.workDraftBriefs));
   // svelte-ignore state_referenced_locally
   let draftText = $state(held?.brief ?? '');
   let drafting = $state(false);
