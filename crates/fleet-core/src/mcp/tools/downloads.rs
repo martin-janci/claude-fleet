@@ -11,8 +11,9 @@ use crate::ssh::SshExec;
 impl FleetTools {
     #[tool(description = "Send a file from a session's host to the user's \
         phone and desktop (copied in the background, ≤ downloads.max_file_mb; \
-        zip a folder first). Your session_id: whoami. path: absolute or \
-        relative to the session's worktree root. E_NOTFOUND, E_LIMIT.")]
+        zip a folder first). Your session_id: whoami. path: absolute, ~/… \
+        (the host account's home) or relative to the session's worktree \
+        root. E_NOTFOUND, E_LIMIT.")]
     pub(super) async fn send_file(
         &self,
         Extension(caller): Extension<Caller>,

@@ -519,3 +519,16 @@ async fn a_copy_in_flight_pauses_goes_on_and_stops_when_removed() {
     assert_eq!(e.code, codes::E_INVALID_STATE);
     control::clear(other.id);
 }
+
+/// Review w16-7: `~/…` is the host account's home, not a folder named `~`
+/// under the worktree. The path is quoted, so the script expands it itself.
+#[test]
+fn stat_script_reads_a_tilde_path_from_home() {
+    let script = stat_script("dev-x", "~/exports/report.pdf");
+    assert!(script.contains("p='~/exports/report.pdf'"), "{script}");
+    let home = script
+        .find(r#""~"/*) p="$HOME/${p#\~/}" ;;"#)
+        .expect("the arm");
+    let relative = script.find("*) d=$(tmux display-message").unwrap();
+    assert!(home < relative, "{script}");
+}

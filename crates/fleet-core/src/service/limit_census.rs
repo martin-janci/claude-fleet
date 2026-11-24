@@ -71,7 +71,7 @@ pub const NOT_COUNTED: &[&str] = &[
     "a login that could not be used for another reason while its account had room (signed out, host down)",
     "the minutes between a limit being hit and the next reading (readings are 5 to 30 minutes apart)",
     "extra usage: an account with it on keeps working past its limit on pay-as-you-go money, and is counted at its limit all the same",
-    "a weekly limit on one model only (Opus, Sonnet): fleet does not pause a row for it, and it is not counted here either",
+    "a weekly limit on one model only (Opus, Sonnet): fleet pauses only the sessions launched on that model for it, and it is not counted here",
 ];
 
 /// What to count.
@@ -442,6 +442,34 @@ pub fn census_of(
         unread_accounts,
         not_counted: NOT_COUNTED.to_vec(),
     }
+}
+
+/// Where the window of a census over a COPY of a hub's database ends
+/// (`census limits --db`), when that is before `now`: [`READ_FOR_SECS`]
+/// after the copy's newest reading. `None` when the readings reach `now`.
+///
+/// A login's last reading stands until the next one, so on a copy made days
+/// ago it stood until the wall clock: three days of "all at their limit, and
+/// still" that nobody measured (review w07-7). The live hub's own census
+/// keeps ending at now.
+pub fn copy_window_end(store: &Store, now: i64) -> Result<Option<i64>, IpcError> {
+    let newest = store
+        .latest_usage_snapshots()?
+        .iter()
+        .map(|r| r.fetched_at)
+        .max();
+    Ok(newest
+        .map(|at| at.saturating_add(READ_FOR_SECS))
+        .filter(|&end| end < now))
+}
+
+/// The line a census cut at [`copy_window_end`] opens with.
+pub fn copy_window_note(end: i64) -> String {
+    format!(
+        "the newest usage reading in this database is from {}: counted to {}, not to now",
+        utc_stamp(end - READ_FOR_SECS),
+        utc_stamp(end)
+    )
 }
 
 /// Count the store's usage history.
@@ -1080,6 +1108,37 @@ mod tests {
         );
         assert_eq!(r.accounts.len(), 2);
         assert_eq!((r.most_at_once, r.counted_secs), (1, 3 * DAY));
+    }
+
+    /// Review w07-7: a copy whose readings stop days before now is counted
+    /// to an hour after the newest one; a database read until now is not cut.
+    #[test]
+    fn a_copy_is_counted_to_its_newest_reading_not_to_now() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(copy_window_end(&s, NOW).unwrap(), None, "no reading");
+        let last = NOW - 3 * DAY;
+        for r in every_half_hour(
+            "a",
+            NOW - 5 * DAY,
+            last + 1,
+            used_up(last - DAY, NOW + 2 * DAY),
+        ) {
+            s.insert_usage_snapshot(&r).unwrap();
+        }
+        let end = copy_window_end(&s, NOW).unwrap().expect("a stale copy");
+        assert!(end > last - HOUR && end <= last + READ_FOR_SECS, "{end}");
+        let o = LimitCensusOptions::new(Some(7), end).unwrap();
+        let r = limit_census(&s, &o).unwrap();
+        assert_eq!(r.until, end);
+        assert!(
+            limit(&r).stretches.iter().all(|x| x.until <= end),
+            "nothing is counted past the cut"
+        );
+        assert!(copy_window_note(end).contains("not to now"));
+        // Read until a moment ago: the window ends at now.
+        s.insert_usage_snapshot(&read("a", NOW - MIN, 10.0, NOW + HOUR))
+            .unwrap();
+        assert_eq!(copy_window_end(&s, NOW).unwrap(), None);
     }
 
     #[test]
