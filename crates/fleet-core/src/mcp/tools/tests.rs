@@ -13230,10 +13230,7 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // `worktree_id` ([`SESSION_KEY_NAMES`]), so nothing about the shape of
     // its parameters said so.
     //
-    // **It disagrees with the desktop**, which has `delete_worktree: 'drive'`
-    // (`src/lib/share.ts`): the hub is now the stricter side, so a `drive`
-    // grantee is offered the control and refused it. `share.ts` has to move to
-    // `'own'` — frontend territory, named in this round's hand-off.
+    // `src/lib/share.ts` has it `'own'` too (round 2 w08-7).
     ("delete_worktree", &["Own"]),
     ("repo_blame", &["Read"]),
     ("repo_branch_diff", &["Read"]),

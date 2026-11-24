@@ -44,7 +44,7 @@ it); the agent's reply in the conversation says what it changed.
 | | read the sent notes | write drafts | send, resolve |
 |---|---|---|---|
 | owner, or a `drive` grant | yes | yes | yes |
-| a `read` grant (a viewer) | yes | yes | no |
+| a `watch` or `answer` grant | yes | yes | no |
 | an agent's host token | its sessions | — | no |
 
 An answer-only device sends nothing. The prompt goes through the hub's
