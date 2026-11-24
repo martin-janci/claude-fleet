@@ -81,7 +81,9 @@ describe('highlight md links', () => {
     const t0 = performance.now();
     highlight('['.repeat(40000), 'md');
     highlight('[a]('.repeat(10000), 'md');
-    expect(performance.now() - t0).toBeLessThan(100);
+    // Catastrophic backtracking takes seconds; 1 s leaves room for a GC
+    // pause in a parallel worker (review 23b w19-5).
+    expect(performance.now() - t0).toBeLessThan(1000);
     expect(highlight('[t](u)', 'md')[0]).toEqual([
       { text: '[t]', cls: 'str' },
       { text: '(u)', cls: 'com' },

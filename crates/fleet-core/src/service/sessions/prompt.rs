@@ -181,7 +181,7 @@ async fn run_local_script(
 /// building the script this runs.
 async fn run_tmux_script(
     host_alias: &str,
-    ssh: &Arc<SshClient>,
+    ssh: &dyn crate::ssh::SshExec,
     script: &str,
 ) -> Result<(), IpcError> {
     let out = if host_alias == "local" {
@@ -271,7 +271,7 @@ pub(super) async fn send_prompt_inner(
     } else {
         None
     };
-    if let Err(e) = run_tmux_script(host_alias, ssh, &script).await {
+    if let Err(e) = run_tmux_script(host_alias, ssh.as_ref(), &script).await {
         if let Some((id, previous)) = prior {
             if let Ok(s) = lock(store) {
                 if let Err(e) = s.restore_last_prompt(id, previous.as_deref()) {
@@ -330,13 +330,23 @@ pub async fn send_keys(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<(), IpcError> {
+    send_keys_via(host_alias, tmux_name, key, store, ssh.as_ref()).await
+}
+
+/// [`send_keys`] over any [`crate::ssh::SshExec`] (a test's fake).
+pub(crate) async fn send_keys_via(
+    host_alias: &str,
+    tmux_name: &str,
+    key: crate::tmux::NamedKey,
+    store: &Mutex<Store>,
+    ssh: &dyn crate::ssh::SshExec,
+) -> Result<(), IpcError> {
     crate::validate::host_alias(host_alias)?;
     crate::validate::tmux_name_addressable(tmux_name)?;
     // Enter into the folder-trust dialog picks its yes row, never the
     // focused `No, exit` (w06-1): the phone's trust card sends this key.
     let routed = if key == crate::tmux::NamedKey::Enter {
-        crate::service::playbooks::enter_answers_trust(store, ssh.as_ref(), host_alias, tmux_name)
-            .await
+        crate::service::playbooks::enter_answers_trust(store, ssh, host_alias, tmux_name).await
     } else {
         None
     };
@@ -355,6 +365,29 @@ pub async fn send_keys(
         Some(key.tmux_name().to_string()),
     );
     Ok(())
+}
+
+/// `send_prompt { prompt: "", submit: true }`'s trust routing: into the
+/// folder-trust dialog the bare Enter answers yes and is recorded as a
+/// `keys_sent` Enter; `None` leaves the caller to type its Enter.
+pub(crate) async fn bare_enter_answers_trust(
+    store: &Mutex<Store>,
+    ssh: &dyn crate::ssh::SshExec,
+    host_alias: &str,
+    tmux_name: &str,
+) -> Option<Result<(), IpcError>> {
+    let answered =
+        crate::service::playbooks::enter_answers_trust(store, ssh, host_alias, tmux_name).await?;
+    if answered.is_ok() {
+        record_session_event(
+            store,
+            host_alias,
+            tmux_name,
+            "keys_sent",
+            Some(crate::tmux::NamedKey::Enter.tmux_name().to_string()),
+        );
+    }
+    Some(answered)
 }
 
 /// Opening words that are an acknowledgement, never a task. Rejected only
@@ -732,23 +765,10 @@ pub async fn send_prompt(
     if args.prompt.is_empty() && args.submit {
         crate::validate::host_alias(&args.host_alias)?;
         crate::validate::tmux_name_addressable(&args.tmux_name)?;
-        if let Some(answered) = crate::service::playbooks::enter_answers_trust(
-            store,
-            ssh.as_ref(),
-            &args.host_alias,
-            &args.tmux_name,
-        )
-        .await
+        if let Some(answered) =
+            bare_enter_answers_trust(store, ssh.as_ref(), &args.host_alias, &args.tmux_name).await
         {
-            answered?;
-            record_session_event(
-                store,
-                &args.host_alias,
-                &args.tmux_name,
-                "keys_sent",
-                Some(crate::tmux::NamedKey::Enter.tmux_name().to_string()),
-            );
-            return Ok(());
+            return answered;
         }
     }
     send_prompt_inner(

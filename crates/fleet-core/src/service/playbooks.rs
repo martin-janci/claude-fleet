@@ -1203,6 +1203,60 @@ mod tests {
         assert!(keys_sent(&answered).is_empty());
     }
 
+    /// Review 23b w19-2: the send paths themselves route an Enter into the
+    /// trust dialog to its yes row — `send_prompt { keys: "Enter" }`
+    /// ([`send_keys`]) and `send_prompt { prompt: "", submit: true }` — and
+    /// record it as a `keys_sent` Enter, not only the helper they call.
+    #[tokio::test(start_paused = true)]
+    async fn the_send_paths_route_an_enter_into_a_trust_prompt_to_yes() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let id = {
+            let s = store.lock().unwrap();
+            s.upsert_host("h1").unwrap();
+            let id = s
+                .upsert_session("work-1", "h1", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_status = 'blocked', stuck_kind = 'trust_prompt' \
+                     WHERE id = ?1",
+                    rusqlite::params![id],
+                )
+                .unwrap();
+            id
+        };
+        let entered = |store: &Mutex<Store>| {
+            store
+                .lock()
+                .unwrap()
+                .list_session_events(id, 50)
+                .unwrap()
+                .iter()
+                .filter(|e| e.kind == "keys_sent" && e.detail.as_deref() == Some("Enter"))
+                .count()
+        };
+        let keys = trust_host(TRUST_NO_FIRST, TRUST_NO_FIRST_ON_YES);
+        crate::service::sessions::send_keys_via(
+            "h1",
+            "work-1",
+            crate::tmux::NamedKey::Enter,
+            &store,
+            &keys,
+        )
+        .await
+        .unwrap();
+        assert_eq!(keys_sent(&keys), ["Down", "Enter"]);
+        assert_eq!(entered(&store), 1);
+
+        let bare = trust_host(TRUST_NO_FIRST, TRUST_NO_FIRST_ON_YES);
+        crate::service::sessions::bare_enter_answers_trust(&store, &bare, "h1", "work-1")
+            .await
+            .expect("routed")
+            .unwrap();
+        assert_eq!(keys_sent(&bare), ["Down", "Enter"]);
+        assert_eq!(entered(&store), 2);
+    }
+
     #[test]
     fn press_enter_script_quotes_the_session_name() {
         assert_eq!(

@@ -1665,18 +1665,21 @@ async fn a_slow_host_does_not_hold_the_pass_or_the_next_one() {
     f.pane("alpha", "work", IDLE);
     f.list("slow", "job|1|2|0|/tmp/j|%4\n");
     f.pane("slow", "job", IDLE);
+    // A wide gap between the hang and the bound (review 23b w19-5): a
+    // 250 ms margin for a whole pass with store writes failed on a loaded
+    // box. A pass that waited for the host would take the full 3 s.
     f.fake.on_host_once(
         "slow",
         Match::script_contains("---FLEET:end"),
         Reply::Hang {
-            for_: Duration::from_millis(400),
+            for_: Duration::from_secs(3),
         },
     );
 
     let started = std::time::Instant::now();
     f.pass().await;
     assert!(
-        started.elapsed() < Duration::from_millis(350),
+        started.elapsed() < Duration::from_secs(2),
         "the pass did not wait for the slow host: {:?}",
         started.elapsed()
     );
@@ -1700,7 +1703,7 @@ async fn a_slow_host_does_not_hold_the_pass_or_the_next_one() {
     );
 
     // Once it answered, the next pass writes it and probes it again.
-    tokio::time::sleep(Duration::from_millis(450)).await;
+    tokio::time::sleep(Duration::from_millis(3_100).saturating_sub(started.elapsed())).await;
     assert!(!f.deps.probe_in_flight("slow"));
     f.pass().await;
     assert!(
