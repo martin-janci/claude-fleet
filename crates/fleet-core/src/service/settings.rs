@@ -2180,10 +2180,18 @@ pub const SPECS: &[Spec] = &[
         "false",
         Kind::Bool,
         "Jev: send unassigned replies",
-        "Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all.",
+        concat!(
+            "Also send Claude's own text from sessions that belong to no organisation, on top of sending unassigned sessions at all, for each of these use cases that is on: ",
+            crate::service::decide::reply_text_uses!(),
+            "."
+        ),
     )
     .tags(&[Tag::Experimental, Tag::Network])
-    .danger("Claude's reply text from sessions outside every organisation will be sent to TypeSafe too."),
+    .danger(concat!(
+        "Claude's own text from sessions outside every organisation will be sent to TypeSafe too: ",
+        crate::service::decide::reply_text_uses!(),
+        "."
+    )),
     Spec::new(
         DECIDE_JEV_TIMEOUT_MS,
         "1500",

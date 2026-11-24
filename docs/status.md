@@ -63,7 +63,12 @@ from `autonomy.ts`; Custom grants what Ask first does), and since the
   with no host is inside only a grant naming no hosts), never while Pause
   all is on (review w04-5).
   Kills, rewinds, restores, add_project and every other `confirm: true`
-  tool always ask. **Session care** (`control.session_care`, ON by
+  tool always ask, and so do the calls that decide who reads or drives the
+  owner's sessions (sec-access-5, D3=b: `session_share`, `session_unshare`,
+  `session_narrow`, `review_request` `ask`, `access_requests` `grant`).
+  Control's `agents` `run` starts only the `self-debug` and `proposer`
+  rules (`/debug`, `/propose`; w15-5, `OPERATOR_RUNS`); any other is
+  `E_FORBIDDEN` (control-api.md › the operator). **Session care** (`control.session_care`, ON by
   default since 2026-10-20, the owner's choice): with it on, `restart_session` of a session
   Control started itself (not one it only briefed;
   `Store::is_control_started_session`) goes without a card at Within your
@@ -1136,7 +1141,10 @@ that login (until the reset the answer or the account's reading names, else
 an hour), not `refused`, and with no login left `PlanOutcome.waiting` says
 the mission waits; the loop asks again once a login has headroom, waking at
 the reset. `missions_pause_all` pauses
-every mission and ends its grants. `orchestrator.enabled` is the kill switch.
+every mission and ends its grants; since #1140 a mission that reaches a
+final state ends every live grant too, a planner that fails is retried with
+backoff (mission event `planner_failed`), and a brake that pauses a mission
+with a question counts in Needs you while the question is open. `orchestrator.enabled` is the kill switch.
 A continuous mission wakes on `policy.wake_every_secs`; a finished run, a
 member's status moving on the tracker and a worker's PR checks moving each
 wake its mission. The Missions tab has Start wave, the next steps, the
@@ -1285,6 +1293,13 @@ to `nothing`, out of the Inbox. On for every routine (the editor's Memory
 group turns it off and lists or forgets the items). The Sessions list (desktop
 and phone) folds routine sessions into one Routines section, one group per
 routine, and a routine session's finished turn no longer notifies.
+Since #1140 a routine's schedule runs in its `time_zone` (jiff's bundled
+tz database, daylight saving included; `utc_offset_min` only without a
+known zone), and the scheduler closes a finished run's idle session **by
+default, with a plain kill** outside `work.auto_tidy` (a `done` run's after
+12 hours, a `failed` run's after 24; timeline `gc_killed`; the routine's
+three newest and any a person pinned, prompted or opened stay): see
+control-api.md › Routines.
 
 The prompt tuner is landed and OFF by default (`work.prompt_tune`;
 `service/prompt_tune.rs`, `PromptTune.svelte`, mechanics in
@@ -1844,7 +1859,12 @@ pinned); and the binary target
 `install --auto-update`'s timer, and `fleet-hub update apply` / `pair` with
 `deploy/hub/fleet-hub-update.{service,timer}` for a hub without Docker. The
 binary loop is tested against a pretend machine (`binary::tests`); it has not
-run against a real systemd yet.
+run against a real systemd yet. Since #1140 an agent with no timer (every
+macOS agent, containers, agents run by hand) updates itself in process:
+it `exec`s the new build and rolls back after three resumes of a candidate
+that keeps dying (updates.md › The agent updates itself › In process). The
+agent's hook relay carries a hook-only token (`fhk1_`), never the host
+token (hub.md › the hook relay).
 
 Debug devices' first slice is landed (`docs/debug-devices.md`): per-host
 inventory of Android phones, emulators and AVDs, iOS simulators and paired

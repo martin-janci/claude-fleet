@@ -31,10 +31,15 @@ and nothing is sent:
    (Settings → Organisations → *send to Jev*, or `fleet-hub org set <id>
    --jev on`); off by default. A session or item with no org follows
    `decide.jev.unassigned` (off by default). A feature that sends Claude's
-   **reply text** (`turn_outcome`, J2; `routine_run_outcome`, N6) needs a second consent on top
-   (decision D48): the org's *Also allow Claude's reply text* (`fleet-hub
-   org set <id> --jev-reply on`), or `decide.jev.unassigned_reply` for a
-   session with no org. Both off by default; either missing is `org_off`.
+   **own text** needs a second consent on top (decision D48): the org's
+   *Also allow Claude's own text* (`fleet-hub org set <id> --jev-reply on`),
+   or `decide.jev.unassigned_reply` for a session with no org. Both off by
+   default; either missing is `org_off`. It covers `turn_outcome` (J2) and
+   `routine_run_outcome` (N6), the end of a session's screen;
+   `summary_check` (J9), up to 80 KB of a session's transcript (prompts,
+   replies and tool lines); and `mission_triage`, which asks without a
+   worker's own summary when it is missing (the rest of its question still
+   goes). The consent's copy names each (`decide::REPLY_TEXT_USES`).
 5. **A key is configured** (`no_key`): `fleet-hub decide set-key` (on a
    standalone desktop, pointed at the app's data folder — see
    [the key on a standalone desktop](#the-key-on-a-standalone-desktop)).
@@ -1177,7 +1182,7 @@ redesign's transition plan.
 | `decide.jev.limit_switch` | `off` | `off` / `shadow` / `assist` | fleet | Asking which login an out-of-credit session should resume under when it is switched automatically. The login with the most headroom is used either way; Jev's pick is recorded beside it so the two can be compared. Experimental. |
 | `decide.jev.restore_timing` | `off` | `off` / `shadow` / `assist` | fleet | Asking whether a killed session due back on a loaded host, or one whose recovery failed, should resume now, wait or move. Off: wait while loaded. Assist follows the answer, never past the low-memory floor; a move is only noted. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | fleet | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
-| `decide.jev.unassigned_reply` | `false` | on / off | fleet | Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all. Experimental. Asks to confirm. |
+| `decide.jev.unassigned_reply` | `false` | on / off | fleet | Also send Claude's own text from sessions that belong to no organisation, on top of sending unassigned sessions at all, for each of these use cases that is on: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines), mission triage (a worker's own summary), the duplicate check (an agent's reasons for a proposed task) and quick answer (an agent's reasons on a chat form). Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | fleet | How long one call may take. A call is never retried. |
 | `decide.jev.breaker_failures` | `5` | 1–100 | fleet | Failed calls in a row that open the circuit breaker. |
 | `decide.jev.breaker_open_secs` | `300` | 10–86400 seconds | fleet | How long an open breaker refuses calls. |

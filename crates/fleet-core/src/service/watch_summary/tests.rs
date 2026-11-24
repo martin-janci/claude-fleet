@@ -137,6 +137,38 @@ fn no_summary_without_the_orgs_consent() {
     assert!(plan(&s, &row).is_ok());
 }
 
+/// Review 23b w12-4: with the summary check at assist, a session whose
+/// check the gate refuses for a policy reason is refused before the run,
+/// naming why, rather than run, paid for and hidden.
+#[test]
+fn a_summary_the_check_would_hide_is_refused_before_it_runs() {
+    let (store, row) = world(None, true);
+    let s = lock(&store).unwrap();
+    settings::set(&s, settings::DECIDE_JEV_SUMMARY_CHECK, "assist").unwrap();
+    let e = plan(&s, &row).unwrap_err();
+    assert_eq!(e.code, codes::E_FORBIDDEN);
+    assert!(
+        e.message.contains("Decisions (Jev) is off"),
+        "{}",
+        e.message
+    );
+    settings::set(&s, settings::DECIDE_JEV_ENABLED, "true").unwrap();
+    s.set_decision_credential(
+        Some(&Secret::new("tsk_test_0123456789abcdefghijklmnopqrstuv")),
+        None,
+    )
+    .unwrap();
+    // Jev on, a key, unassigned sent, but not Claude's own text (D48).
+    let e = plan(&s, &row).unwrap_err();
+    assert!(e.message.contains("unassigned_reply"), "{}", e.message);
+    settings::set(&s, settings::DECIDE_JEV_UNASSIGNED_REPLY, "true").unwrap();
+    assert!(plan(&s, &row).is_ok());
+    // Off or shadow, nothing is hidden for it.
+    settings::set(&s, settings::DECIDE_JEV_UNASSIGNED_REPLY, "false").unwrap();
+    settings::set(&s, settings::DECIDE_JEV_SUMMARY_CHECK, "shadow").unwrap();
+    assert!(plan(&s, &row).is_ok());
+}
+
 #[tokio::test]
 async fn it_runs_on_the_sessions_host_under_its_account_and_is_booked() {
     let (store, row) = world(Some("work"), true);

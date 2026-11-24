@@ -1573,3 +1573,25 @@ fn every_feature_that_sends_free_text_frames_it_as_quoted_data() {
         assert!(v.ends_with(".v2"), "{v}");
     }
 }
+
+/// Review 23b w12-1: the reply-text consent's copy names every use case it
+/// releases. A feature that comes to send Claude's text has to be named
+/// there (and in `reply_text_words`) or this fails.
+#[test]
+fn the_reply_text_consent_names_every_use_it_releases() {
+    for f in Feature::ALL.iter().copied() {
+        let words = f.reply_text_words();
+        assert_eq!(
+            words.is_some(),
+            f.sends_reply_text() || f == Feature::MissionTriage,
+            "{f:?}"
+        );
+        if let Some(w) = words {
+            assert!(REPLY_TEXT_USES.contains(w), "{f:?}: {w}");
+        }
+    }
+    let spec =
+        crate::service::settings::spec(crate::service::settings::DECIDE_JEV_UNASSIGNED_REPLY)
+            .unwrap();
+    assert!(spec.help.contains(REPLY_TEXT_USES), "{}", spec.help);
+}

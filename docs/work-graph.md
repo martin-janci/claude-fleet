@@ -151,6 +151,8 @@ shows done tasks regardless, and *Sessions: Past only* shows past work
 (which is archived work), as the Sessions list's *Past only* does. A task
 is archived only when it is archived for everyone: a session on another
 host or in another org that you cannot see still keeps it in the tree.
+Starting work on an archived ticket, or its tracker moving it, brings it
+back from the archive (w10-14, `archive::unarchive_on_start`).
 ⌘⇧O cycles the Work view's organisation.
 
 **Finished — close?** Work that ends without a merged pull request (a local

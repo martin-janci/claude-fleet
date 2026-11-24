@@ -125,6 +125,7 @@ pub fn plan(s: &Store, row: &SessionRow) -> Result<Plan, IpcError> {
             "this session's organisation has not consented to summaries",
         ));
     }
+    refuse_unshowable(s, row.org_id)?;
     crate::validate::host_alias(&row.host_alias)?;
     let (_, _, profile) = s.session_launch(row.id)?;
     Ok(Plan {
@@ -135,6 +136,42 @@ pub fn plan(s: &Store, row: &SessionRow) -> Result<Plan, IpcError> {
         org_id: row.org_id,
         claude_session_id: row.claude_session_id.clone(),
     })
+}
+
+/// With the summary check at `assist` a summary shows only once Jev passed
+/// it, so one whose check the gate refuses for a policy reason (Jev off, no
+/// key, the org's consent to Jev or to Claude's own text missing) would be
+/// run, paid for and always hidden (review 23b w12-4). Refuse before the
+/// run instead, naming what is missing. A call that fails (a time-out, the
+/// breaker, the budget) still hides one: that is the check's own answer.
+fn refuse_unshowable(s: &Store, org_id: Option<i64>) -> Result<(), IpcError> {
+    use crate::service::decide::{Fallback, Feature, FeatureMode};
+    if FeatureMode::of(s, Feature::SummaryCheck) != FeatureMode::Assist {
+        return Ok(());
+    }
+    let missing = match crate::service::decide::gate(s, Feature::SummaryCheck, org_id) {
+        Err(Fallback::NotOwner) => "this window cannot ask Jev itself (the hub it shows does)",
+        Err(Fallback::FlagOff) => "Decisions (Jev) is off",
+        Err(Fallback::NoKey) => "no Jev key is configured",
+        Err(Fallback::OrgOff) => match org_id {
+            Some(_) => {
+                "this session's organisation has not allowed Jev and Claude's own text \
+                 (Settings → Organisations)"
+            }
+            None => {
+                "sessions outside every organisation are not sent to Jev, or not with \
+                 Claude's own text (decide.jev.unassigned, decide.jev.unassigned_reply)"
+            }
+        },
+        _ => return Ok(()),
+    };
+    Err(IpcError::new(
+        codes::E_FORBIDDEN,
+        format!(
+            "a summary would be hidden: the summary check is on (decide.jev.summary_check = \
+             assist), and {missing}"
+        ),
+    ))
 }
 
 /// PURE: a turn's time: its last reply, else its prompt.
