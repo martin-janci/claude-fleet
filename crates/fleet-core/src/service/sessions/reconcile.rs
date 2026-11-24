@@ -1131,7 +1131,10 @@ fn write_reachable_host(
         let claude_status = stale_working_veto(
             stale,
             status_candidate(
-                probe.agent_rows.is_some(),
+                // A row read by its own adapter (Codex, Hermes) has no hooks
+                // and no `claude agents` entry: its pane is the only source,
+                // on every pass (review w08-4).
+                probe.agent_rows.is_some() || own_read.is_some(),
                 agent_status_typed,
                 pane_status,
                 prior_row.is_some_and(|p| p.claude_status.as_deref() == Some("blocked")),

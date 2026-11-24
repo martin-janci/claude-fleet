@@ -5253,6 +5253,32 @@ mod tests {
         );
     }
 
+    /// Review w08-7: a genuine start ends `stopped` as it ends `failed`;
+    /// a row with nothing to end keeps its status.
+    #[test]
+    fn a_genuine_start_ends_stopped_and_failed() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        for (was, then) in [
+            ("stopped", "idle"),
+            ("failed", "idle"),
+            ("blocked", "blocked"),
+        ] {
+            let id = s
+                .upsert_session(was, "local", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_status = ?2 WHERE id = ?1",
+                    rusqlite::params![id, was],
+                )
+                .unwrap();
+            s.clear_ended_turn_state(id).unwrap();
+            let row = s.get_session_by_id(id).unwrap().unwrap();
+            assert_eq!(row.claude_status.as_deref(), Some(then), "{was}");
+        }
+    }
+
     /// Final review of the acknowledgement: `stale_demoted_at` (the veto's
     /// memory, migration 080) outlives the attention stamp. Every hook
     /// clears both; the TTL clears only the stamp; a row working or blocked

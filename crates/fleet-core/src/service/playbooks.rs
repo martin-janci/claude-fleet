@@ -326,7 +326,10 @@ pub fn trust_yes_move(pane: &str) -> Option<TrustMove> {
     if yes + TRUST_TAIL_ROWS < rows.len() {
         return None;
     }
-    let asked = rows[..at.min(yes)]
+    // Only the rows right above the choices are the dialog's question:
+    // text further up is whatever the session printed before (review w08-2).
+    let above = &rows[..at.min(yes)];
+    let asked = above[above.len().saturating_sub(TRUST_QUESTION_ROWS)..]
         .iter()
         .map(|r| r.1.to_lowercase())
         .collect::<Vec<_>>()
@@ -349,6 +352,11 @@ pub fn trust_yes_move(pane: &str) -> Option<TrustMove> {
 /// ("one you trust"), its numbered ("trust this folder") and oldest ("trust
 /// the files") layouts, and Codex's ("Trust this folder?").
 const TRUST_QUESTIONS: [&str; 3] = ["one you trust", "trust this folder", "trust the files"];
+
+/// How many non-blank rows above the choices may hold the dialog's question
+/// (the longest layout has five: the workspace, its path, the question, what
+/// Claude may do, the security guide).
+const TRUST_QUESTION_ROWS: usize = 8;
 
 /// How many non-blank rows may follow the yes row: the other choice and the
 /// key hint line, with one to spare.
@@ -994,6 +1002,17 @@ mod tests {
     const TRUST_OLD: &str =
         "Do you trust the files in this folder?\n ❯ 1. Yes, proceed\n   2. No\nEnter to select";
     const TRUST_CODEX: &str = include_str!("../agent_adapter/testdata/codex/trust_folder.txt");
+
+    /// Review w08-2: trust words far above a one-yes dialog are not its
+    /// question, so Enter is not pressed into it.
+    #[test]
+    fn trust_words_far_above_the_choices_are_not_the_question() {
+        let filler = "   a line of output\n".repeat(TRUST_QUESTION_ROWS);
+        let pane = format!(
+            "● It stopped at trust this folder.\n{filler} Do you want to proceed?\n ❯ 1. Yes\n   2. No, and tell Claude what to do differently\n"
+        );
+        assert_eq!(trust_yes_move(&pane), None);
+    }
 
     #[test]
     fn the_yes_row_is_found_in_every_layout_fleet_knows() {
