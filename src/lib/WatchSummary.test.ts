@@ -111,15 +111,15 @@ describe('WatchSummary', () => {
     expect(screen.getByTestId('watch-summary-hidden').textContent).toContain('does not match the transcript');
   });
 
-  it('offers nothing without the org consent', async () => {
+  it('offers nothing when the summary would be hidden', async () => {
     vi.mocked(invoke).mockRejectedValue({
       code: 'E_FORBIDDEN',
-      message: "this session's organisation has not consented to summaries",
+      message: 'a summary would be hidden: the summary check is on (decide.jev.summary_check = assist), and Decisions (Jev) is off',
     });
     render(WatchSummary, { session });
     await fireEvent.click(screen.getByTestId('watch-summary-run'));
     await flush();
-    expect(screen.getByTestId('watch-summary-refused').textContent).toContain('not consented');
+    expect(screen.getByTestId('watch-summary-refused').textContent).toContain('would be hidden');
     expect(screen.queryByTestId('watch-summary-run')).toBeNull();
   });
 

@@ -1643,7 +1643,7 @@ in [the settings reference](settings-reference.md).
 | `work.draft_briefs` | `false` | on / off | fleet | Starting from a ticket: Draft writes the agent's brief from the ticket before the first prompt, on the planned host. |
 | `work.draft_task_titles` | `false` | on / off | fleet | New task: once you have written the notes, the title is drafted from them with claude -p on this machine, or on the first reachable host when it is not a fleet host. A draft is text you edit before you create the task. |
 | `work.draft_release_notes` | `false` | on / off | fleet | Finish: Draft writes a finished mission's release note from its merged PRs, on the mission's planner host. |
-| `work.catch_up_summaries` | `false` | on / off | fleet | A watched session offers "Since 13:20": what it did since you last looked, summarised on its own host and account. |
+| `work.catch_up_summaries` | `false` | on / off | fleet | A watched session offers "Since 13:20": what it did since you last looked, summarised on its own host and account. It needs no organisation's consent to Jev: only the summary check (decide.jev.summary_check) sends the excerpt there. |
 | `work.attachment_max_mb` | `10` | 1–16 MiB | fleet | The largest file or image a task takes. At most 16 MiB: what one call between the desktop and the hub carries. |
 | `work.tidy_done_days` | `2` | 1–365 days | fleet | Days a linked ticket must be done before Tidy up suggests its session. |
 | `work.tidy_idle_hours` | `4` | 1–720 hours | fleet | Hours a session must be idle before any tidy reason suggests it. |

@@ -1839,7 +1839,7 @@ pub const SPECS: &[Spec] = &[
         "false",
         Kind::Bool,
         "Catch-up summaries",
-        "A watched session offers \"Since 13:20\": what it did since you last looked, summarised on its own host and account.",
+        "A watched session offers \"Since 13:20\": what it did since you last looked, summarised on its own host and account. It needs no organisation's consent to Jev: only the summary check (decide.jev.summary_check) sends the excerpt there.",
     )
     .tags(&[Tag::Ai]),
     Spec::new(

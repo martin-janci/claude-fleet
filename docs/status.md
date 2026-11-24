@@ -989,7 +989,8 @@ summary still shows, unchecked, labelled "Drafted · Not checked" beside the
 text (`WatchSummary.svelte`); a failed check (or one that could not run)
 hides it. Whether an unchecked summary should show at all, or the use case
 should default to `shadow`/`assist`, is the owner's decision: it trades a
-summary every watcher can read for Jev budget and the org's consent. The notifications matrix and quiet hours (`notify.*`, 11.9) are
+summary every watcher can read for Jev budget and the org's consent (the
+summary itself needs no Jev consent since review 23b w12-7). The notifications matrix and quiet hours (`notify.*`, 11.9) are
 on: the phone and the desktop (while its window is in the background, and
 only with OS notifications on for the desktop column) follow them.
 

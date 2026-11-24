@@ -122,19 +122,19 @@ fn the_excerpt_is_the_turns_since_the_time() {
     assert_eq!(excerpt_since(&turns, T1320 + 3_600).1, 0);
 }
 
-/// The plan's 11.11 check: no summary without consent.
+/// Review 23b w12-7 (b): the summary runs on the host's own account, so a
+/// session whose org never allowed Jev still gets one; Jev's consent is
+/// asked only by the summary check.
 #[test]
-fn no_summary_without_the_orgs_consent() {
+fn a_summary_needs_no_jev_consent_while_its_check_is_off() {
     let (store, row) = world(None, false);
-    let e = plan(&lock(&store).unwrap(), &row).unwrap_err();
-    assert_eq!(e.code, codes::E_FORBIDDEN);
     let s = lock(&store).unwrap();
+    assert!(plan(&s, &row).is_ok(), "no org, unassigned not sent to Jev");
     let org = s.add_org("Acme", None, false).unwrap().id;
     s.set_host_org("mercury", Some(org)).unwrap();
     let row = s.get_session_by_id(row.id).unwrap().unwrap();
-    assert_eq!(plan(&s, &row).unwrap_err().code, codes::E_FORBIDDEN);
-    s.set_org_jev_allowed(org, true).unwrap();
-    assert!(plan(&s, &row).is_ok());
+    assert!(!s.org_jev_allowed(org).unwrap());
+    assert_eq!(plan(&s, &row).unwrap().org_id, Some(org));
 }
 
 /// Review 23b w12-4: with the summary check at assist, a session whose

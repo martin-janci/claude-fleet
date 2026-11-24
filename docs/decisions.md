@@ -1142,9 +1142,12 @@ that the transcript does not show finished. The summary waits for the
 answer.
 
 - **What is sent.** The summary and the newest 80,000 bytes of the
-  excerpt it was written from, redacted. The summary itself runs only for
-  a session whose org consented (`decide.jev.unassigned` for no org);
-  otherwise it is refused with `E_FORBIDDEN` and nothing runs.
+  excerpt it was written from, redacted. The summary itself needs no Jev
+  consent: it runs on the host's own account behind *Catch-up summaries*
+  (review 23b w12-7). Only at `assist` does a session whose check the gate
+  refuses (Jev off, no key, the org's consent to Jev or to Claude's own
+  text missing) get `E_FORBIDDEN` before anything runs, since its summary
+  would always be hidden.
 - **Off.** Nothing is asked; the summary shows, marked unchecked.
 - **Shadow.** Recorded only, with no baseline; the summary shows, marked
   unchecked.

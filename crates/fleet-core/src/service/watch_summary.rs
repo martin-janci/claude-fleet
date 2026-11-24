@@ -5,11 +5,11 @@
 //!
 //! * **On demand only.** A person presses Summarise; opening a session runs
 //!   nothing.
-//! * **Only with the org's consent.** The summary is the owner's
-//!   conversation retold to someone else, and its check sends the excerpt
-//!   to Jev, so a session whose org has not consented (`orgs.jev_allowed`;
-//!   `decide.jev.unassigned` for a session with no org) gets none:
-//!   `E_FORBIDDEN`, and nothing runs.
+//! * **Its own toggle, not Jev's consent.** The summary runs on the host's
+//!   own Claude account and needs only *Catch-up summaries* and the
+//!   watcher's reach (review 23b w12-7, option b). The org's consent to
+//!   Jev is asked only by the check: with it at `assist`, a session whose
+//!   check the gate refuses is refused before the run (`E_FORBIDDEN`).
 //! * **On the session's own host and account.** The excerpt — the turns
 //!   since the time, read from the transcript the Conversation tab reads —
 //!   goes to one `claude -p` on the session's host, under its credential
@@ -108,23 +108,11 @@ pub struct Plan {
     pub claude_session_id: Option<String>,
 }
 
-/// Whether `org_id` consented: the org's own consent, or
-/// `decide.jev.unassigned` for a session with no org.
-fn consented(s: &Store, org_id: Option<i64>) -> Result<bool, IpcError> {
-    Ok(match org_id {
-        Some(id) => s.org_jev_allowed(id)?,
-        None => settings::get_bool(s, settings::DECIDE_JEV_UNASSIGNED),
-    })
-}
-
-/// The plan for `row`, or why there is none (no consent).
+/// The plan for `row`. The summary runs on the host's own Claude account,
+/// not at TypeSafe, so it needs only its own toggle (checked by the caller)
+/// and the watcher's reach; Jev's consent is asked only when the summary
+/// check would hide it ([`refuse_unshowable`], review 23b w12-7).
 pub fn plan(s: &Store, row: &SessionRow) -> Result<Plan, IpcError> {
-    if !consented(s, row.org_id)? {
-        return Err(IpcError::new(
-            codes::E_FORBIDDEN,
-            "this session's organisation has not consented to summaries",
-        ));
-    }
     refuse_unshowable(s, row.org_id)?;
     crate::validate::host_alias(&row.host_alias)?;
     let (_, _, profile) = s.session_launch(row.id)?;

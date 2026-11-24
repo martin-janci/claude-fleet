@@ -2336,7 +2336,7 @@
         "level": "none"
       },
       "default": "false",
-      "help": "A watched session offers \"Since 13:20\": what it did since you last looked, summarised on its own host and account.",
+      "help": "A watched session offers \"Since 13:20\": what it did since you last looked, summarised on its own host and account. It needs no organisation's consent to Jev: only the summary check (decide.jev.summary_check) sends the excerpt there.",
       "key": "work.catch_up_summaries",
       "kind": {
         "type": "bool"
