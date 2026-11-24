@@ -4544,6 +4544,30 @@
     },
     {
       "default_widget": "switch",
+      "key": "work.draft_morning_brief",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Draft the morning brief",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "work.dashboard_summary",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Dashboard summaries",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
       "key": "work.catch_up_summaries",
       "kind": {
         "type": "bool"

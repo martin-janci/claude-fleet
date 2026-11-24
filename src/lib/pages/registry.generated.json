@@ -2315,12 +2315,54 @@
         "level": "none"
       },
       "default": "false",
-      "help": "Finish: Draft writes a finished mission's release note from its merged PRs, on the mission's planner host.",
+      "help": "Missions: Draft writes a finished mission's release note from its merged PRs, and a stuck mission's triage card, on the mission's planner host.",
       "key": "work.draft_release_notes",
       "kind": {
         "type": "bool"
       },
       "label": "Draft release notes",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Today: Draft the brief writes the morning brief from today's digest with claude -p on the host of one of today's sessions.",
+      "key": "work.draft_morning_brief",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Draft the morning brief",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Dashboards: a summary widget writes its paragraph from the page's counts with claude -p on the host of one of your sessions running today.",
+      "key": "work.dashboard_summary",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Dashboard summaries",
       "modified": false,
       "restart": "none",
       "scope": "fleet",
@@ -5242,6 +5284,14 @@
                 },
                 {
                   "key": "work.draft_release_notes",
+                  "type": "field"
+                },
+                {
+                  "key": "work.draft_morning_brief",
+                  "type": "field"
+                },
+                {
+                  "key": "work.dashboard_summary",
                   "type": "field"
                 },
                 {

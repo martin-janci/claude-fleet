@@ -671,8 +671,15 @@ pub const WORK_DRAFT_BRIEFS: &str = "work.draft_briefs";
 /// New task drafts the title from the notes (`work::title_draft`).
 pub const WORK_DRAFT_TASK_TITLES: &str = "work.draft_task_titles";
 /// Finish drafts a mission's release note from its merged PRs
-/// (`work::orchestrate::drafts::release_note`).
+/// (`work::orchestrate::drafts::release_note`), and a stuck mission's
+/// triage card drafts its words (`work::orchestrate::triage`).
 pub const WORK_DRAFT_RELEASE_NOTES: &str = "work.draft_release_notes";
+/// Today drafts the morning brief from the day's digest
+/// (`work::orchestrate::drafts::brief`).
+pub const WORK_DRAFT_MORNING_BRIEF: &str = "work.draft_morning_brief";
+/// A dashboard's summary widget writes its paragraph
+/// (`work::orchestrate::drafts::dashboard_summary`).
+pub const WORK_DASHBOARD_SUMMARY: &str = "work.dashboard_summary";
 /// A watched session's "Since 13:20" catch-up summary
 /// (`service::watch_summary`).
 pub const WORK_CATCH_UP_SUMMARIES: &str = "work.catch_up_summaries";
@@ -1831,7 +1838,23 @@ pub const SPECS: &[Spec] = &[
         "false",
         Kind::Bool,
         "Draft release notes",
-        "Finish: Draft writes a finished mission's release note from its merged PRs, on the mission's planner host.",
+        "Missions: Draft writes a finished mission's release note from its merged PRs, and a stuck mission's triage card, on the mission's planner host.",
+    )
+    .tags(&[Tag::Ai]),
+    Spec::new(
+        WORK_DRAFT_MORNING_BRIEF,
+        "false",
+        Kind::Bool,
+        "Draft the morning brief",
+        "Today: Draft the brief writes the morning brief from today's digest with claude -p on the host of one of today's sessions.",
+    )
+    .tags(&[Tag::Ai]),
+    Spec::new(
+        WORK_DASHBOARD_SUMMARY,
+        "false",
+        Kind::Bool,
+        "Dashboard summaries",
+        "Dashboards: a summary widget writes its paragraph from the page's counts with claude -p on the host of one of your sessions running today.",
     )
     .tags(&[Tag::Ai]),
     Spec::new(

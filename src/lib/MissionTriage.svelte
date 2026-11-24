@@ -12,6 +12,7 @@
   import StatusChip from './kit/StatusChip.svelte';
   import { preselect } from './ai_proposal';
   import type { Draft } from './drafts';
+  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
   import {
     HUB_HAS_NO_TRIAGE,
     NEXT_STEPS,
@@ -38,6 +39,8 @@
     onstep: (step: NextStep) => void;
   } = $props();
 
+  /** Its Draft rides Writing help's "Draft release notes" (review 23b w12-8). */
+  const draftOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workDraftReleaseNotes));
   let triage = $state<Triage | null>(null);
   let draft = $state<Draft | null>(null);
   let text = $state('');
@@ -117,11 +120,11 @@
           from={draft ? `from ${draft.from}` : null}
           {busy}
           rows={3}
-          onregenerate={() => void drawCard()}
+          onregenerate={draftOn ? () => void drawCard() : undefined}
           onclear={() => (draft = null)}
           testid="mission-triage-card"
         />
-      {:else}
+      {:else if draftOn}
         <button class="btn btn--quiet" type="button" data-testid="mission-triage-draft" onclick={() => void drawCard()}
           >Draft the card</button
         >

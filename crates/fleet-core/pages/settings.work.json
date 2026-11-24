@@ -89,6 +89,14 @@
             },
             {
               "type": "field",
+              "key": "work.draft_morning_brief"
+            },
+            {
+              "type": "field",
+              "key": "work.dashboard_summary"
+            },
+            {
+              "type": "field",
               "key": "work.catch_up_summaries"
             }
           ]
