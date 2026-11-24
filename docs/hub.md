@@ -2677,7 +2677,8 @@ another reason while its account had room (signed out, host down), the
 minutes between a limit and the next reading, extra usage (an account
 with it on keeps working past its limit and is counted at its limit all
 the same; its line says `extra usage is on`), and a weekly limit on one
-model only (Opus, Sonnet), which fleet does not pause a row for either.
+model only (Opus, Sonnet): fleet pauses only the sessions launched on that
+model for it, and it is not counted here.
 Logins that no reading counts in the window are named in `logins with no
 usage reading`, an API key and a setup token as such (`ci (API key)`,
 `team (setup token)`).

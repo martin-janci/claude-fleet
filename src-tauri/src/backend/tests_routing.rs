@@ -3712,6 +3712,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         submit: true,
                         keys: Some("Enter".into()),
                         expect: None,
+                        client_msg_id: None,
                     },
                     s,
                     h,
@@ -4478,7 +4479,8 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         (
             "queue_prompt",
             "queue_prompt",
-            json!({ "session_id": 7, "prompt": "rebase on main" }),
+            // `client_msg_id` crosses the wire: the hub's dedupe key (r4 w01-4).
+            json!({ "session_id": 7, "prompt": "rebase on main", "client_msg_id": "q-1" }),
             r#"{"session_id":7,"delivered":false,"queued_id":3}"#,
             Box::new(|b, s, h| {
                 block_on(commands::sessions::routed::queue_prompt(
@@ -4486,6 +4488,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     fleet_core::service::sessions::QueuePromptArgs {
                         session_id: 7,
                         prompt: "rebase on main".into(),
+                        client_msg_id: Some("q-1".into()),
                         ..Default::default()
                     },
                     s,

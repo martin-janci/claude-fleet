@@ -58,7 +58,7 @@ describe('ScheduledPrompts', () => {
     t?.action?.run();
     await settle();
     expect(mocked).toHaveBeenCalledWith('queue_prompt', {
-      args: { session_id: 7, prompt: 'run the release checklist', not_before: 4_000_000_000 },
+      args: { session_id: 7, prompt: 'run the release checklist', not_before: 4_000_000_000, client_msg_id: expect.any(String) },
     });
   });
 

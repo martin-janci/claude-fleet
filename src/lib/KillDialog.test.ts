@@ -122,6 +122,23 @@ describe('KillDialog', () => {
     expect(calls('discard_kill_session')).toHaveLength(0);
   });
 
+  // r4 w04-1: a shell would run the request as commands, and a ghost cannot
+  // be typed to. With nobody to ask, the row is removed directly.
+  it.each([
+    ['a shell', { kind: 'shell' }],
+    ['a ghost', { status: 'ghost' }],
+  ])('Clean up removes %s in a main checkout directly, never through the agent', async (_name, over) => {
+    inspections['api'] = { ...clean, has_worktree: false, worktree_path: null, branch: null };
+    const row = session('mac', 'api', { id: 5, project_id: 7, ...over });
+    render(KillDialog, { targets: [row], mode: 'cleanup', onkill: vi.fn(), oncleaned: vi.fn(), oncancel: vi.fn() });
+    await flush();
+    expect(screen.getByTestId('kill-unknown').textContent).toContain('no tracked worktree, not checked');
+    await fireEvent.click(screen.getByTestId('kill-cleanup'));
+    await flush();
+    expect(calls('safe_kill_session')).toHaveLength(0);
+    expect(calls('discard_kill_session')).toHaveLength(1);
+  });
+
   it('words the summary', () => {
     expect(workLine({ state: 'dirty', files: [{ status: 'M', path: 'a' }], unpushed: 0, branch: null })).toBe('1 uncommitted file');
     expect(workLine({ state: 'dirty', files: [], unpushed: 1, branch: null })).toBe('1 commit not pushed');

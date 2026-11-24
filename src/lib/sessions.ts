@@ -1129,10 +1129,18 @@ export async function sendPrompt(
   hostAlias: string,
   tmuxName: string,
   prompt: string,
-  opts: { keys?: string; fleet?: string } = {},
+  opts: { keys?: string; fleet?: string; clientMsgId?: string } = {},
 ): Promise<Result<void>> {
   return invokeCmd<void>('send_prompt', {
-    args: { host_alias: hostAlias, tmux_name: tmuxName, prompt, keys: opts.keys ?? null },
+    args: {
+      host_alias: hostAlias,
+      tmux_name: tmuxName,
+      prompt,
+      keys: opts.keys ?? null,
+      // The hub's dedupe key (a standalone send ignores it): a retry with the
+      // same id answers the first result instead of typing the prompt again.
+      ...(opts.clientMsgId === undefined ? {} : { client_msg_id: opts.clientMsgId }),
+    },
     // `fleet` (multi-hub): an extra fleet's session is written on its own hub.
     ...(opts.fleet === undefined ? {} : { fleet: opts.fleet }),
   });
@@ -1216,9 +1224,25 @@ export interface SendLaterTiming {
   skipIfArchived?: boolean;
 }
 
+/** A `client_msg_id` for one message: the hub's `send_prompt` /
+ *  `queue_prompt` answer a repeat of it with the first result. */
+export function newClientMsgId(): string {
+  const c = globalThis.crypto;
+  if (typeof c?.randomUUID === 'function') return c.randomUUID();
+  return `m${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+}
+
+// `queue_prompt` attempts whose answer was a failure, by what was asked: a
+// second press of the same Send later / bulk send within ten minutes carries
+// the same `client_msg_id`, so a hub that did queue (or type) the first one
+// and lost the answer does not do it twice (reviews r4 w01-4, w09-3). A call
+// that succeeded is forgotten, so a deliberate repeat is a new prompt.
+const QUEUE_RETRY_MS = 10 * 60_000;
+const queueAttempts = new Map<string, { id: string; at: number }>();
+
 /** Send a prompt as a new turn: now when the session is idle, else once its
  *  turn ends (never into a dialog). `timing` holds it for later. */
-export function queuePrompt(
+export async function queuePrompt(
   sessionId: number,
   prompt: string,
   timing: SendLaterTiming = {},
@@ -1228,7 +1252,14 @@ export function queuePrompt(
   if (timing.notBefore !== undefined) args.not_before = Math.floor(timing.notBefore);
   if (timing.untilLimitReset) args.until_limit_reset = true;
   if (timing.skipIfArchived) args.skip_if_archived = true;
-  return invokeCmd<QueuePromptResult>('queue_prompt', { args });
+  const key = JSON.stringify(args);
+  const now = Date.now();
+  for (const [k, v] of queueAttempts) if (now - v.at > QUEUE_RETRY_MS) queueAttempts.delete(k);
+  const attempt = queueAttempts.get(key) ?? { id: newClientMsgId(), at: now };
+  queueAttempts.set(key, attempt);
+  const r = await invokeCmd<QueuePromptResult>('queue_prompt', { args: { ...args, client_msg_id: attempt.id } });
+  if (r.ok) queueAttempts.delete(key);
+  return r;
 }
 
 export function queuedPrompts(sessionId: number): Promise<Result<QueuedPrompt[]>> {

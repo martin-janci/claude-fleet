@@ -88,7 +88,10 @@ describe('FleetSessionView', () => {
     await fireEvent.input(screen.getByTestId('conv-composer-input'), { target: { value: 'go on' } });
     await fireEvent.click(screen.getByTestId('conv-composer-send'));
     await vi.waitFor(() => expect(sends()).toHaveLength(1));
-    expect(sends()[0][1]).toEqual({ args: { host_alias: 'mac', tmux_name: 'pos-3', prompt: 'go on', keys: null }, fleet: 'company' });
+    expect(sends()[0][1]).toEqual({
+      args: { host_alias: 'mac', tmux_name: 'pos-3', prompt: 'go on', keys: null, client_msg_id: expect.any(String) },
+      fleet: 'company',
+    });
     // The bubble shows at once, as on the primary's own sessions.
     expect(screen.getByTestId('conv-outgoing')).toBeTruthy();
   });

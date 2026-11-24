@@ -14,7 +14,7 @@
   import { exactTime, timeAgo } from './session_status';
   import { dashboardFeeds, summaryKey, type Widget } from './dashboards';
   import { summaryContext, type FleetData } from './dashboard_sources';
-  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
+  import { SETTING_KEYS, hubGated } from './fleet_settings';
 
   let {
     dashId,
@@ -52,7 +52,7 @@
   const cost = (micros: number) => '$' + (micros / 1_000_000).toFixed(micros < 10_000 ? 4 : 2);
 
   /** Writing help's "Dashboard summaries" (review 23b w12-8), off by default. */
-  const on = $derived(settingBool($fleetSettings, SETTING_KEYS.workDashboardSummary));
+  const on = $derived($hubGated(SETTING_KEYS.workDashboardSummary));
 
   let busy = $state(false);
   let error = $state<string | null>(null);

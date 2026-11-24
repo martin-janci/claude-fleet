@@ -46,10 +46,16 @@ const EMPTY = (owner: string, repo: string): ProjectPick => ({
   grp: null,
 });
 
-// An older hub has no `set_project_pick` tool (E_HUB_PROTOCOL) and a token
-// it refuses gets E_FORBIDDEN: neither will change on a retry, so say it
-// once per session rather than on every pin.
-const UNSUPPORTED = new Set(['E_HUB_PROTOCOL', 'E_FORBIDDEN']);
+// An older hub has no `set_project_pick` tool (E_HUB_PROTOCOL), and a hub
+// that has it serves it to the fleet admin's device only (E_FORBIDDEN: the
+// pins are one list for the fleet, not one per person). Neither will change
+// on a retry, so each is said once per session rather than on every pin, in
+// its own words (review r4 w19-3): "doesn't support" sent a refused person
+// looking for a hub update.
+const UNSUPPORTED: Record<string, string> = {
+  E_HUB_PROTOCOL: "This hub doesn't support project pins yet",
+  E_FORBIDDEN: "Project pins are set by the fleet's admin on this hub",
+};
 let unsupportedSaid = false;
 
 export function resetPickNoticeForTests(): void {
@@ -86,8 +92,8 @@ export async function setProjectPick(
   } else if (!r.ok) {
     projectPicks.update((m) => new Map(m).set(key, before));
     if (opts.quiet) return r;
-    if (UNSUPPORTED.has(r.error.code)) {
-      if (!unsupportedSaid) push({ kind: 'info', message: "This hub doesn't support project pins yet" });
+    if (Object.hasOwn(UNSUPPORTED, r.error.code)) {
+      if (!unsupportedSaid) push({ kind: 'info', message: UNSUPPORTED[r.error.code] });
       unsupportedSaid = true;
     } else {
       pushError(r.error, 'Could not save the project choice');

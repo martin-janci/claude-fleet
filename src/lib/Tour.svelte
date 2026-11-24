@@ -7,6 +7,7 @@
 -->
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import { destination } from './destination';
   import { isEditable } from './terminal_keys';
   import Button from './kit/Button.svelte';
   import Kbd from './kit/Kbd.svelte';
@@ -69,11 +70,17 @@
     if (!step) return;
     if (e.key === 'Escape') {
       // In the capture phase `defaultPrevented` is always false, so it says
-      // nothing. An Esc that closes what a step's "try it" opened (the
-      // switcher, the `?` sheet), or that a field takes, is not the tour's
-      // (review w14-5): it ends the tour only when nothing else is open.
+      // nothing. Escape ends the tour only when nothing else can want the
+      // key (reviews w14-5, r4 w04-3): focus is in the tour's own popover or
+      // on nothing at all, no dialog or menu is open, and the window shows
+      // the session view. An Esc on a focused button (the Filters panel it
+      // opened), in a field, in the terminal (it goes to the pty) or in
+      // Control (it leaves Control) is not the tour's; Skip is always there.
       const t = e.target instanceof HTMLElement ? e.target : null;
-      if (document.querySelector('dialog[open]') || isEditable(t) || t?.closest?.('dialog')) return;
+      const unfocused = t === null || t === document.body || t === document.documentElement;
+      if (!unfocused && !pop?.contains(t)) return;
+      if (document.querySelector('dialog[open], [role="menu"]') || isEditable(t)) return;
+      if ($destination !== 'session') return;
       endTour();
       return;
     }

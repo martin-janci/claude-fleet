@@ -28,7 +28,7 @@
   import { draftedBy } from './ai_proposal';
   import DialogSheet from './DialogSheet.svelte';
   import DraftedLabel from './DraftedLabel.svelte';
-  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
+  import { SETTING_KEYS, hubGated } from './fleet_settings';
   import { savedWithUndo } from './forms/form_frame';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
@@ -79,7 +79,7 @@
   const blocked = $derived(startNow ? hubActionBlocked('start_work', $hubStatus, $hubConnection) : null);
   // ── the drafted title ──
   const draftBlocked = $derived(hubActionBlocked('draft_task_title', $hubStatus, $hubConnection));
-  const draftsTitles = $derived(settingBool($fleetSettings, SETTING_KEYS.workDraftTaskTitles) && draftBlocked === null);
+  const draftsTitles = $derived($hubGated(SETTING_KEYS.workDraftTaskTitles) && draftBlocked === null);
   /** The model's last answer, and the notes it was written from. */
   let draft = $state<TitleDraft | null>(null);
   let draftedFrom = $state<string | null>(null);

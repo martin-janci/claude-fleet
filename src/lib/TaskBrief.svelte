@@ -10,7 +10,7 @@
   // as Markdown (`MarkdownView`: a data tree, never HTML); the draft as text.
   import DraftField from './DraftField.svelte';
   import MarkdownView from './MarkdownView.svelte';
-  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
+  import { SETTING_KEYS, hubGated } from './fleet_settings';
   import { untrack } from 'svelte';
   import {
     baseStartArgs,
@@ -31,7 +31,7 @@
     notes?: string | null;
   } = $props();
 
-  const enabled = $derived(settingBool($fleetSettings, SETTING_KEYS.workDraftBriefs));
+  const enabled = $derived($hubGated(SETTING_KEYS.workDraftBriefs));
   const canDraft = $derived(enabled && (task.item_id != null || !!task.key));
   const held = $derived($taskBriefDrafts.get(task.task_id) ?? null);
 

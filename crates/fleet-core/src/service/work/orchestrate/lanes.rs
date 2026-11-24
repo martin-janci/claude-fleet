@@ -384,6 +384,7 @@ async fn deliver(
                     submit: true,
                     keys: None,
                     expect: None,
+                    client_msg_id: None,
                 },
                 &deps.store,
                 &deps.ssh,

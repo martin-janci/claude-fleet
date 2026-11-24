@@ -2,13 +2,35 @@
 // helpers over the panel's thread rows (`buildThread`).
 import { get } from 'svelte/store';
 import { sessions, sessionsLoaded } from './sessions';
-import type { ConvItem, ThreadRow } from './conversation';
+import { turnAnchor, type ConvItem, type ThreadRow } from './conversation';
 import { fold, foldedIncludes } from './text_fold';
 import { chipLabel, promptParts } from './prompt_parts';
 
-/** The key the panel's `{#each thread}` uses for a row. */
+/** A row's address in the loaded window (`data-row-key`): find, the turn
+ *  stepper and scroll memory look rows up by it. A position, not an
+ *  identity: see `rowIdentities` for the `{#each}` key. */
 export function rowKey(row: ThreadRow): string {
   return row.kind === 'turn' ? `t${row.index}` : `e${row.event.id}`;
+}
+
+/**
+ * The `{#each thread}` key of every row: what the row IS, so a turn keeps
+ * its DOM (an open tool group, an open tool detail, card state) when the
+ * window slides or Load older grows it (review r4 w10-6). `t<index>` named a
+ * different turn then, and every row was patched with its neighbour's
+ * content. A turn is its anchor (`turnAnchor`), numbered when two share one;
+ * a turn with no anchor falls back to its position.
+ */
+export function rowIdentities(rows: readonly ThreadRow[]): string[] {
+  const seen = new Map<string, number>();
+  return rows.map((row) => {
+    if (row.kind === 'event') return `e${row.event.id}`;
+    const anchor = turnAnchor(row.turn);
+    if (anchor === null) return `i${row.index}`;
+    const n = seen.get(anchor) ?? 0;
+    seen.set(anchor, n + 1);
+    return n === 0 ? `a${anchor}` : `a${anchor}#${n}`;
+  });
 }
 
 export interface Match {

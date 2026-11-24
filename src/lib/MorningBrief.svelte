@@ -9,11 +9,11 @@
   import { onMount } from 'svelte';
   import DraftField from './DraftField.svelte';
   import { HUB_HAS_NO_DRAFTS, draftedAt, todayBrief, type Draft } from './drafts';
-  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
+  import { SETTING_KEYS, hubGated } from './fleet_settings';
 
   let draft = $state<Draft | null>(null);
   /** Writing help's "Draft the morning brief" (review 23b w12-8), off by default. */
-  const on = $derived(settingBool($fleetSettings, SETTING_KEYS.workDraftMorningBrief));
+  const on = $derived($hubGated(SETTING_KEYS.workDraftMorningBrief));
   let text = $state('');
   let busy = $state(false);
   let error = $state<string | null>(null);

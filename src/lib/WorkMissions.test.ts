@@ -1754,6 +1754,7 @@ describe('WorkMissions', () => {
         tmux_name: 'fleet-operator',
         prompt: 'About mission #4 "Payments v2":\n\nSplit the refunds step in two',
         keys: null,
+        client_msg_id: expect.any(String),
       });
       expect(box.value).toBe('');
       const receipt = screen.getByTestId('mission-steer-receipt');

@@ -144,6 +144,14 @@ pub struct SendPromptArgs {
     /// is for — pressed only while the pane still shows it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect: Option<super::ExpectDialog>,
+    /// Mirrors `SendPromptParams.client_msg_id` for the hub wire: a paired
+    /// desktop's outbox makes one per message and keeps it across Retry, so
+    /// a hub that typed the prompt and lost the answer replays its first
+    /// result instead of typing it again (review r4 w09-2). A standalone
+    /// send ignores it: there is no lost answer between the window and its
+    /// own backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_msg_id: Option<String>,
 }
 
 /// The wall clock of one typing script, local or over ssh. A typing runs
@@ -1233,6 +1241,7 @@ mod prompt_tests {
                 submit: true,
                 keys: Some("Delete".into()),
                 expect: None,
+                client_msg_id: None,
             },
             &store,
             &ssh,
@@ -1249,6 +1258,7 @@ mod prompt_tests {
                 submit: true,
                 keys: Some("Enter".into()),
                 expect: None,
+                client_msg_id: None,
             },
             &store,
             &ssh,
@@ -1288,6 +1298,7 @@ mod prompt_tests {
             submit: true,
             keys: None,
             expect: None,
+            client_msg_id: None,
         };
         send_prompt(args(), &store, &ssh)
             .await
@@ -1360,6 +1371,7 @@ mod prompt_tests {
                 submit: true,
                 keys: Some("Escape".into()),
                 expect: None,
+                client_msg_id: None,
             },
             &store,
             &ssh,
@@ -1474,6 +1486,7 @@ mod prompt_tests {
                 submit: true,
                 keys: None,
                 expect: None,
+                client_msg_id: None,
             },
             &store,
             &ssh,

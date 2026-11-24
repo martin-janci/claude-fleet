@@ -8,6 +8,9 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
   hubHasSetting,
+  hubGatedOn,
+  hubSettingKeys,
+  settingsUnreadable,
   fleetSettings,
   basePathError,
   hoursToSecs,
@@ -179,5 +182,42 @@ describe('hubHasSetting', () => {
     expect(hubHasSetting(null, 'recovery.auto_restore')).toBe(false);
     expect(hubHasSetting(new Set(['control.auto_continue']), 'recovery.auto_restore')).toBe(false);
     expect(hubHasSetting(new Set(['recovery.auto_restore']), 'recovery.auto_restore')).toBe(true);
+  });
+});
+
+// r4 w03-6 / w19-2: "off" is not "this window does not know".
+describe('hubGatedOn', () => {
+  const off = { 'work.prompt_tune': 'false', 'work.draft_morning_brief': 'false' };
+
+  it('is the value when the hub answered with the key', () => {
+    const keys = new Set(['work.prompt_tune', 'work.draft_morning_brief']);
+    expect(hubGatedOn(off, keys, false, 'work.prompt_tune')).toBe(false);
+    expect(hubGatedOn({ ...off, 'work.prompt_tune': 'true' }, keys, false, 'work.prompt_tune')).toBe(true);
+    expect(hubGatedOn(off, null, false, 'work.prompt_tune')).toBe(false);
+  });
+
+  it('offers what a refused read cannot say is off: the hub decides', () => {
+    expect(hubGatedOn(off, null, true, 'work.prompt_tune')).toBe(true);
+    expect(hubGatedOn(off, null, true, 'work.context_help')).toBe(true);
+  });
+
+  it('offers a feature whose toggle an older hub does not have', () => {
+    const older = new Set(['work.prompt_tune']);
+    expect(hubGatedOn(off, older, false, 'work.draft_morning_brief')).toBe(true);
+    expect(hubGatedOn(off, older, false, 'work.dashboard_summary')).toBe(true);
+    // A toggle as old as its feature stays at its default.
+    expect(hubGatedOn(off, older, false, 'work.context_help')).toBe(false);
+  });
+
+  it('a refused get_fleet_settings is remembered, and a later answer clears it', async () => {
+    const mock = mockedInvoke as ReturnType<typeof vi.fn>;
+    hubSettingKeys.set(null);
+    mock.mockRejectedValueOnce({ code: 'E_FORBIDDEN', message: 'not this device' });
+    await loadFleetSettings();
+    expect(get(settingsUnreadable)).toBe(true);
+    mock.mockResolvedValueOnce({ 'work.prompt_tune': 'false' });
+    await loadFleetSettings();
+    expect(get(settingsUnreadable)).toBe(false);
+    hubSettingKeys.set(null);
   });
 });
