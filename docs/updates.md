@@ -598,7 +598,8 @@ entrypoint loop, and agents installed without `--auto-update`.
   (as root: `/opt/fleet-agent/`); the binary the agent was started as
   becomes a symlink through `current`, as above.
 - A hub that refuses the agent's protocol wakes the pass at once; after an
-  attempt that failed before anything ran, it waits the normal interval.
+  attempt that failed, a refused agent tries again after 2, 5, 15 and then
+  every 30 minutes, not at the normal interval.
 - **To keep an agent where it is**, set `FLEET_AGENT_SELF_UPDATE=off` (or
   `0`, `false`, `no`) in its environment (the unit's `Environment=`, the
   LaunchAgent's `EnvironmentVariables`), or set `update.agent.mode` to

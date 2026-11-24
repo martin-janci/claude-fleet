@@ -906,7 +906,6 @@ fn is_bulk(frame: &HubFrame) -> bool {
     }
 }
 
-/// The upload a bulk frame belongs to.
 /// Whether an agent of this version forgets a chunked upload's pieces on
 /// `cancel` (f3f59f2ba, after 0.6.5). An older one keeps them until the
 /// final frame: it must still be sent the rest, or the pieces stay for the
@@ -917,6 +916,7 @@ fn forgets_on_cancel(agent_version: &str) -> bool {
         .is_ok_and(|v| v > fleet_update::Version::new(0, 6, 5))
 }
 
+/// The upload a bulk frame belongs to.
 fn bulk_upload_id(frame: &HubFrame) -> Option<&str> {
     match frame {
         HubFrame::UploadChunk { id, .. } | HubFrame::Upload { id, .. } => Some(id),
