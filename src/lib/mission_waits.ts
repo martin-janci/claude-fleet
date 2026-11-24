@@ -51,8 +51,15 @@ export const scopedWaitingMissions = derived([waitingMissions, effectiveScope], 
 export const waitingMissionCount = derived(scopedWaitingMissions, ($m) => $m.length);
 
 export async function loadWaitingMissions(load: () => Promise<Result<Mission[]>> = listMissions): Promise<void> {
-  const r = await load();
-  waitingMissions.set(r.ok && Array.isArray(r.value) ? waitingOf(r.value) : []);
+  setWaiting(await load());
+}
+
+/** A read that failed in passing keeps the last list (review w11-9): "no
+ *  mission waits" would drop the Inbox's rows and the badge until the next
+ *  good poll. A hub that refuses the read has none to show. */
+function setWaiting(r: Result<Mission[]>): void {
+  if (r.ok) waitingMissions.set(Array.isArray(r.value) ? waitingOf(r.value) : []);
+  else if (r.error.code === 'E_INVALID' || r.error.code === 'E_FORBIDDEN') waitingMissions.set([]);
 }
 
 /** Keep `waitingMissions` fresh while the app shows; stops on the returned
@@ -66,7 +73,7 @@ export function trackWaitingMissions(
     async () => {
       const r = await load();
       if (stopped) return false;
-      waitingMissions.set(r.ok && Array.isArray(r.value) ? waitingOf(r.value) : []);
+      setWaiting(r);
       return r.ok || r.error.code !== 'E_INVALID';
     },
     { every: deps.every ?? MISSION_WAITS_EVERY_MS, doc: deps.doc, win: deps.win },

@@ -69,7 +69,7 @@
   import { selectedSession, selectSession, selectSessionExplicitly, revealSeq } from './selection';
   import { applySessionRename, renameKeyHandler } from './session_rename';
   import { readPref, writePref } from './prefs';
-  import { accessOf, backendMode, myGrantInfo, waitsOnMe } from './access';
+  import { accessOf, backendMode, myGrantInfo, waitsOnMeOf } from './access';
   import { sharedRowLine, sharerName } from './shared_view';
   import AddProjectDialog from './AddProjectDialog.svelte';
   import { hostFilter, effectiveHostFilter, hosts, hostByAlias, hideHost } from './hosts';
@@ -105,7 +105,7 @@
   import { hintAnchor } from './hints';
   import { openNewSessionPicker } from './switcher_request';
   import { requestNewSession } from './new_session_request';
-  import { foldedIds, lostFolds } from './lost_fold';
+  import { foldedIds, isLostRow, lostFolds } from './lost_fold';
   import LostFoldRow from './LostFoldRow.svelte';
   import { setProjectPick } from './project_picks';
   import { detectMac, isEditable } from './terminal_keys';
@@ -142,6 +142,7 @@
   } from './work_filters';
   import {
     attentionState,
+    classify,
     bucketState,
     ciStatusColor,
     ciStatusLabel,
@@ -569,13 +570,28 @@
   // the user can see (it used to reach rows a later filter had hidden).
   const visibleIds = $derived.by(() => {
     const ids = new Set<number>();
-    for (const list of filteredSessionsByProject.values()) for (const s of list) ids.add(s.id);
+    // The rows drawn, so under the search too (review w12-2): the project
+    // map alone is built without it.
+    for (const s of projectRowsDrawn) ids.add(s.id);
     for (const g of workGroups) for (const s of g.sessions) ids.add(s.id);
     for (const s of orphanSessions) ids.add(s.id);
     for (const s of pinnedRows) ids.add(s.id);
     for (const s of routineRows) ids.add(s.id);
+    // Drawn with the same selectable row (review w12-3): a tick in Shared
+    // with me, or in an opened "N stopped on host" fold, stays.
+    for (const s of sharedWithMe) ids.add(s.id);
+    for (const f of lostFoldList) for (const s of f.rows) ids.add(s.id);
     return ids;
   });
+  // What the primary's list holds: the folded rows are one line, not rows.
+  const primaryRowCount = $derived.by(() => visibleIds.size - lostFoldList.reduce((n, f) => n + f.rows.length, 0));
+  // Whether this window's own list is on screen (the fleet switcher,
+  // another fleet's Machine / Org choice and its own fold can each hide it).
+  const primaryListShown = $derived(
+    !!focus || ($showPrimary && !primaryHiddenByAnchor($anchor) && (!$multiFleet || $primaryFleetOpen)),
+  );
+  /** The rows the extra fleets' groups hold (`FleetSessionGroups`). */
+  let fleetRowCount = $state(0);
   // The primary's rows another fleet's Machine / Org choice hides, counted
   // as an extra fleet's are (`fleetListView().hiddenByAnchor`): the rows
   // that pass the filters every fleet shares — Background agents, Last
@@ -586,13 +602,14 @@
     return $sessions.filter(
       (s) =>
         s.kind !== 'external' &&
-        s.status !== 'lost' &&
+        !isLostRow(s) &&
         sessionVisible(s, 'all', $showBgAgents, shared, null) &&
         sessionMatchesSearch(s, q, projectLabelOf(s.project_id)),
     ).length;
   });
   $effect(() => {
-    const vis = visibleIds;
+    // A hidden list holds no selection (review w12-4).
+    const vis = primaryListShown || $sidebarView === 'inbox' ? visibleIds : new Set<number>();
     const cur = untrack(() => selectedIds);
     if ([...cur].some((id) => !vis.has(id))) selectedIds = new Set([...cur].filter((id) => vis.has(id)));
   });
@@ -899,7 +916,9 @@
     else next.add(host);
     openFolds = next;
   }
-  const needsYouTotal = $derived(countNeedsYou(countedSessions, attentionOpts));
+  // Not a Read share's waits nor a teammate's: they are the owner's, as
+  // the rail's number has it (review w03-5).
+  const needsYouTotal = $derived(countNeedsYou(countedSessions.filter((s) => $waitsOnMeOf(s)), attentionOpts));
   const severityByProject = $derived(worstSeverityByProject(countedSessions));
 
   // Only show projects that either match the filter directly OR have at least
@@ -1107,10 +1126,18 @@
   // The same rows the project tree and "Other sessions" would show, in the
   // same order, regrouped. Collapsed groups are remembered by key.
   const flatBy = $derived(isFlatGroupBy($sidebarGroupBy) ? $sidebarGroupBy : null);
+  // The projects' rows as the list draws them. The tree shows a matching
+  // project whole, under its header; a flat grouping has no header to tie
+  // the siblings to the query, so each row is matched (review w12-5).
+  const projectRowsDrawn = $derived.by((): SessionRow[] => {
+    const all = filtered.flatMap((r) => sessionsForProject(r.project.id));
+    const q = viewSearch;
+    return flatBy && q ? all.filter((s) => sessionMatchesSearch(s, q, projectLabelOf(s.project_id))) : all;
+  });
   const flatGroups = $derived(
     flatBy
       ? groupRows(
-          [...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions],
+          [...projectRowsDrawn, ...orphanSessions],
           flatBy,
           attentionOpts,
           $startingSessions,
@@ -1132,28 +1159,23 @@
   // raises the badge (`inbox.ts`); the rest is counted in one line.
   // Multi-hub Phase 2: this window's own rows only while the fleet filter
   // shows them; the extra fleets' follow under their badges (FleetInbox).
-  const inboxPool = $derived(
+  const inboxPoolAll = $derived(
     $sidebarView === 'inbox' && $showPrimary
       ? [
           ...pinnedRows,
           ...routineRows,
           ...filtered.flatMap((r) => sessionsForProject(r.project.id)),
           ...orphanSessions,
-          ...sharedWithMe.filter((s) => waitsOnMe($accessOf(s))),
+          ...sharedWithMe,
         ]
       : [],
   );
+  const inboxPool = $derived(inboxPoolAll.filter((s) => $waitsOnMeOf(s)));
   const inboxList = $derived(inboxRows(inboxPool, attentionOpts));
   // Review w08-3 (option a): a session shared with this person at Read that
-  // waits is listed, apart and uncounted: its question is the owner's.
-  const inboxWatched = $derived(
-    $sidebarView === 'inbox' && $showPrimary
-      ? inboxRows(
-          sharedWithMe.filter((s) => !waitsOnMe($accessOf(s))),
-          attentionOpts,
-        )
-      : [],
-  );
+  // waits is listed, apart and uncounted: its question is the owner's. So
+  // is a teammate's row seen through team reach (review w11-1).
+  const inboxWatched = $derived(inboxRows(inboxPoolAll.filter((s) => !$waitsOnMeOf(s)), attentionOpts));
   const inboxNeeding = $derived(
     inboxList.length +
       $failingCount +
@@ -1193,7 +1215,8 @@
   // The footer's row count (UX audit L4): what this list holds right now.
   const listCountText = $derived.by(() => {
     if ($sidebarView === 'work') return '';
-    const n = $sidebarView === 'inbox' ? inboxList.length : visibleIds.size + sharedWithMe.length;
+    // What is on screen, whichever fleet's (review w12-4).
+    const n = $sidebarView === 'inbox' ? inboxList.length : (primaryListShown ? primaryRowCount : 0) + fleetRowCount;
     return `${n} ${$sidebarView === 'inbox' ? 'waiting' : n === 1 ? 'session' : 'sessions'}`;
   });
   // Redesign step 7.4: a row whose state moves it to another group is a new
@@ -1911,14 +1934,14 @@
          (Phase 3a, fleet_filters.ts). -->
     {#if $multiFleet && ($showPrimary || focus)}
       <PrimaryFleetHeader
-        count={visibleIds.size + sharedWithMe.length}
+        count={primaryRowCount}
         hiddenCount={primaryHiddenCount}
         focused={!!focus}
       />
     {/if}
     <!-- A focus ("Showing only X") is past every filter, the fleet switcher,
          the anchor and the fold included: its one row is in this list. -->
-    {#if focus || ($showPrimary && !primaryHiddenByAnchor($anchor) && (!$multiFleet || $primaryFleetOpen))}
+    {#if primaryListShown}
     {#if pinnedRows.length > 0}
       <div class="orphan-section pinned-section" data-testid="pinned-sessions">
         <button
@@ -2357,7 +2380,7 @@
                   <!-- Gap plan G4.2, the Watch board's Inbox row: "Martin ·
                        Read · waiting for Martin", "Martin · via 32bit · Steer". -->
                   <div class="shared-by" data-testid="shared-by"
-                    >{sharedRowLine(level, info, sharerName(sess, info, $orgList), attentionState(sess, attentionOpts))}</div
+                    >{sharedRowLine(level, info, sharerName(sess, info, $orgList), attentionState(sess, attentionOpts), classify(sess, attentionOpts))}</div
                   >
                 {/if}
               {/snippet}
@@ -2435,7 +2458,7 @@
     {/if}
     <!-- Extra fleets (multi-hub design): each fleet the filter shows, under
          its own badge, after this window's own list. -->
-    <FleetSessionGroups search={searchQuery} {recency} {needsYouOnly} focused={!!focus} />
+    <FleetSessionGroups search={searchQuery} {recency} {needsYouOnly} focused={!!focus} oncount={(n) => (fleetRowCount = n)} />
   </div>
   {/if}
 

@@ -247,6 +247,8 @@ describe('signed-out logins', () => {
     expect(headroomForAccount(h, 'acc-own').suggestion?.profile).toBe('spare');
     expect(freestLogin(logins)?.profile).toBe('spare');
     expect(usedText(logins[1])).toBe('signed out');
+    // Review w07-9: the meter's rounding (63.5% used is 37% left there).
+    expect(usedText({ profile: null, account_uuid: 'a', used_pct: 63.5 })).toBe('37% left');
   });
 });
 

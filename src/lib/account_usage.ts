@@ -39,7 +39,14 @@ export const LOCAL_HOST = 'local';
 /** % left of a window, rounded for display and clamped to 0..100. */
 export function leftPct(w: UsageWindow): number {
   const u = Number.isFinite(w.utilization) ? w.utilization : 100;
-  return Math.min(100, Math.max(0, Math.round(100 - u)));
+  return leftOfUsed(u);
+}
+
+/** % left for a figure given as % used: the one rounding every "% left"
+ *  in the app uses, so a reading never shows two figures (review w07-9:
+ *  63.5% used read 37% on the meter and 36% on Switch account). */
+export function leftOfUsed(usedPct: number): number {
+  return Math.min(100, Math.max(0, Math.round(100 - usedPct)));
 }
 
 /**
@@ -61,18 +68,26 @@ export function usedPct(w: UsageWindow): number {
  * Whether a window's last-known value may still be shown. Fresh ≤ 6 min;
  * stale up to 30 min (5-hour) or 3 h (weekly); expired beyond, when never
  * fetched, or once `now` is past the window's reset.
+ *
+ * A window read at its limit (`utilization` ≥ 100) with its reset still
+ * ahead cannot have changed, and the row classifier keeps a session paused
+ * on it whatever the reading's age (`attention_facts.ts`): it never expires,
+ * it only goes stale (review w07-2: the pill went blank exactly while the
+ * limit lasted).
  */
 export function freshness(
   window: UsageWindowKind,
   fetchedAt: number | null,
   resetsAt: number | null,
   now: number,
+  utilization?: number,
 ): Freshness {
   if (fetchedAt === null) return 'expired';
   if (resetsAt !== null && now > resetsAt) return 'expired';
   const age = now - fetchedAt;
   if (age <= FRESH_SECS) return 'fresh';
   if (age <= STALE_LIMIT_SECS[window]) return 'stale';
+  if (utilization !== undefined && utilization >= 100 && resetsAt !== null) return 'stale';
   return 'expired';
 }
 
@@ -80,7 +95,9 @@ const LEVELS: UsageSeverity[] = ['ok', 'caution', 'low', 'limit'];
 
 /**
  * ok ≥ 50% left, caution 20–50, low < 20, limit at 0. The 5-hour window drops
- * one level while its reset is under 15 minutes away. `hasExtraUsage` never
+ * one level while its reset is under 15 minutes away, except at the limit:
+ * a session on it is paused until the reset, and the pill must not read
+ * "LOW" beside a row that says so (review w07-2). `hasExtraUsage` never
  * changes the level, only its wording (`limitWording`).
  */
 export function severity(
@@ -95,7 +112,7 @@ export function severity(
   else if (left < LOW_BELOW_PCT) i = 2;
   else if (left < CAUTION_BELOW_PCT) i = 1;
   else i = 0;
-  if (window === '5h' && resetsAt !== null && resetsAt > now && resetsAt - now < RESET_SOON_SECS) {
+  if (i < 3 && window === '5h' && resetsAt !== null && resetsAt > now && resetsAt - now < RESET_SOON_SECS) {
     i = Math.max(0, i - 1);
   }
   return LEVELS[i];
@@ -303,7 +320,7 @@ export function chipLabel(
   const kind = bindingWindow(snapshot.usage, now);
   const w = windowOf(snapshot.usage, kind ?? '5h');
   if (!kind || !w) return '? left';
-  const fr = freshness(kind, snapshot.fetched_at, w.resets_at, now);
+  const fr = freshness(kind, snapshot.fetched_at, w.resets_at, now, w.utilization);
   if (fr === 'expired') return '? left';
   const left = leftPct(w);
   const level = severity(kind, severityLeft(w), w.resets_at, now, hasExtraUsage);

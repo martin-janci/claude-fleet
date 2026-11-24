@@ -61,7 +61,7 @@ export function accountPill(
   const kind = bindingWindow(usage, now);
   const w = kind ? windowOf(usage, kind) : null;
   const shown =
-    kind !== null && w !== null && freshness(kind, snap?.fetched_at ?? null, w.resets_at, now) !== 'expired';
+    kind !== null && w !== null && freshness(kind, snap?.fetched_at ?? null, w.resets_at, now, w.utilization) !== 'expired';
   if (!shown || !kind || !w) {
     return { uuid, label, left: null, window: null, level: 'ok', text: label, title: `Account ${label}` };
   }

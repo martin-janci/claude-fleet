@@ -70,6 +70,8 @@
   const byId = $derived(new Map(tasks.map((t) => [t.task_id, t])));
   const taskById = (id: string) => byId.get(id);
   let loaded = $state(false);
+  /** The hub held more tasks than the one page read (review w12-7). */
+  let more = $state(false);
   let error = $state<IpcError | null>(null);
   /** Review w17-7: a re-read of the list shown (same filters) failed; the
    *  tasks stay, with a one-line note, as WorkTree does. */
@@ -112,6 +114,7 @@
     refreshError = null;
     shownKey = key;
     read = Array.isArray(r.value?.tasks) ? r.value.tasks : [];
+    more = !!r.value?.next_cursor;
     const orgs = Array.isArray(r.value?.orgs) ? r.value.orgs : [];
     onpage?.({
       ...r.value,
@@ -262,6 +265,9 @@
     {#if sections.done.length > 0}{@render section('done', 'Done · last 7 days', sections.done, doneOpen)}{/if}
     {#if emptySections.length > 0}
       <p class="muted" data-testid="task-sections-empty">Nothing in {emptySections.join(' or ')}.</p>
+    {/if}
+    {#if more}
+      <p class="muted" data-testid="task-list-more">Showing the 200 most recent tasks. Narrow the Work view's filters to see the rest.</p>
     {/if}
     {#if unplaced}<p class="muted" data-testid="task-list-unplaced">{unplaced}</p>{/if}
   {/if}

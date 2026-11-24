@@ -9,7 +9,7 @@ import { hosts } from './hosts';
 import { orgs, projectOrgId } from './orgs';
 import { projects } from './projects';
 import { invokeCmd, type Result } from './result';
-import { formatResetShort } from './account_usage';
+import { formatResetShort, leftOfUsed } from './account_usage';
 
 /** Mirrors `account_limits::HostLogin`. */
 export interface HostLogin {
@@ -74,7 +74,7 @@ export function loginLabel(l: HostLogin, accountName: (uuid: string) => string):
  *  reads as % left (review 2026-11-03 D8). */
 export function usedText(l: HostLogin): string {
   if (l.signed_out) return 'signed out';
-  return l.used_pct == null ? 'no reading' : `${Math.max(0, 100 - Math.round(l.used_pct))}% left`;
+  return l.used_pct == null ? 'no reading' : `${leftOfUsed(l.used_pct)}% left`;
 }
 
 /** When a paused row's limit resets, for its Wait button, the Wait toast

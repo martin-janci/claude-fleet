@@ -111,9 +111,12 @@ describe('WorkFiltersBar', () => {
     await fireEvent.click(screen.getByTestId('facet-orgs'));
     expect(get(workViewFilters).orgs).toBeUndefined();
     expect(get(workViewFilters).tracker).toBe(1);
+    // Review w12-8: Clear leaves how the tree is grouped and sorted.
+    workViewFilters.update((f) => ({ ...f, group_by: 'person', sort: 'due' }));
     await fireEvent.click(screen.getByTestId('work-filter-clear'));
-    expect(get(workViewFilters)).toEqual({});
+    expect(get(workViewFilters)).toEqual({ group_by: 'person', sort: 'due' });
     expect((screen.getByTestId('work-search') as HTMLInputElement).value).toBe('');
+    workViewFilters.set({});
   });
 
   it('the Label select adds no second spelling of a facet label (case and diacritics folded)', async () => {

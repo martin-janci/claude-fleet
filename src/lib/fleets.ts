@@ -27,6 +27,7 @@ import { attentionIdleMinutes } from './notify';
 import type { PrFilter, PrList } from './prs';
 import type { OrgDetail } from './orgs';
 import { createListRace, type ListRace } from './row_store';
+import { rowWaitsOnMe, type MyGrantsAnswer, type SessionAccess } from './access';
 
 /** The slot id of the launch-time fleet (`backend::fleets::PRIMARY`). */
 export const PRIMARY = 'primary';
@@ -168,6 +169,11 @@ export interface FleetRows {
    *  events brought, so they are no baseline for notifications (review
    *  w01-13; the primary's `sessionsLoaded`). */
   loaded?: boolean;
+  /** Who this device is on that hub, and the levels granted to that person
+   *  there (`my_grants`, review w11-1): which rows' waits are theirs. Absent
+   *  until read, and on a hub that will not say; every row then counts. */
+  me?: number | null;
+  grants?: ReadonlyMap<number, string>;
 }
 
 /** The envelope of `fleet:event`. */
@@ -491,6 +497,8 @@ function patchRows(fleet: string, fn: (rows: FleetRows) => void, parts: readonly
       orgs: rows.orgs,
       error: rows.error,
       loaded: rows.loaded,
+      me: rows.me,
+      grants: rows.grants,
     };
     fn(copy);
     next.set(fleet, copy);
@@ -534,6 +542,10 @@ export function onFleetEvent(e: FleetEvent): void {
     }
   } else if (e.name === 'hub:resynced') {
     void loadFleetRows(fleet);
+  } else if (e.name === 'grant:changed') {
+    // A share to (or taken from) this person there changes which rows wait
+    // on them (review w11-1).
+    if (!isDuplicate(fleet)) void loadFleetAccess(fleet);
   }
   // Anything else (tasks, accounts, `work:changed`) is not kept here.
 }
@@ -582,6 +594,7 @@ export async function loadFleetRows(fleet: string): Promise<void> {
   ]);
   // The list of fleets may have named it a duplicate while these were out.
   if (isDuplicate(fleet)) return;
+  void loadFleetAccess(fleet);
   patchRows(fleet, (rows) => {
     if (s.ok && Array.isArray(s.value)) {
       // Killed (tombstoned) or older than the row held: the list never
@@ -611,6 +624,31 @@ export async function loadFleetRows(fleet: string): Promise<void> {
     const failed = [s, h, p].find((r) => !r.ok) as { ok: false; error: IpcError } | undefined;
     rows.error = failed ? failed.error.message : null;
   });
+}
+
+/** Read who this device is on an extra fleet and what is shared with that
+ *  person there (review w11-1). Best effort: a failure keeps the last answer. */
+export async function loadFleetAccess(fleet: string): Promise<void> {
+  const r = await invokeCmd<MyGrantsAnswer>('my_grants', { fleet });
+  if (!r.ok || !r.value || isDuplicate(fleet)) return;
+  const me = typeof r.value.person_id === 'number' ? r.value.person_id : null;
+  const grants = new Map<number, string>();
+  for (const g of r.value.grants ?? []) if (typeof g?.session_id === 'number') grants.set(g.session_id, g.level);
+  patchRows(fleet, (rows) => {
+    rows.me = me;
+    rows.grants = grants;
+  }, []);
+}
+
+/** Whether a row of an extra fleet waits on this person (`rowWaitsOnMe`,
+ *  by that fleet's own answer to `my_grants`). */
+export function fleetRowWaitsOnMe(rows: Pick<FleetRows, 'me' | 'grants'>, s: Pick<SessionRow, 'id' | 'owner_person_id'>): boolean {
+  const me = rows.me ?? null;
+  if (me === null) return true;
+  if (s.owner_person_id != null && s.owner_person_id === me) return true;
+  const level = rows.grants?.get(s.id);
+  const access: SessionAccess = level === 'watch' || level === 'answer' || level === 'drive' ? level : null;
+  return rowWaitsOnMe(s, access, me);
 }
 
 let started = false;
@@ -1014,7 +1052,9 @@ export function defaultFleetFor(owner: string, choices: readonly FleetChoice[], 
 export function fleetNeedsYou(rows: FleetRows, idleSecs: number, now: number): SessionRow[] {
   const opts = { idleSecs, now, facts: attentionFactsFrom([...rows.hosts.values()], {}, now) };
   return byTriage(
-    [...rows.sessions.values()].filter((s) => countsTowardBadge(attentionState(s, opts))),
+    // Not a teammate's row seen through team reach, nor a Read share: its
+    // waits are its owner's (review w11-1).
+    [...rows.sessions.values()].filter((s) => fleetRowWaitsOnMe(rows, s) && countsTowardBadge(attentionState(s, opts))),
     opts,
   );
 }

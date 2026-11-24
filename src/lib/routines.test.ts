@@ -185,6 +185,10 @@ describe('the Inbox', () => {
     expect(get(failing)).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1000);
     expect(load).toHaveBeenCalledTimes(2);
+    // Review w11-9: a poll that fails in passing keeps the last list.
+    load.mockResolvedValue({ ok: false, error: { code: 'E_NETWORK', message: 'timed out' } });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(get(failing)).toHaveLength(1);
     stop();
     const old = vi.fn().mockResolvedValue({ ok: false, error: { code: 'E_INVALID', message: 'action must be …' } });
     trackFailingRoutines({ load: old, doc: null, win: null, every: 1000, listen });

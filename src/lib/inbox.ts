@@ -38,7 +38,7 @@ import { groupRows } from './row_groups';
 import { localMidnight } from './today';
 import { badgeCounts, badgeNumber, readPref, writePref } from './prefs';
 import { fleetInboxCount, showPrimary } from './fleets';
-import { accessOf, waitsOnMe } from './access';
+import { waitsOnMeOf } from './access';
 
 /** The rows that need you, worst first (`byTriage`). */
 export function inboxRows(rows: readonly SessionRow[], opts: AttentionOptions): SessionRow[] {
@@ -243,7 +243,7 @@ export const inboxCount = derived(
     fleetInboxCount,
     attentionFacts,
     reviewRequestCount,
-    accessOf,
+    waitsOnMeOf,
   ],
   ([
     $sessions,
@@ -259,7 +259,7 @@ export const inboxCount = derived(
     $fleets,
     $facts,
     $asks,
-    $accessOf,
+    $mine,
   ]) => {
     const scope = $scope === 'all' ? null : { id: $scope, of: $of };
     // Multi-hub Phase 2: the extra fleets the fleet filter shows count too,
@@ -267,7 +267,7 @@ export const inboxCount = derived(
     // shared with this person at Read waits on its owner, not on them
     // (review w08-3, option a).
     const visible = $showPrimary
-      ? $sessions.filter((s) => sessionVisible(s, $host, $bg, null, scope) && waitsOnMe($accessOf(s)))
+      ? $sessions.filter((s) => sessionVisible(s, $host, $bg, null, scope) && $mine(s))
       : [];
     return (
       $fleets +
@@ -291,11 +291,11 @@ export const inboxBadge = derived([inboxCount, badgeCounts], ([$n, $pref]) => ba
  *  attention facts (step 2.4), for code that walks the queue rather than
  *  drawing it: the Conversation's "moved to next" after an answer (5.9). */
 export const inboxQueue = derived(
-  [sessions, effectiveHostFilter, showBgAgents, effectiveScope, scopeOf, attentionIdleMinutes, attentionFacts, accessOf],
-  ([$sessions, $host, $bg, $scope, $of, $idle, $facts, $accessOf]) => {
+  [sessions, effectiveHostFilter, showBgAgents, effectiveScope, scopeOf, attentionIdleMinutes, attentionFacts, waitsOnMeOf],
+  ([$sessions, $host, $bg, $scope, $of, $idle, $facts, $mine]) => {
     const scope = $scope === 'all' ? null : { id: $scope, of: $of };
     // Not a Read share's waits: they are its owner's (review w08-3).
-    const visible = $sessions.filter((s) => sessionVisible(s, $host, $bg, null, scope) && waitsOnMe($accessOf(s)));
+    const visible = $sessions.filter((s) => sessionVisible(s, $host, $bg, null, scope) && $mine(s));
     return inboxRows(visible, { idleSecs: $idle * 60, now: Math.floor(Date.now() / 1000), facts: $facts });
   },
 );

@@ -60,6 +60,7 @@
     recency = 'all',
     needsYouOnly = false,
     focused = false,
+    oncount,
   }: {
     /** The Sessions list's own search, Last active and Needs you (Sidebar
      *  state, not stores), applied to every fleet alike. */
@@ -69,6 +70,9 @@
     /** The primary list is narrowed to one session (`session_focus.ts`):
      *  no extra fleet's rows show beside it. */
     focused?: boolean;
+    /** How many rows the groups hold under the filters (review w12-4): the
+     *  sidebar's footer counts what is on screen, whichever fleet's. */
+    oncount?: (n: number) => void;
   } = $props();
 
   // A coarse clock for Last active, as the primary's list keeps.
@@ -159,21 +163,31 @@
     if (r.ok) starting = null;
     else push({ kind: 'error', message: `Starting a session on ${f.label} failed`, detail: r.error.message });
   }
+
+  function viewOf(f: FleetInfo, rows: FleetRows) {
+    return fleetListView(f.id, rows, {
+      anchor: $anchor,
+      search,
+      recency,
+      nowSec,
+      showBg: $showBgAgents,
+      agent: $agentFilter,
+      needsYouOnly,
+      needs: $fleetNeedsIds.get(f.id) ?? NONE,
+    });
+  }
+  const shownCount = $derived(
+    focused ? 0 : $visibleExtraFleets.reduce((n, { fleet, rows }) => n + viewOf(fleet, rows).shown.length, 0),
+  );
+  $effect(() => {
+    oncount?.(shownCount);
+  });
 </script>
 
 {#each focused ? [] : $visibleExtraFleets as { fleet: f, rows } (f.id)}
   {@const cw = connectionWord(f)}
   {@const needs = $fleetNeedsIds.get(f.id) ?? NONE}
-  {@const view = fleetListView(f.id, rows, {
-    anchor: $anchor,
-    search,
-    recency,
-    nowSec,
-    showBg: $showBgAgents,
-    agent: $agentFilter,
-    needsYouOnly,
-    needs,
-  })}
+  {@const view = viewOf(f, rows)}
   {@const list = sorted(rows, view.shown)}
   {@const isFolded = folded.includes(f.id)}
   <section class="fleet-group" style="--fleet: {f.color}" data-testid="fleet-group-{f.id}">

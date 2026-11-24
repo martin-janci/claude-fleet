@@ -275,11 +275,12 @@ export function pausedSessions(
   });
 }
 
-/** "7 sessions · 2 routines · $18.40 today": the card's count line. */
+/** "7 sessions · 2 routines · $18.40 today (UTC)": the card's count line. */
 export function countLine(sessions: number, routines: number, spend: string | null, fallbacks = 0): string {
   const parts = [`${sessions} ${sessions === 1 ? 'session' : 'sessions'}`];
   if (routines > 0) parts.push(`${routines} ${routines === 1 ? 'routine' : 'routines'}`);
   if (fallbacks > 0) parts.push(`fallback for ${fallbacks} ${fallbacks === 1 ? 'routine' : 'routines'}`);
-  if (spend !== null) parts.push(`${spend} today`);
+  // The spend is the hub's UTC day, as the daily limit is (review w07-10).
+  if (spend !== null) parts.push(`${spend} today (UTC)`);
   return parts.join(' · ');
 }

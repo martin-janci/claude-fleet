@@ -7,13 +7,14 @@
   // commands in `FLEET_SCOPED`, and none of the host-management ones are).
   import { visibleExtraFleets, connectionWord, loadFleetRows, retryFleet } from './fleets';
   import { timeAgo } from './session_status';
+  import { isLostRow } from './lost_fold';
   import Button from './kit/Button.svelte';
 
   const groups = $derived(
     $visibleExtraFleets.map(({ fleet, rows }) => {
       const counts = new Map<string, number>();
       for (const s of rows.sessions.values()) {
-        if (s.status === 'lost') continue;
+        if (isLostRow(s)) continue;
         counts.set(s.host_alias, (counts.get(s.host_alias) ?? 0) + 1);
       }
       const list = [...rows.hosts.values()].filter((h) => !h.hidden).sort((a, b) => a.alias.localeCompare(b.alias));

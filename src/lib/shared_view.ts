@@ -5,7 +5,7 @@
 // Steer", and the read-only answer card's line. Pure: the components feed it
 // `access.ts`'s level and `myGrantInfo`.
 import type { GrantInfo, GrantLevel } from './access';
-import type { AttentionState } from './attention';
+import type { AttentionState, TriageBucket } from './attention';
 import type { OrgDetail } from './orgs';
 import { personName } from './session_scope';
 import type { SessionRow } from './sessions';
@@ -92,12 +92,18 @@ export function sharedRowLine(
   info: GrantInfo | undefined,
   sharer: string | null,
   state: AttentionState | null,
+  /** The row's triage bucket. Only `waiting` (a dialog or a form) is a
+   *  recipient's to answer; a down host, an account limit, a lost login, a
+   *  stuck pane or a full context is the owner's at every level (review
+   *  w04-2). Left out, any wait at Answer or Steer reads as the recipient's. */
+  bucket?: TriageBucket | null,
 ): string {
   const who = sharer ?? 'Shared with you';
   const parts = [who];
   if (info?.viaOrg) parts.push(`via ${info.viaOrg}`);
   parts.push(LEVEL_NAMES[level]);
-  if (waitsOnOwner(state, level)) parts.push(`waiting for ${sharer ?? 'the owner'}`);
+  const theirs = bucket != null && bucket !== 'waiting';
+  if (waits(state) && (theirs || waitsOnOwner(state, level))) parts.push(`waiting for ${sharer ?? 'the owner'}`);
   else if (waits(state)) parts.push('waiting for you');
   return parts.join(' · ');
 }
