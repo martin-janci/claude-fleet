@@ -332,11 +332,16 @@ the copy of state.db you backed up before upgrading.
 ```
 
 That message is the whole rollback procedure for a version that migrated:
-go forward again, or restore the backup you took above — with the hub stopped,
-`docker compose cp state.db.<date>.bak
-fleet-hub:/var/lib/fleet-hub/state.db`, then start the older version. Sessions
-that ran while the newer release was up are in the newer database, not in the
-restored one. Rolling back between two versions that share a schema needs
+go forward again, or restore the backup you took above
+(`pre-upgrade-<stamp>.db`, in `/var/lib/fleet-hub/backups/` inside the data
+volume and wherever you copied it) by following *Restore drill* below, then
+start the older version. Do not copy the file over `state.db` by hand: the
+drill also moves `state.db-wal` and `state.db-shm` aside (left in place,
+SQLite replays the newer release's pages over the restored file, which undoes
+the restore or damages it) and gives the file to uid 1000, the user the hub
+runs as (`docker cp` writes it as root, and the hub cannot open that).
+Sessions that ran while the newer release was up are in the newer database,
+not in the restored one. Rolling back between two versions that share a schema needs
 none of this and loses nothing.
 
 **If a pull fails.** `manifest unknown` means the tag does not exist — check
@@ -452,7 +457,10 @@ sudo FLEET_HUB_DATA=/volume1/docker/fleet-hub/data deploy/hub/backup.sh
 `FLEET_HUB_DATA` defaults to `/volume1/docker/fleet-hub/data` (the Synology
 layout below); point it at the compose directory's `data/` anywhere else.
 
-It runs `.backup`, then `PRAGMA integrity_check` on the copy (a failed check
+It runs `VACUUM INTO` (one read snapshot, as `fleet-hub backup` does, so a
+busy hub cannot make it start over; a `sqlite3` older than 3.27 gets
+`.backup` under `timeout`, `BACKUP_TIMEOUT` seconds, default 3600), then
+`PRAGMA integrity_check` on the copy (a failed check
 removes it and exits 1; a run killed mid-copy removes its `.part`), then
 prunes to the newest `KEEP` files of its own `PREFIX` — other prefixes are
 never touched (`PREFIX=pre-1.0.0` prunes `pre-1.0.0-<stamp>.db`, never
@@ -506,7 +514,8 @@ The backups to restore from are `backup.sh`'s `state-<stamp>.db` (and
 `upgrade.sh`'s `pre-<version>-<stamp>.db`) in `backups/` beside the compose
 file, and the hub's own daily `daily-<stamp>.db` and `fleet-hub backup`'s
 `<prefix>-<stamp>.db` under `/var/lib/fleet-hub/backups/`, inside the data
-volume. With a bind-mounted `./data` (*Behind an existing reverse proxy*):
+volume, where the *Back up first* copy (`pre-upgrade-<stamp>.db`) is too.
+With a bind-mounted `./data` (*Behind an existing reverse proxy*):
 
 ```bash
 docker compose stop fleet-hub
@@ -530,7 +539,7 @@ docker compose up -d fleet-hub
 ```
 
 A copy you took out with `docker compose cp` goes back in the same way:
-`docker run --rm -v fleet-hub_hub-data:/d -v "$PWD":/b alpine cp /b/<file>.db /d/state.db`
+`docker run --rm -v fleet-hub_hub-data:/d -v "$PWD":/b alpine sh -c 'cp /b/<file>.db /d/state.db && chown 1000 /d/state.db'`
 (after moving the old `state.db`, `-wal` and `-shm` aside as above).
 
 Restoring a copy taken before a migration onto a newer image re-runs the
