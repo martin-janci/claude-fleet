@@ -574,6 +574,37 @@ pub fn set_project_trust(s: &Store, project_id: i64, on: bool) -> Result<BTreeSe
     Ok(set)
 }
 
+/// A removed project lets go of its trust, and a merged one hands it to the
+/// project it went into (review w13-4): a project id is a reused rowid, so
+/// an id left in the set would trust the next repository that takes it,
+/// which nobody trusted. Best effort, after the row is gone; through
+/// `settings::set`, so it is audited and announced.
+pub fn forget_project_trust(s: &Store, gone: i64, into: Option<i64>) {
+    let mut set = trusted_projects(s);
+    if !set.remove(&gone) {
+        return;
+    }
+    if let Some(into) = into {
+        set.insert(into);
+    }
+    let written = serde_json::to_string(&set.iter().collect::<Vec<_>>())
+        .map_err(|e| IpcError::new(codes::E_INTERNAL, e.to_string()))
+        .and_then(|json| {
+            crate::service::settings::set(
+                s,
+                crate::service::settings::WORK_TRUSTED_BRANCH_PROJECTS,
+                &json,
+            )
+        });
+    if let Err(e) = written {
+        tracing::warn!(
+            project = gone,
+            error = %e.message,
+            "[work] a removed project's branch-key trust could not be dropped"
+        );
+    }
+}
+
 /// The detection state of `session_id`, or `None` for a session that is
 /// never a detection subject: the operator (the UX agent). It coordinates
 /// every task, so the keys it reads and names are the fleet's, not a sign of

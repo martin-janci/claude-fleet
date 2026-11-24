@@ -820,6 +820,10 @@ impl Store {
     /// Nor a row that is no longer the run's (w05-1): a session id is
     /// reused once its row is deleted, so a row this routine did not start,
     /// or one a later run started, is another session (as `run_session`).
+    /// The runs of a deleted routine (`routine_id` NULL, migration 166) are
+    /// one group and still close: their sessions stay, and nothing else
+    /// would ever end them (w02-5). A reused id among them is still covered:
+    /// the row is a routine's, and no later run holds it.
     pub fn routine_sessions_to_close(
         &self,
         idle_before: i64,
@@ -836,7 +840,8 @@ impl Store {
                                          ORDER BY rr.started_at DESC, rr.id DESC) AS newest \
                  FROM routine_runs rr JOIN sessions s ON s.id = rr.session_id \
                 WHERE s.status = 'running' \
-                  AND s.origin = 'routine' AND s.origin_ref = CAST(rr.routine_id AS TEXT) \
+                  AND s.origin = 'routine' \
+                  AND (rr.routine_id IS NULL OR s.origin_ref = CAST(rr.routine_id AS TEXT)) \
                   AND NOT EXISTS (SELECT 1 FROM routine_runs o \
                                    WHERE o.session_id = rr.session_id AND o.id > rr.id)) \
              SELECT l.sid, l.host_alias, l.tmux_name FROM live l \
