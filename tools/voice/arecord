@@ -75,6 +75,7 @@ if [ -r "$ENV_FILE" ] && [ -r "$HEADERS" ]; then
       *409*) reason="$reason — turn on 🎤 for this session in claude-fleet" ;;
       *423*) reason="$reason — this session is already recording; try again in a moment" ;;
       *403*) reason="$reason — voice relay is off in claude-fleet settings, or this host needs provisioning again" ;;
+      *401*) reason="$reason — the fleet server does not know this host's token: this host needs provisioning again" ;;
     esac
   fi
 fi

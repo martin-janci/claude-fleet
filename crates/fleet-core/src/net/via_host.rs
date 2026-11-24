@@ -185,9 +185,15 @@ pub fn parse_included(raw: &[u8]) -> Option<Response> {
 }
 
 /// An SSH-level failure → the transport error it means.
+///
+/// An SSH time-out is `Connect`, not `Timeout` (review 23b w02-4): the
+/// command's own clock (curl's `--max-time`, `gh`'s) runs out first, so an
+/// SSH time-out is the connection to the host (a wedged mux master, a
+/// dropped VPN) with no answer from the script, and a `Timeout` would mark
+/// a request that never ran as possibly delivered, never retried.
 pub(crate) fn ssh_error(host: &str, e: crate::ipc_error::IpcError) -> TransportError {
     if e.code == crate::ipc_error::codes::E_SSH_TIMEOUT {
-        TransportError::Timeout
+        TransportError::Connect(format!("{host}: the SSH connection timed out"))
     } else {
         TransportError::Connect(format!("{host}: {}", crate::logging::redact(&e.message)))
     }
@@ -331,13 +337,17 @@ dd bs=1 count=@@HLEN@@ of="$d/h" 2>/dev/null
 exec 3<"$d/h"
 rm -f "$d/h"
 cat > "$d/b"
-code=$(curl -q -sS --proto =https --proto-redir =https --max-redirs 0 --max-time @@TIME@@ --max-filesize @@CAP@@ -X @@METHOD@@ -H @/dev/fd/3 @@DATA@@ -D "$d/rh" -o "$d/rb" -w '%{http_code}' @@URL@@ 2>"$d/err")
+code=$(curl -q -sS --proto =https --proto-redir =https --max-redirs 0 --max-time @@TIME@@ --max-filesize @@CAP@@ -X @@METHOD@@ -H @/dev/fd/3 @@DATA@@ -D "$d/rh" -o "$d/rb" -w '%{http_code} %{size_request}' @@URL@@ 2>"$d/err")
 rc=$?
+sent=${code#* }
+code=${code%% *}
 printf '__fleet_status__=%s
 ' "$code"
 printf '__fleet_curl_exit__=%s
 ' "$rc"
 if [ "$code" = 000 ] || [ "$rc" -ne 0 ]; then
+  printf '__fleet_sent__=%s
+' "$sent"
   grep -a '^curl: (' "$d/err" 2>/dev/null | head -n 2
   exit 0
 fi
@@ -496,7 +506,19 @@ fn parse_curl(host: &str, raw: &[u8], max_body: u64) -> Result<Response, Transpo
             .chars()
             .take(300)
             .collect();
+        // How many bytes of the request curl sent (`%{size_request}`):
+        // `0` is a time-out before the request left (the connect, TLS),
+        // which nothing at the tracker can have acted on, so it is
+        // retried as unreachable rather than "may have been created"
+        // (review 23b w02-4). Absent (an older script), it is not known.
+        let sent: Option<u64> = String::from_utf8_lossy(rest)
+            .lines()
+            .find_map(|l| l.strip_prefix("__fleet_sent__="))
+            .and_then(|n| n.trim().parse().ok());
         return Err(match exit {
+            28 if sent == Some(0) => TransportError::Connect(format!(
+                "curl on {host} timed out before the request was sent: {why}"
+            )),
             28 => TransportError::Timeout,
             63 => TransportError::TooLarge(format!(
                 "curl on {host} refused a body over {} MiB (status {code}): {why}",
@@ -1086,6 +1108,37 @@ mod curl_tests {
             Match::Any,
             Reply::ok(
                 "__fleet_status__=000\n__fleet_curl_exit__=28\ncurl: (28) Operation timed out\n",
+            ),
+        );
+        let e = curl(&f)
+            .send(Request::get("https://jira.corp.example/x"))
+            .await
+            .unwrap_err();
+        assert_eq!(e, TransportError::Timeout);
+
+        // Review 23b w02-4: timed out before a byte of the request left
+        // (connect, TLS): nothing was sent, so it is not "maybe delivered".
+        let f = FakeSsh::new();
+        f.on(
+            Match::Any,
+            Reply::ok(
+                "__fleet_status__=000\n__fleet_curl_exit__=28\n__fleet_sent__=0\ncurl: (28) Connection timed out after 10001 milliseconds\n",
+            ),
+        );
+        let e = curl(&f)
+            .send(Request::get("https://jira.corp.example/x"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, TransportError::Connect(m) if m.contains("before the request was sent")),
+            "{e:?}"
+        );
+        // Sent, then timed out waiting: it may have been acted on.
+        let f = FakeSsh::new();
+        f.on(
+            Match::Any,
+            Reply::ok(
+                "__fleet_status__=000\n__fleet_curl_exit__=28\n__fleet_sent__=412\ncurl: (28) Operation timed out\n",
             ),
         );
         let e = curl(&f)

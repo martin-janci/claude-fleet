@@ -74,4 +74,27 @@ describe('OrgMembers: sessions (11.7c)', () => {
     expect(screen.getAllByTestId('item-remove-members')).toHaveLength(3);
     await expectAccessible(container);
   });
+
+  it('offers no role change and no Remove on a row the hub would refuse (review w07-5)', () => {
+    const field = bundle.resources
+      .flatMap((r) => r.fields)
+      .find((f) => f.type === 'items' && f.item_label.type === 'member') as Extract<
+      FieldSpec,
+      { type: 'items' }
+    >;
+    render(OrgMembers, {
+      props: {
+        record: { id: 1, name: 'Acme' } as unknown as ResourceRecord,
+        members: members.map((m) => ({ ...m, locked: m.person_id === 2 })),
+        addAction: field.add[0],
+        removeAction: field.remove,
+        readonly: false,
+        options: () => [],
+        run: async () => true,
+      },
+    });
+    expect(screen.getAllByTestId('item-remove-members')).toHaveLength(2);
+    expect(screen.queryByTestId('member-role-2')).toBeNull();
+    expect(screen.getByTestId('member-role-3')).toBeTruthy();
+  });
 });

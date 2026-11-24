@@ -388,3 +388,25 @@ async fn a_shadow_answer_is_never_marked() {
     drop(s);
     assert_eq!(w.runs()[0].followup, None);
 }
+
+#[tokio::test]
+async fn a_proposals_why_goes_only_with_the_reply_text_consent() {
+    let w = world();
+    w.on("shadow");
+    let fake = Fake::answering(vec![says(NONE_OPTION, 0.9)]);
+    assert_eq!(ask(&w.ctx(&fake), w.proposal).await, Asked::Recorded);
+    let sent = fake.seen.lock().unwrap()[0].state.clone();
+    assert_eq!(sent["proposed"]["title"], "Fix refund retries");
+    assert!(sent["proposed"].get("why").is_none(), "{sent}");
+    let item = w
+        .store
+        .lock()
+        .unwrap()
+        .get_work_item(w.proposal)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        state(&item, true)["proposed"]["why"],
+        "the second refund attempt errors out"
+    );
+}

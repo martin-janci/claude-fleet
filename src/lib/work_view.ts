@@ -17,7 +17,7 @@
  */
 
 import type { TicketCheckView } from './ticket_check';
-import { errorText } from './error_copy';
+import { errorText, isOlderHub } from './error_copy';
 import type { ProposalLike, ProposalSource } from './ai_proposal';
 import { derived, get, writable, type Readable } from 'svelte/store';
 import { invokeCmd, type IpcError, type Result } from './result';
@@ -1218,19 +1218,9 @@ export function conflictNotice(
 /** "Needs a newer hub": the hub (or this build's backend) has no Work view. */
 export const NEWER_HUB = 'Needs a newer hub: update fleet-hub to use the Work view.';
 
-/** Whether an error means the backend does not know the action at all —
- *  and only that: any other refusal (a bad cursor, a hub that is down, a
- *  protocol hiccup) is the backend's own sentence, never "update the hub". */
-export function isOlderHub(e: IpcError | null | undefined): boolean {
-  if (!e) return false;
-  // The hub's `work` / `work_link` action enum: `unknown work action "tree";
-  // one of …`.
-  if (e.code === 'E_INVALID') return /\bunknown (?:work(?:_link)? )?action\b/i.test(e.message);
-  // A hub with no such tool at all (rmcp's dispatch refusal).
-  if (e.code === 'E_HUB_PROTOCOL') return /\btool\b.*\bnot found\b|\bunknown tool\b|\bno such tool\b/i.test(e.message);
-  // A desktop build older than the command: Tauri's own refusal.
-  return e.code === 'E_UNKNOWN' && /command\s+\S+\s+not found/i.test(e.message);
-}
+// `isOlderHub` lives in error_copy.ts (a leaf module), so work.ts and the
+// feeds can match on it without importing this file (review w15-8).
+export { isOlderHub } from './error_copy';
 
 /** The error line a read shows. */
 export function readErrorText(e: IpcError): string {

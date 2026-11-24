@@ -144,6 +144,13 @@ fn each_fence_keeps_the_question_out() {
         .is_none());
     // A use case that is off is never asked about.
     assert!(w.plan(&request(Feature::StatusMap, Some(w.org))).is_none());
+    // Never Control's routing (review 23b w12-2): its one request carries
+    // every consenting org's targets, whatever its `org_id` says.
+    w.set(settings::DECIDE_JEV_CONTROL_ROUTE, "shadow");
+    assert!(w
+        .plan(&request(Feature::ControlRoute, Some(w.org)))
+        .is_none());
+    assert!(w.plan(&request(Feature::ControlRoute, None)).is_none());
     // A window onto a hub never calls out.
     let remote = |v: &str| {
         w.store
@@ -221,6 +228,41 @@ async fn the_answer_is_recorded_beside_jevs() {
     assert_eq!(*w.ssh.hosts.lock().unwrap(), vec![w.host.to_string()]);
     let prompt = w.ssh.prompts.lock().unwrap()[0].clone();
     assert!(!prompt.contains("bob@acme.io"), "{prompt}");
+}
+
+/// Review 23b w12-3: the second opinion masks a stored secret of no known
+/// shape by value, as Jev's request does (w18-2).
+#[tokio::test]
+async fn a_stored_secret_is_masked_before_the_second_opinion_is_asked() {
+    let w = world("hs-mask", ACME_1);
+    w.store
+        .lock()
+        .unwrap()
+        .set_env_var(
+            "global",
+            "",
+            "ACME_THING",
+            &crate::store::EnvValue::Secret(crate::store::Secret::new("plainwordsecretvalue")),
+        )
+        .unwrap();
+    let mut req = request(Feature::WorkLink, Some(w.org));
+    req.request.state = json!({"pane": "$ cat .mcp.json\n  \"key\": \"plainwordsecretvalue\""});
+    decide(&w.ctx(), req).await;
+    let mut prompts = Vec::new();
+    for _ in 0..200 {
+        prompts = w.ssh.prompts.lock().unwrap().clone();
+        if !prompts.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(prompts.len(), 1, "the second opinion was asked");
+    assert!(
+        !prompts[0].contains("plainwordsecretvalue"),
+        "{}",
+        prompts[0]
+    );
+    assert!(prompts[0].contains("[REDACTED]"), "{}", prompts[0]);
 }
 
 #[tokio::test]

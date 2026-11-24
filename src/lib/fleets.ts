@@ -87,6 +87,7 @@ export const FLEET_SCOPED = [
   'add_person',
   'rename_person',
   'disable_person',
+  'enable_person',
   'list_groups',
   'list_trackers',
   'catalog_list_catalogs',

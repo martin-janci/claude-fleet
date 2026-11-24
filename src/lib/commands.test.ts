@@ -12,6 +12,7 @@ import { destination } from './destination';
 import type { PendingInput } from './pending_input';
 import type { SessionRow } from './sessions';
 import { toasts } from './toasts';
+import { workViewToggleRequest } from './app_views';
 
 // Redesign step 3.9: the ⌘K command registry.
 
@@ -120,6 +121,13 @@ describe('Automation commands (8.4)', () => {
   afterEach(() => {
     fleetSettings.set({ ...SETTING_DEFAULTS });
     destination.set('session');
+  });
+
+  it('Switch Sessions and Work asks App, which also un-collapses the rail (review w14-4)', async () => {
+    const before = get(workViewToggleRequest);
+    await runCommand('app.work-view', { selected: null, sessionView: 'conversation' });
+    expect(get(workViewToggleRequest)).toBe(before + 1);
+    workViewToggleRequest.set(0);
   });
 
   it('Open Automation goes there; the pause command names what it will do', async () => {

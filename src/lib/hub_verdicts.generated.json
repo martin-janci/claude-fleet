@@ -180,6 +180,7 @@
     "dismiss_reopened",
     "draft_task_title",
     "edit_work_item",
+    "enable_person",
     "ensure_operator",
     "env_var_set",
     "env_var_unset",

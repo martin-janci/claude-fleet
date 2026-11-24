@@ -39,7 +39,19 @@ function briefCalls(): { refresh: boolean }[] {
 }
 
 describe('MorningBrief', () => {
-  beforeEach(() => vi.mocked(invoke).mockReset());
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.draft_morning_brief': 'true' });
+  });
+
+  it('offers no Draft while Draft the morning brief is off (review 23b w12-8)', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS });
+    vi.mocked(invoke).mockImplementation(async (c) => (c === 'today_brief' ? {} : null));
+    render(MorningBrief);
+    await flush();
+    expect(screen.queryByTestId('morning-brief-draft-btn')).toBeNull();
+    expect(screen.queryByTestId('morning-brief')).toBeNull();
+  });
 
   it('reads the brief drafted last on open and never drafts one', async () => {
     vi.mocked(invoke).mockImplementation(async (c) => (c === 'today_brief' ? {} : null));

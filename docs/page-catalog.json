@@ -1061,12 +1061,12 @@
             "text": "sends replies to Jev",
             "when": "true"
           },
-          "confirm": "The end of this org's sessions' screens (Claude's reply text, redacted) will be sent to TypeSafe when Decisions (Jev) and its turn outcome use case are on.",
+          "confirm": "Claude's text from this org's sessions (redacted) will be sent to TypeSafe when Decisions (Jev) is on, for each of these use cases that is on: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines), mission triage (a worker's own summary), the duplicate check (an agent's reasons for a proposed task) and quick answer (an agent's reasons on a chat form).",
           "default": false,
           "edit": "jev_reply",
-          "help": "On top of Jev above: let the end of this org's sessions' screens — Claude's last reply, redacted, code replaced by placeholders, a few lines — go to TypeSafe's decision model, so Jev can tell a finished turn from a question when hooks say nothing. Off by default (D48).",
+          "help": "On top of Jev above: let Claude's text from this org's sessions, redacted and with code replaced by placeholders, go to TypeSafe's decision model for each of these use cases that is on: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines), mission triage (a worker's own summary), the duplicate check (an agent's reasons for a proposed task) and quick answer (an agent's reasons on a chat form). Off by default (D48).",
           "id": "jev_reply_allowed",
-          "label": "Also allow Claude's reply text (turn outcome)",
+          "label": "Also allow Claude's own text (outcomes, checks, triage, agents' reasons)",
           "on_off": true,
           "type": "bool"
         },
@@ -1982,6 +1982,29 @@
       }
     },
     {
+      "actions": [
+        {
+          "bind": [
+            [
+              "person_id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "enable_person",
+          "confirm": "They can pair a device and be given access again. Nothing revoked when they were disabled comes back: pair their devices, and add them to orgs and roles, again.",
+          "envelope": "args",
+          "id": "person.enable",
+          "label": "Enable",
+          "params": [],
+          "report": false,
+          "variants": [
+            "disabled"
+          ]
+        }
+      ],
       "create": {
         "bind": [
           [
@@ -2034,12 +2057,15 @@
           ]
         ],
         "command": "disable_person",
-        "confirm": "Revokes every device of theirs and every share made to them, at once. Their own sessions stay private and theirs. They can be re-enabled later (org_admin enable_person, or fleet-hub person enable), but nothing revoked comes back.",
+        "confirm": "Revokes every device of theirs and every share made to them, at once, pauses their routines and missions, and takes them out of every org, group and role. Their own sessions stay private and theirs. Re-enabling them later gives none of it back.",
         "envelope": "args",
         "id": "person.disable",
         "label": "Disable",
         "params": [],
-        "report": false
+        "report": false,
+        "variants": [
+          "live"
+        ]
       },
       "empty": "Nobody yet. Add a person, or pair a device to them.",
       "fields": [
@@ -2112,6 +2138,26 @@
           "id": "disabled_at",
           "label": "Disabled",
           "type": "time"
+        },
+        {
+          "help": "Active, disabled, or the hub's owner (who cannot be disabled).",
+          "id": "state",
+          "label": "Status",
+          "options": [
+            [
+              "live",
+              "Active"
+            ],
+            [
+              "disabled",
+              "Disabled"
+            ],
+            [
+              "owner",
+              "Owner"
+            ]
+          ],
+          "type": "choice"
         }
       ],
       "help": "The people this hub knows. A session belongs to the person whose device started it and is private to them unless they share it. The hub's owner cannot be disabled.",
@@ -2137,7 +2183,8 @@
         "label": "Apply",
         "params": [],
         "report": false
-      }
+      },
+      "variant_by": "state"
     },
     {
       "empty": "No groups yet. An org's groups appear when the org is added.",
@@ -4537,6 +4584,30 @@
         "type": "bool"
       },
       "label": "Draft release notes",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "work.draft_morning_brief",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Draft the morning brief",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "work.dashboard_summary",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Dashboard summaries",
       "widgets": [
         "switch",
         "readonly"

@@ -39,7 +39,15 @@ export async function checkWork(row: SessionRow): Promise<WorkCheck> {
   const i = r.value;
   if (!i) return { state: 'unknown', why: 'the host sent no answer' };
   if (i.error) return { state: 'unknown', why: i.error };
-  if (!i.has_worktree) return { state: 'clean' };
+  // No tracked worktree: the backend did not look (w10-2). A session in a
+  // project's main checkout has one nonetheless, and Clean up must ask the
+  // agent to commit and push there, never just kill it. Only a session in
+  // no project at all has no repository to leave work in.
+  if (!i.has_worktree) {
+    return row.project_id == null
+      ? { state: 'clean' }
+      : { state: 'unknown', why: 'no tracked worktree — Clean up asks the agent to commit and push' };
+  }
   if ((i.dirty_files ?? []).length === 0 && (i.unpushed_commits ?? 0) === 0) return { state: 'clean' };
   return { state: 'dirty', files: i.dirty_files ?? [], unpushed: i.unpushed_commits ?? 0, branch: i.branch ?? null };
 }
@@ -52,6 +60,8 @@ export function workLine(c: WorkCheck): string | null {
   const parts: string[] = [];
   if (c.files.length > 0) parts.push(`${plural(c.files.length, 'uncommitted file')}`);
   if (c.unpushed > 0) parts.push(`${plural(c.unpushed, 'commit')} not pushed`);
+  // `-1`: the branch has no upstream yet (w10-3).
+  else if (c.unpushed < 0) parts.push('branch never pushed');
   return parts.join(' and ');
 }
 

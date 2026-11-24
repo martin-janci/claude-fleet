@@ -174,7 +174,7 @@
   }
 
   function fail(linkId: number, e: IpcError) {
-    failures = new Map(failures).set(linkId, conflictNotice(e, 'It') ?? e.message);
+    failures = new Map(failures).set(linkId, conflictNotice(e, 'It') ?? errorText(e));
   }
   function cleared(linkId: number) {
     if (!failures.has(linkId)) return;

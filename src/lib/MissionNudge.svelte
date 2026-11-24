@@ -12,11 +12,20 @@
   import { asProposal, missionTriageOnce, stepLabel, type Triage } from './mission_triage';
   import { onWorkChangedDebounced } from './work';
   import { openElsewhere } from './control_views';
+  import { missionInScope } from './mission_waits';
+  import { effectiveScope } from './orgs';
 
-  /** Most missions asked about; the rest are in Missions. */
+  /** Most stuck missions shown; the rest are in Missions. */
   const MAX = 5;
+  /** Most missions Jev is asked about in one read (each answer is cached per
+   *  mission per state, so a re-read asks only about the ones that moved). */
+  const ASK_MAX = 20;
 
-  let stuck = $state<{ id: number; name: string; triage: Triage }[]>([]);
+  let stuck = $state<{ id: number; name: string; org_id?: number | null; triage: Triage }[]>([]);
+  // Cut to the sidebar's org scope like the rest of Today, and capped only
+  // after the stuck ones are picked (review w09-2): a braked mission is no
+  // longer updated, so it sinks below the ones still running.
+  const shown = $derived(stuck.filter((m) => missionInScope(m, $effectiveScope)).slice(0, MAX));
   let gen = 0;
 
   async function load() {
@@ -24,14 +33,20 @@
     const list = await listMissions();
     // A hub that predates missions answers nothing.
     if (!list.ok || !Array.isArray(list.value)) return;
-    const open = list.value.filter((m) => m.state === 'active' || m.state === 'paused').slice(0, MAX);
+    // Paused ones are picked first when there are too many to ask about: a
+    // brake pauses a mission, so they are the likeliest to be stuck.
+    const all = list.value.filter((m) => m.state === 'active' || m.state === 'paused');
+    const picked = new Set(
+      [...all.filter((m) => m.state === 'paused'), ...all.filter((m) => m.state !== 'paused')].slice(0, ASK_MAX),
+    );
+    const open = all.filter((m) => picked.has(m));
     // Asked once per mission per state: a work change re-reads the list, but
     // Jev is only asked again about a mission that moved (review r15).
     const answers = await Promise.all(open.map((m) => missionTriageOnce(m)));
     if (mine !== gen) return;
     stuck = open.flatMap((m, i) => {
       const r = answers[i];
-      return r.ok && r.value?.stuck ? [{ id: m.id, name: m.name, triage: r.value }] : [];
+      return r.ok && r.value?.stuck ? [{ id: m.id, name: m.name, org_id: m.org_id, triage: r.value }] : [];
     });
   }
 
@@ -43,11 +58,11 @@
   onDestroy(() => stop?.());
 </script>
 
-{#if stuck.length > 0}
+{#if shown.length > 0}
   <section class="nudge" aria-label="Stuck missions" data-testid="mission-nudge">
     <h3>Stuck missions</h3>
     <ul>
-      {#each stuck as m (m.id)}
+      {#each shown as m (m.id)}
         {@const next = asProposal(m.triage.next)}
         <li data-testid="mission-nudge-row">
           <button type="button" class="link" onclick={() => openElsewhere('missions')}>{m.name}</button>

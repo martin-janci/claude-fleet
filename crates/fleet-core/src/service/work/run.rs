@@ -608,6 +608,36 @@ mod tests {
         );
     }
 
+    /// w17-2: a run whose prompt a previous process was still waiting to
+    /// type (its pending mark, no `repl_ready` after it) is failed by the
+    /// startup sweep; one whose REPL came up, or a run with no mark (typed
+    /// another way), is left alone.
+    #[test]
+    fn a_run_left_waiting_for_its_prompt_by_a_restart_is_failed_at_startup() {
+        use crate::service::work::resume::{
+            sweep_undelivered_run_prompts, undelivered_run_tasks, RUN_PROMPT_PENDING,
+        };
+        let (s, worker, item) = store_with_item();
+        let waiting = record_run(&s, worker, "do it", item, 1, "implement").unwrap();
+        let typed = record_run(&s, worker, "review it", item, 1, "review").unwrap();
+        let unmarked = record_run(&s, worker, "test it", item, 1, "test").unwrap();
+        s.insert_session_event(worker, RUN_PROMPT_PENDING, Some(&typed.id.to_string()))
+            .unwrap();
+        s.insert_session_event(worker, crate::service::sessions::seed::REPL_READY, None)
+            .unwrap();
+        s.insert_session_event(worker, RUN_PROMPT_PENDING, Some(&waiting.id.to_string()))
+            .unwrap();
+        assert_eq!(undelivered_run_tasks(&s).unwrap(), vec![waiting.id]);
+        let store = std::sync::Arc::new(Mutex::new(s));
+        let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
+        assert_eq!(sweep_undelivered_run_prompts(&store, &ssh), 1);
+        let s = store.lock().unwrap();
+        assert_eq!(s.get_task(waiting.id).unwrap().unwrap().state, "failed");
+        assert_eq!(s.get_task(typed.id).unwrap().unwrap().state, "running");
+        assert_eq!(s.get_task(unmarked.id).unwrap().unwrap().state, "running");
+        assert!(undelivered_run_tasks(&s).unwrap().is_empty());
+    }
+
     /// The undelivered run's worker is answered for stopping only when it
     /// is the mission's own, still running, and the task was still open.
     #[test]

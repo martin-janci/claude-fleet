@@ -4741,6 +4741,26 @@ fn worktree_add_script_resolves_requested_base_with_default_fallback() {
     );
 }
 
+/// w10-7: the default branch is fetched first (bounded, best effort) and a
+/// new branch starts from `origin/<default>` when the local one is behind,
+/// tracking nothing.
+#[test]
+fn worktree_add_script_starts_from_a_fresh_default() {
+    let script = worktree_add_script("/repo/root", "feat-x", None);
+    assert!(
+        script.contains("timeout 20 git fetch -q origin \"$def\" >/dev/null 2>&1 || true"),
+        "{script}"
+    );
+    assert!(
+        script.contains("git merge-base --is-ancestor \"$def\" \"origin/$def\""),
+        "a local default with commits of its own is kept: {script}"
+    );
+    assert!(script.contains("branch --unset-upstream"), "{script}");
+    let fetch = script.find("git fetch").unwrap();
+    let add = script.find("git worktree add").unwrap();
+    assert!(fetch < add, "{script}");
+}
+
 #[test]
 fn worktree_add_script_blank_base_normalizes_to_default() {
     // Whitespace-only base is treated as "unset" → empty basebr → default.
@@ -5758,10 +5778,18 @@ fn ensure_remote_project_script_clones_only_without_a_worktree() {
     assert!(script.starts_with("set -e\n"), "{script}");
     assert!(
         script.contains(
-            "if [ ! -d '/home/u/projects/github.com/o/r'/.git ]; then mkdir -p \"$(dirname -- '/home/u/projects/github.com/o/r')\"; tmp=\"$(dirname -- '/home/u/projects/github.com/o/r')/.fleet-clone-$$\"; rm -rf \"$tmp\"; git clone 'git@github.com:o/r.git' \"$tmp\" && { [ ! -e '/home/u/projects/github.com/o/r' ] || rmdir '/home/u/projects/github.com/o/r'; } && mv \"$tmp\" '/home/u/projects/github.com/o/r' || { rm -rf \"$tmp\"; exit 1; }; fi"
+            "if [ ! -e '/home/u/projects/github.com/o/r'/.git ]; then mkdir -p \"$(dirname -- '/home/u/projects/github.com/o/r')\"; tmp=\"$(dirname -- '/home/u/projects/github.com/o/r')/.fleet-clone-$$\"; rm -rf \"$tmp\"; git clone 'git@github.com:o/r.git' \"$tmp\" && { [ ! -e '/home/u/projects/github.com/o/r' ] || rmdir '/home/u/projects/github.com/o/r'; } && mv \"$tmp\" '/home/u/projects/github.com/o/r' || { rm -rf \"$tmp\"; exit 1; }; "
         ),
         "guarded clone: {script}"
     );
+    // w10-10: an existing checkout is compared with the repository.
+    assert!(
+        script
+            .contains("else u=\"$(git -C '/home/u/projects/github.com/o/r' remote get-url origin"),
+        "{script}"
+    );
+    assert!(script.contains("*[:/]'o/r'|*[:/]'o/r'.git|"), "{script}");
+    assert!(script.trim_end().ends_with("esac; fi"), "{script}");
     assert!(!script.contains("worktree add"), "{script}");
 }
 
@@ -5976,6 +6004,83 @@ async fn ensure_remote_project_keeps_other_git_failures_verbatim() {
     )
     .await
     .expect("default reply is exit 0");
+}
+
+/// w10-9 / w10-10, against a real shell: a root whose `.git` is a FILE (a
+/// linked or bare-repo checkout) is used, never cloned over; a root that
+/// holds another repository of the same name (a fork's upstream, under the
+/// flat layout) is refused; the same repository by any URL form is used.
+#[cfg(unix)]
+#[test]
+fn ensure_remote_project_script_uses_its_own_checkout_and_refuses_another() {
+    use std::process::Command;
+    let base = std::env::temp_dir().join(format!(
+        "cf-ensure-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    ));
+    let run = |root: &std::path::Path, url: &str| {
+        let script = ensure_remote_project_script(root.to_str().unwrap(), url, None);
+        Command::new("bash")
+            .args(["-c", &script])
+            .output()
+            .expect("bash")
+    };
+    // A `.git` file: nothing is cloned (a clone would need the network).
+    let linked = base.join("linked");
+    std::fs::create_dir_all(&linked).unwrap();
+    std::fs::write(linked.join(".git"), "gitdir: ../.bare\n").unwrap();
+    let out = run(&linked, "git@github.com:me/app.git");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Another repository of the same name.
+    let app = base.join("app");
+    let git = |args: &[&str]| {
+        let out = Command::new("git").args(args).output().expect("git");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q", app.to_str().unwrap()]);
+    git(&[
+        "-C",
+        app.to_str().unwrap(),
+        "remote",
+        "add",
+        "origin",
+        "git@github.com:org/app.git",
+    ]);
+    let out = run(&app, "git@github.com:me/app.git");
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("org/app.git, not me/app"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The same repository, another URL form and case: used.
+    git(&[
+        "-C",
+        app.to_str().unwrap(),
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/Org/App.git",
+    ]);
+    let out = run(&app, "git@github.com:org/app.git");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::remove_dir_all(&base).ok();
 }
 
 /// Runs the real mirror script against local git repos: a bare `origin`, a
@@ -8446,12 +8551,7 @@ fn a_codex_row_is_not_paired_with_a_claude_agent_in_its_checkout() {
     let mut s = Store::open_in_memory().unwrap();
     s.upsert_host("vps").unwrap();
     let live = || vec![tmux_session("dev-cx")];
-    let first = vps_probe(&s, live(), None, vec![], PrInfoMap::new());
-    reconcile_write_one_host(&mut s, &first, &[]).unwrap();
-    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
-    s.set_session_agent(cx.id, crate::store::AGENT_CODEX)
-        .unwrap();
-    let terminal = crate::claude_agents::ClaudeAgentRow {
+    let terminal = || crate::claude_agents::ClaudeAgentRow {
         session_id: Some(CLAUDE_ID.to_string()),
         name: None,
         status: Some("working".into()),
@@ -8460,7 +8560,18 @@ fn a_codex_row_is_not_paired_with_a_claude_agent_in_its_checkout() {
         job_id: None,
         started_at: None,
     };
-    let probe = vps_probe(&s, live(), None, vec![terminal], PrInfoMap::new());
+    // The creating pass runs while the row still says Claude, so it may
+    // pair the person's terminal conversation (review 23b w01-2).
+    let first = vps_probe(&s, live(), None, vec![terminal()], PrInfoMap::new());
+    reconcile_write_one_host(&mut s, &first, &[]).unwrap();
+    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
+    // What `new_session` does right after that pass.
+    s.set_new_session_agent(cx.id, crate::store::AGENT_CODEX)
+        .unwrap();
+    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
+    assert_eq!(cx.claude_session_id, None);
+    assert_eq!(s.session_transcript_path(cx.id).unwrap(), None);
+    let probe = vps_probe(&s, live(), None, vec![terminal()], PrInfoMap::new());
     reconcile_write_one_host(&mut s, &probe, &[]).unwrap();
     let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
     assert_eq!(cx.claude_session_id, None);

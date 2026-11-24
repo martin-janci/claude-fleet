@@ -211,8 +211,8 @@ impl FleetTools {
         until then, until_limit_reset while the account is at its limit, \
         skip_if_archived drops it if the session is archived first. Marked \
         untrusted unless raw=true (master) or the caller is a trusted \
-        client. Returns { session_id, \
-        delivered, queued_id }.")]
+        client. client_msg_id makes a retry answer the first result instead \
+        of queueing twice. Returns { session_id, delivered, queued_id }.")]
     pub(super) async fn queue_prompt(
         &self,
         Extension(caller): Extension<Caller>,
@@ -237,22 +237,66 @@ impl FleetTools {
             &caller,
             GateTarget::Session(row.id),
         )?;
-        let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
-        let head = crate::store::prompt_head(&prompt);
-        let out = sessions::queue_prompt(
-            sessions::QueuePromptArgs {
-                session_id: row.id,
-                prompt,
-                not_before: p.not_before,
-                until_limit_reset: p.until_limit_reset,
-                skip_if_archived: p.skip_if_archived,
-            },
-            &self.store,
-            &self.ssh,
-        )
-        .await
-        .map_err(to_mcp_err)?;
-        note_prompt_author(&self.store, &caller, row.id, &head);
+        // A retry whose first answer was lost (a phone on a bad line)
+        // answers the first call's result instead of queueing the prompt
+        // twice: `send_prompt`'s reservation, under its own prefix
+        // (review w17-3). Reserved after the confirm gate, so the approved
+        // replay (same id) is not E_IN_FLIGHT.
+        let label = caller.label();
+        let dedupe_id = p
+            .client_msg_id
+            .as_deref()
+            .map(|id| format!("queue_prompt:{}:{id}", row.id));
+        if let Some(id) = dedupe_id.as_deref() {
+            match lock_sends(&self.recent_sends).reserve(&label, id) {
+                Reservation::Fresh => {}
+                Reservation::Done(hit) => {
+                    audit("queue_prompt", &format!("dedupe client_msg_id={id}"));
+                    return ok_json(&hit);
+                }
+                Reservation::Pending => {
+                    audit("queue_prompt", &format!("in flight client_msg_id={id}"));
+                    return Err(mcp_err(
+                        "E_IN_FLIGHT",
+                        "a send with this client_msg_id is still in progress",
+                        None,
+                    ));
+                }
+            }
+        }
+        // From here every exit completes the reservation or releases it.
+        let queued = async {
+            let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
+            let head = crate::store::prompt_head(&prompt);
+            let out = sessions::queue_prompt(
+                sessions::QueuePromptArgs {
+                    session_id: row.id,
+                    prompt,
+                    not_before: p.not_before,
+                    until_limit_reset: p.until_limit_reset,
+                    skip_if_archived: p.skip_if_archived,
+                },
+                &self.store,
+                &self.ssh,
+            )
+            .await
+            .map_err(to_mcp_err)?;
+            note_prompt_author(&self.store, &caller, row.id, &head);
+            serde_json::to_value(&out).map_err(|e| mcp_err("E_INTERNAL", e, None))
+        }
+        .await;
+        let out = match queued {
+            Ok(out) => out,
+            Err(e) => {
+                if let Some(id) = dedupe_id.as_deref() {
+                    lock_sends(&self.recent_sends).release(&label, id);
+                }
+                return Err(e);
+            }
+        };
+        if let Some(id) = dedupe_id.as_deref() {
+            lock_sends(&self.recent_sends).complete(&label, id, out.clone());
+        }
         ok_json(&out)
     }
 

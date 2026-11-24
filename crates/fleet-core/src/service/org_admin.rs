@@ -452,6 +452,11 @@ pub struct PersonSummary {
     pub created_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled_at: Option<i64>,
+    /// `owner`, `disabled` or `live`: which of Disable and Enable Settings →
+    /// People offers on the row (review w07-4). Absent from an older hub's
+    /// answer, which offers neither.
+    #[serde(default)]
+    pub state: String,
     /// Their live devices, by name.
     #[serde(default)]
     pub devices: Vec<String>,
@@ -637,6 +642,13 @@ pub struct MemberSummary {
     /// shown as existing, never named — a session's metadata is content.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub private_sessions: u32,
+    /// The asking admin may not change this membership: their own, or a
+    /// fleet admin's (the owner's among them), under an org admin's
+    /// authority ([`require_other_member`]). A client offers no role change
+    /// and no Remove on the row (review w07-5). Absent (false) otherwise,
+    /// and from an older hub.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 /// A fleet admin's device, the hub owner's among them (`Store::fleet_admins`
@@ -651,8 +663,13 @@ pub(crate) fn is_fleet_admins_device(admins: &[i64], c: &crate::store::ClientTok
 pub fn list_members(s: &Store, org: i64, me: Me<'_>) -> Result<Vec<MemberSummary>, IpcError> {
     let owner = s.personal_owner_id()?;
     let mut devices = s.active_client_tokens()?;
-    if matches!(me.authority, Authority::Org { .. }) {
-        let admins = s.fleet_admins()?;
+    let org_admin = matches!(me.authority, Authority::Org { .. });
+    let admins = if org_admin {
+        s.fleet_admins()?
+    } else {
+        Vec::new()
+    };
+    if org_admin {
         devices.retain(|d| !is_fleet_admins_device(&admins, d));
     }
     let mut out = Vec::new();
@@ -678,6 +695,8 @@ pub fn list_members(s: &Store, org: i64, me: Me<'_>) -> Result<Vec<MemberSummary
             owner: owner == Some(m.person_id),
             live_sessions: 0,
             private_sessions: 0,
+            locked: org_admin
+                && (me.person == Some(m.person_id) || admins.binary_search(&m.person_id).is_ok()),
         });
     }
     Ok(out)
@@ -872,6 +891,58 @@ pub fn has_identity_beyond(s: &Store, person: i64, org: i64) -> Result<bool, Ipc
         .iter()
         .any(|m| m.is_live() && m.org_id != org);
     Ok(devices || elsewhere)
+}
+
+/// Whether `me`, under fleet authority, may make a device belong to the
+/// person named `name` (`pair_device`, `set_device_person`). The operator
+/// (no person) and the hub's personal owner may name anybody. A fleet admin
+/// who is somebody else names themselves, a new name, or a person who has
+/// no identity yet: no device, no login, no membership, neither a fleet
+/// admin nor the owner. Anything more would be a device that IS that
+/// person, their private sessions included (review w07-1).
+pub fn require_may_hand_a_device_to(s: &Store, me: Me<'_>, name: &str) -> Result<(), IpcError> {
+    let Some(mine) = me.person else {
+        return Ok(());
+    };
+    if !matches!(me.authority, Authority::Fleet) {
+        return Ok(());
+    }
+    let owner = s.personal_owner_id()?;
+    if owner == Some(mine) {
+        return Ok(());
+    }
+    let Some(target) = s.get_person_by_name(name.trim())? else {
+        return Ok(());
+    };
+    if target.id == mine {
+        return Ok(());
+    }
+    let refuse = |why: &str| {
+        Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            format!(
+                "{:?} {why}: a device of theirs would read their private sessions. \
+                 The hub owner pairs it (or they pair it themselves)",
+                target.name
+            ),
+        ))
+    };
+    if owner == Some(target.id) {
+        return refuse("is the hub's owner");
+    }
+    if s.is_fleet_admin(target.id)? {
+        return refuse("is a fleet admin");
+    }
+    let has_device = s
+        .list_client_tokens(true)?
+        .iter()
+        .any(|c| c.person_id == Some(target.id));
+    let has_login = !s.list_identities(target.id)?.is_empty();
+    let member = s.memberships_of(target.id)?.iter().any(|m| m.is_live());
+    if has_device || has_login || member {
+        return refuse("already has a device, a login or an org");
+    }
+    Ok(())
 }
 
 /// A person named in `args` (`person_id`, else `person` by name). `create`:
@@ -1086,6 +1157,14 @@ pub fn list_people(s: &Store) -> Result<Vec<PersonSummary>, IpcError> {
             id: p.id,
             name: p.name,
             display_name: p.display_name,
+            state: if p.is_personal_owner {
+                "owner"
+            } else if p.disabled_at.is_some() {
+                "disabled"
+            } else {
+                "live"
+            }
+            .into(),
             owner: p.is_personal_owner,
             created_at: p.created_at,
             disabled_at: p.disabled_at,
@@ -1376,6 +1455,14 @@ fn run_action(
                     .collect();
                 let mut people = list_people(s)?;
                 people.retain(|p| members.contains(&p.id));
+                // A fleet admin's devices are not an org admin's to see, as
+                // `list_members` and `list_devices` hide them (review w07-5).
+                let admins = s.fleet_admins()?;
+                for p in &mut people {
+                    if admins.binary_search(&p.id).is_ok() {
+                        p.devices.clear();
+                    }
+                }
                 fence_realm_to_org(s, org, &mut people)?;
                 to_json(&people)
             }
@@ -1579,6 +1666,7 @@ fn run_action(
             {
                 Some(p) => {
                     let p = crate::store::validate_person_name(p)?;
+                    require_may_hand_a_device_to(s, me, &p)?;
                     Some(match s.get_person_by_name(&p)? {
                         Some(existing) => existing,
                         None => s.create_person(&p, None)?,

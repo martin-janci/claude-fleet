@@ -61,8 +61,13 @@ describe('shared_view wording (Watch board)', () => {
     expect(askedLabel('Martin', 'answer')).toBe('Asked for Answer · waiting for Martin');
   });
   it('says the session waits on its owner', () => {
-    expect(recipientStateLabel('action_required', 'Martin')).toBe('Waiting for Martin');
-    expect(recipientStateLabel('working', 'Martin')).toBeNull();
+    expect(recipientStateLabel('action_required', 'Martin', 'watch')).toBe('Waiting for Martin');
+    expect(recipientStateLabel('working', 'Martin', 'watch')).toBeNull();
+  });
+  it('at Answer or Steer the dialog is the recipient’s, not the owner’s (review w08-2)', () => {
+    expect(recipientStateLabel('action_required', 'Martin', 'answer')).toBeNull();
+    expect(recipientStateLabel('blocked', 'Martin', 'drive')).toBeNull();
+    expect(sharedRowLine('answer', info, 'Martin', 'action_required')).toBe('Martin · Answer · waiting for you');
   });
   it('writes the meta lead and the Inbox row', () => {
     expect(sharedByMeta('watch', info, 'Martin Janči')).toBe('Shared by Martin Janči · level Read');

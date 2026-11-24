@@ -292,6 +292,7 @@ pub async fn run_check(
 ) -> Result<SetupCheck, IpcError> {
     validate(ssh_alias)?;
     let script = check_script(key)
+        .map(|s| format!("{}{s}", crate::ssh::TOOL_PATH_PREFIX))
         .ok_or_else(|| IpcError::new(codes::E_INVALID, format!("unknown check {key:?}")))?;
     let started = Instant::now();
     let out =

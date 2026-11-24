@@ -581,12 +581,7 @@ pub async fn discard_kill_session(
     let worktree_path = removable.map(|(_, path)| path);
 
     if let (Some(ref wt), Some(ref base)) = (&worktree_path, &project_base) {
-        let force_flag = if force_discard { " --force" } else { "" };
-        let rm_cmd = format!(
-            "git -C {} worktree remove{force_flag} {}",
-            quote(base),
-            quote(wt)
-        );
+        let rm_cmd = worktree_remove_script(&args.host_alias, base, wt, force_discard);
         let out = run_shell(ssh, &args.host_alias, &rm_cmd).await?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -696,6 +691,42 @@ pub(crate) fn tree_of(
         return Ok(None);
     };
     Ok(s.worktree_id_named(&me.host_alias, pid, key)?)
+}
+
+/// PURE (w10-1): how to run git against the repository the linked worktree
+/// `wt` on `host_alias` belongs to, as `(prelude, git)`: the script is
+/// `{prelude}{git} worktree remove …`. On `local` the project's base path is
+/// that repository. On any other host it is not: `projects.base_path` is the
+/// path of the local scan, which names nothing (or something else) there,
+/// so the worktree's own common git dir is resolved on the host first.
+pub(crate) fn git_for_worktree(host_alias: &str, base: &str, wt: &str) -> (String, String) {
+    if host_alias == crate::service::projects::LOCAL_HOST {
+        return (String::new(), format!("git -C {}", quote(base)));
+    }
+    (
+        format!(
+            "fleet_git_dir=$(git -C {} rev-parse --path-format=absolute --git-common-dir) \
+             || exit 1; ",
+            quote(wt)
+        ),
+        "git --git-dir=\"$fleet_git_dir\"".to_string(),
+    )
+}
+
+/// PURE: the script that removes the linked worktree `wt` (see
+/// [`git_for_worktree`]); `--force` only when the work in it is discarded.
+pub(crate) fn worktree_remove_script(
+    host_alias: &str,
+    base: &str,
+    wt: &str,
+    force: bool,
+) -> String {
+    let (prelude, git) = git_for_worktree(host_alias, base, wt);
+    let force_flag = if force { " --force" } else { "" };
+    format!(
+        "{prelude}{git} worktree remove{force_flag} -- {}",
+        quote(wt)
+    )
 }
 
 /// The tree safe kill and discard may `git worktree remove` for a session:
@@ -976,7 +1007,7 @@ async fn finalize_safe_kill(
     // clean). We run from the project base so git resolves the worktree by
     // path regardless of which checkout the user invoked from.
     if let (Some(ref wt), Some(ref base)) = (&worktree_path, &project_base) {
-        let rm_cmd = format!("git -C {} worktree remove {}", quote(base), quote(wt));
+        let rm_cmd = worktree_remove_script(host_alias, base, wt, false);
         let out = run_shell(ssh, host_alias, &rm_cmd).await?;
         if !out.status.success() {
             let detail = format!(
@@ -1069,6 +1100,31 @@ fn exec_for(host: &str, ssh: &Arc<SshClient>) -> Box<dyn crate::tmux::TmuxExec> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// w10-1: a remote tree is removed from its own repository, never from
+    /// `git -C <project base>`, which is this machine's path.
+    #[test]
+    fn a_remote_worktree_is_removed_from_its_own_repository() {
+        let wt = "/home/u/projects/o/r/.worktrees/feat";
+        let remote = worktree_remove_script("vps", "/Users/m/projects/o/r", wt, false);
+        assert!(!remote.contains("/Users/m"), "{remote}");
+        assert!(
+            remote.contains(&format!(
+                "git -C '{wt}' rev-parse --path-format=absolute --git-common-dir"
+            )),
+            "{remote}"
+        );
+        assert!(
+            remote.ends_with(&format!(
+                "git --git-dir=\"$fleet_git_dir\" worktree remove -- '{wt}'"
+            )),
+            "{remote}"
+        );
+        assert_eq!(
+            worktree_remove_script("local", "/p/r", "/p/r/.worktrees/x", true),
+            "git -C '/p/r' worktree remove --force -- '/p/r/.worktrees/x'"
+        );
+    }
 
     /// Review w27-5: a request whose marker never came back settles as
     /// `failed` once it is `REQUEST_TIMEOUT_SECS` old and its session is not

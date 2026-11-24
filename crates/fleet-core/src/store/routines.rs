@@ -30,6 +30,10 @@ pub const PAUSED_OWNER_DISABLED: &str = "paused: its owner was disabled";
 pub const PAUSED_HOST_REMOVED: &str = "paused: its host was removed";
 /// `routine_runs.state` values; `running` is the only open one.
 pub const ROUTINE_RUN_STATES: [&str; 4] = ["running", "done", "failed", "skipped"];
+/// How much longer than a done run's a failed run's session must be idle
+/// before the routine-session GC closes it (review 23b w02-2): twelve more
+/// hours, so a person has a day to open it and read why it failed.
+pub const FAILED_RUN_EXTRA_IDLE_SECS: i64 = 12 * 3600;
 
 /// One routine, as a reader receives it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,8 +89,9 @@ pub struct RoutineRow {
     /// At most one run per PR (or session) in this many seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_rate_secs: Option<i64>,
-    /// The IANA zone it was saved in (migration 159, M15 G3.8), shown
-    /// beside the schedule; `utc_offset_min` still drives it.
+    /// The IANA zone it was saved in (migration 159, M15 G3.8): the
+    /// schedule runs in it when the bundled tz database knows it, else at
+    /// `utc_offset_min`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_zone: Option<String>,
     /// A run still going after this many seconds is stopped and failed.
@@ -798,15 +803,23 @@ impl Store {
     /// The sessions of finished routine runs the scheduler closes (w06-8):
     /// `(session id, host, tmux name)`, oldest run first, at most `limit`.
     /// A session qualifies when its run closed `done` with an outcome other
-    /// than `needs_person`, no run of it is open, it is still running on a
-    /// reachable host that is not hidden, Claude has been idle in it and its
-    /// pane quiet since `idle_before`, and it is not among the `keep` newest
+    /// than `needs_person`, or closed `failed` (review 23b w02-2: a routine
+    /// whose runs keep failing left a live Claude per run), no run of it is
+    /// open, it is still running on a reachable host that is not hidden,
+    /// Claude has been idle in it and its pane quiet since `idle_before`
+    /// (a failed run's since [`FAILED_RUN_EXTRA_IDLE_SECS`] earlier, so a
+    /// person has a day to read why; its finish counts as idle when Claude
+    /// never went idle, a session parked at a dialog), and it is not among
+    /// the `keep` newest
     /// live sessions of its routine. A session a person touched is never
     /// one: pinned, prompted or attached after its run started
     /// (`last_touch_at`, which fleet's own prompts do not stamp), or opened
     /// (`last_viewed_at` after the run started; a `nothing` run is stamped
     /// viewed when it is read as such, so for it only a look over an hour
     /// after it closed counts). Nor is one a safe-kill is under way for.
+    /// Nor a row that is no longer the run's (w05-1): a session id is
+    /// reused once its row is deleted, so a row this routine did not start,
+    /// or one a later run started, is another session (as `run_session`).
     pub fn routine_sessions_to_close(
         &self,
         idle_before: i64,
@@ -822,14 +835,19 @@ impl Store {
                       ROW_NUMBER() OVER (PARTITION BY rr.routine_id \
                                          ORDER BY rr.started_at DESC, rr.id DESC) AS newest \
                  FROM routine_runs rr JOIN sessions s ON s.id = rr.session_id \
-                WHERE s.status = 'running') \
+                WHERE s.status = 'running' \
+                  AND s.origin = 'routine' AND s.origin_ref = CAST(rr.routine_id AS TEXT) \
+                  AND NOT EXISTS (SELECT 1 FROM routine_runs o \
+                                   WHERE o.session_id = rr.session_id AND o.id > rr.id)) \
              SELECT l.sid, l.host_alias, l.tmux_name FROM live l \
                JOIN hosts h ON h.alias = l.host_alias AND h.reachable = 1 AND h.hidden = 0 \
               WHERE l.newest > ?2 \
-                AND l.state = 'done' AND COALESCE(l.outcome, '') <> 'needs_person' \
+                AND ((l.state = 'done' AND COALESCE(l.outcome, '') <> 'needs_person') \
+                     OR l.state = 'failed') \
                 AND l.finished_at IS NOT NULL \
-                AND l.idle_since IS NOT NULL AND l.idle_since <= ?1 \
-                AND l.last_activity_at <= ?1 \
+                AND COALESCE(l.idle_since, CASE WHEN l.state = 'failed' THEN l.finished_at END) \
+                    <= ?1 - CASE WHEN l.state = 'failed' THEN ?4 ELSE 0 END \
+                AND l.last_activity_at <= ?1 - CASE WHEN l.state = 'failed' THEN ?4 ELSE 0 END \
                 AND COALESCE(l.claude_status, '') <> 'working' \
                 AND l.pinned_at IS NULL AND l.safe_kill_state IS NULL AND l.kind <> 'external' \
                 AND COALESCE(l.last_touch_at, 0) <= l.run_started \
@@ -839,9 +857,10 @@ impl Store {
                                  WHERE o.session_id = l.sid AND o.state = 'running') \
               ORDER BY l.finished_at ASC, l.run_id ASC LIMIT ?3",
         )?;
-        let rows = stmt.query_map(rusqlite::params![idle_before, keep, limit], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params![idle_before, keep, limit, FAILED_RUN_EXTRA_IDLE_SECS],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 

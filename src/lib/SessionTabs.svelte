@@ -110,7 +110,7 @@
   const shareInfo = $derived(session ? $myGrantInfo.get(session.id) : undefined);
   const sharer = $derived(session && sharedLevel ? sharerName(session, shareInfo, $orgList) : null);
   const stateLabel = $derived(
-    state ? ((sharedLevel ? recipientStateLabel(state, sharer) : null) ?? STATE_LABELS[state]) : '',
+    state ? ((sharedLevel ? recipientStateLabel(state, sharer, sharedLevel) : null) ?? STATE_LABELS[state]) : '',
   );
   const ctxPct = $derived(session?.context_pct ?? null);
   const ctxLevel = $derived(contextLevel(ctxPct));

@@ -188,10 +188,7 @@ pub async fn run(
                 unit_path.display()
             )
         })?;
-    let dial =
-        crate::proxy::UpdateDial::resolve(config.proxy.as_deref(), |k| std::env::var(k).ok())?;
-    let hub = HubHttp::with_ca(&config.hub, &config.token, None, config.ca_file.as_deref())?
-        .with_dial(dial.clone());
+    let (hub, git) = update_clients(config, |k| std::env::var(k).ok())?;
     let channel = fleet_update::HubUpdateChannel::new(
         hub.clone(),
         trusted_keys(),
@@ -202,7 +199,7 @@ pub async fn run(
         user_scope,
         hub: None,
         link: link.clone(),
-        git: GitFetch::for_artifacts(None)?.with_dial(dial),
+        git,
         mirror: Some(hub),
     };
     let mut cfg = BinaryConfig::new(
@@ -228,6 +225,20 @@ pub async fn run(
         o,
         Outcome::Failed(_) | Outcome::RollbackFailed(_) | Outcome::RolledBack { .. }
     ))
+}
+
+/// The update passes' HTTP clients, the hub's (decisions, the artifact
+/// mirror) and GitHub's, both through the configured or the environment's
+/// proxy (review w10-2). One place for the timer's pass and the in-process
+/// one, and the one a test dials through a proxy (review 23b w19-4).
+pub(crate) fn update_clients(
+    config: &Config,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<(HubHttp, GitFetch), String> {
+    let dial = crate::proxy::UpdateDial::resolve(config.proxy.as_deref(), env)?;
+    let hub = HubHttp::with_ca(&config.hub, &config.token, None, config.ca_file.as_deref())?
+        .with_dial(dial.clone());
+    Ok((hub, GitFetch::for_artifacts(None)?.with_dial(dial)))
 }
 
 #[cfg(test)]

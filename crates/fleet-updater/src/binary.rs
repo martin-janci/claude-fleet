@@ -51,6 +51,18 @@ pub const STATE_FILE: &str = "state.json";
 /// back. An in-process install resumes once by design (the `exec` into the
 /// candidate); every further one is the candidate dying under validation.
 pub const MAX_RESUMES: u32 = 3;
+/// The starts [`early_rollback`] allows a candidate: the `exec` into it,
+/// then [`MAX_RESUMES`] restarts.
+pub const MAX_STARTS: u32 = MAX_RESUMES + 1;
+
+/// The seconds within which a resume follows the previous one when the
+/// candidate is dying under validation: its ready timeout plus its soak,
+/// and at least a minute.
+fn resume_window(validation: Duration) -> i64 {
+    i64::try_from(validation.as_secs().saturating_add(1))
+        .unwrap_or(i64::MAX)
+        .max(60)
+}
 
 #[derive(Debug, Clone)]
 pub struct BinaryConfig {
@@ -198,6 +210,17 @@ pub struct BinState {
     /// caught here (review w09-2).
     #[serde(default)]
     pub resumes: u32,
+    /// When the last counted resume happened (unix seconds). A resume that
+    /// comes after a whole validation window ([`resume_window`]) is not
+    /// part of a crash loop: the count starts again (review w03-4).
+    #[serde(default)]
+    pub resumed_at: Option<i64>,
+    /// How many processes started on this candidate, counted by
+    /// [`early_rollback`] before anything they could die on (an agent's
+    /// config): a candidate that dies before its pass ever resumes is
+    /// caught here (review w09-2, its pre-config half).
+    #[serde(default)]
+    pub starts: u32,
 }
 
 impl BinState {
@@ -662,6 +685,8 @@ impl<H: Host> BinaryUpdater<H> {
             .clone()
             .expect("prepare set the candidate");
         self.state.resumes = 0;
+        self.state.resumed_at = None;
+        self.state.starts = 0;
         self.report(UpdatePhase::Installing, &installed, Value::Null, None)
             .await;
         let switched = point(
@@ -978,7 +1003,15 @@ impl<H: Host> BinaryUpdater<H> {
             }
             Installing | Validating => {
                 let cand = self.state.candidate.clone()?;
-                self.state.resumes = self.state.resumes.saturating_add(1);
+                let now = now_unix();
+                let window = resume_window(self.cfg.ready_timeout + self.cfg.soak);
+                self.state.resumes = match self.state.resumed_at {
+                    // The previous process outlived a whole validation: it
+                    // did not die under it (a reboot, a restart much later).
+                    Some(at) if now.saturating_sub(at) > window => 1,
+                    _ => self.state.resumes.saturating_add(1),
+                };
+                self.state.resumed_at = Some(now);
                 self.save();
                 if self.state.resumes > MAX_RESUMES {
                     let n = self.state.resumes - 1;
@@ -1055,6 +1088,53 @@ pub fn tarball_os() -> &'static str {
     } else {
         "linux"
     }
+}
+
+/// Run first in a process that may be a candidate under validation, before
+/// anything it could fail on (an agent's config), so a candidate that dies
+/// before its pass ever starts is still rolled back (review w09-2): with
+/// the state at `Installing` / `Validating` and `current` on the candidate,
+/// the start is counted, and past [`MAX_STARTS`] `current` is pointed back
+/// at the previous build, the candidate marked bad and the attempt
+/// `Failed`, so the pass of the build `current` now names finishes the
+/// rollback and reports it. `Some(why)` when it rolled back: the caller
+/// starts `current` again (an `exec`). `root` and `state_dir` are the
+/// updater's ([`BinaryConfig`]).
+pub fn early_rollback(root: &Path, state_dir: &Path) -> Result<Option<String>, String> {
+    let mut st = BinState::load(state_dir)?;
+    if !matches!(st.phase, UpdatePhase::Installing | UpdatePhase::Validating) {
+        return Ok(None);
+    }
+    let (Some(cand), Some(prev)) = (st.candidate.clone(), st.previous.clone()) else {
+        return Ok(None);
+    };
+    let current = root.join("current");
+    let on_cand = std::fs::read_link(&current)
+        .ok()
+        .is_some_and(|t| t == Path::new(&safe(&cand.version.to_string())));
+    if !on_cand {
+        return Ok(None);
+    }
+    st.starts = st.starts.saturating_add(1);
+    if st.starts <= MAX_STARTS {
+        st.save(state_dir)?;
+        return Ok(None);
+    }
+    let why = format!(
+        "it was started {} time(s) while being validated and never came up",
+        st.starts - 1
+    );
+    st.bad.add(BadEntry {
+        version: cand.version.clone(),
+        digest: Some(cand.sha256.clone()),
+        why: why.clone(),
+        at: fleet_update::time::format_rfc3339(now_unix()),
+    });
+    st.last_error = Some(why.clone());
+    st.phase = UpdatePhase::Failed;
+    point(&current, Path::new(&safe(&prev.version.to_string())))?;
+    st.save(state_dir)?;
+    Ok(Some(why))
 }
 
 /// `path` as a symlink to `target`, replaced atomically (a temporary link,

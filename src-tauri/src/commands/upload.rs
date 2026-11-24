@@ -213,6 +213,10 @@ pub fn record_picked(
         let Ok(meta) = std::fs::metadata(&p) else {
             continue;
         };
+        // A folder is not an attachment (review w11-6).
+        if !meta.is_file() {
+            continue;
+        }
         let name = p
             .file_name()
             .and_then(|n| n.to_str())
@@ -425,6 +429,11 @@ pub fn describe_for(
         let Ok(meta) = std::fs::metadata(path) else {
             continue;
         };
+        // A folder is not an attachment (review w11-6): left out here, and
+        // the composer says why.
+        if !meta.is_file() {
+            continue;
+        }
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -603,6 +612,15 @@ pub async fn upload_to_session(
         return Ok(vec![]);
     }
     check_paths_allowed(&allow, &args.local_paths)?;
+    // A dropped folder would fail the copy, or arrive as an empty file over
+    // ssh (review w11-6).
+    if args
+        .local_paths
+        .iter()
+        .any(|p| std::fs::metadata(p).is_ok_and(|m| !m.is_file()))
+    {
+        return Err(IpcError::new(codes::E_UPLOAD, NOT_A_FILE));
+    }
     // Consumed up front (not after the upload) so a failed transfer does
     // not leave a re-usable authorisation behind; the user simply drops
     // the file again.
@@ -652,11 +670,19 @@ pub struct AttachArgs {
 /// A file that cannot be stat'ed is an error here, not a skip — unlike
 /// `record_picked`, which is describing a batch, this is about to send the
 /// thing. An unmeasurable file must not slip past the ceiling.
+/// Why a folder (or any non-file) is not attached.
+pub const NOT_A_FILE: &str = "folders can't be attached — zip it first";
+
 fn check_upload_budget(paths: &[String]) -> Result<(), IpcError> {
     let mut files = Vec::with_capacity(paths.len());
     for p in paths {
         let meta = std::fs::metadata(p)
             .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("stat {p}: {e}")))?;
+        // A folder's `len` is a few bytes and would pass the budget, then
+        // fail the copy or arrive as an empty file (review w11-6).
+        if !meta.is_file() {
+            return Err(IpcError::new(codes::E_UPLOAD, NOT_A_FILE));
+        }
         let name = Path::new(p)
             .file_name()
             .and_then(|n| n.to_str())
@@ -697,7 +723,14 @@ pub async fn upload_attachments(
 
     let timeout = Duration::from_secs(UPLOAD_TIMEOUT_SECS);
     let root = resolve_worktree_root(&ssh, &args.host_alias, &args.session_name, timeout).await?;
-    let dir = format!("{root}/{}", fleet_core::service::attachments::ATTACH_DIR);
+    // Each send gets its own folder (review w11-5): names are deduped
+    // within one send only, and a later `report.pdf` must not overwrite the
+    // one an earlier prompt, still queued, points at.
+    let dir = format!(
+        "{root}/{}/{}",
+        fleet_core::service::attachments::ATTACH_DIR,
+        send_folder_name(std::time::SystemTime::now())
+    );
 
     let names = dedupe_names(&basenames_of(&args.local_paths));
     run_script(
@@ -716,6 +749,18 @@ pub async fn upload_attachments(
         timeout,
     )
     .await
+}
+
+/// One send's folder under the attachments folder: the time and a counter,
+/// so two sends never share one, however close together.
+fn send_folder_name(now: std::time::SystemTime) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let t = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{:09}-{seq}", t.as_secs(), t.subsec_nanos())
 }
 
 /// Make a batch of basenames collision-free, preserving order. The first
@@ -1057,6 +1102,34 @@ mod tests {
         let err = check_upload_budget(&["/nonexistent/gone.bin".to_string()]).unwrap_err();
         assert_eq!(err.code, codes::E_UPLOAD);
         assert!(err.message.contains("stat "), "{}", err.message);
+    }
+
+    /// Review w11-6: a folder is never an attachment. It is left out of a
+    /// pick, and refused before its allow-list entry is spent.
+    #[test]
+    fn a_folder_is_left_out_and_refused() {
+        let allow = UploadAllowList::new();
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("notes.txt");
+        std::fs::write(&good, b"hello").unwrap();
+        let folder = dir.path().join("proj");
+        std::fs::create_dir(&folder).unwrap();
+        let picked = record_picked(&allow, vec![good.clone(), folder.clone()]).unwrap();
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].name, "notes.txt");
+        let err = check_upload_budget(&[folder.to_string_lossy().into_owned()]).unwrap_err();
+        assert_eq!(err.code, codes::E_UPLOAD);
+        assert_eq!(err.message, NOT_A_FILE);
+    }
+
+    /// Review w11-5: two sends in the same instant still get two folders.
+    #[test]
+    fn each_send_gets_its_own_folder() {
+        let now = std::time::SystemTime::now();
+        let a = send_folder_name(now);
+        let b = send_folder_name(now);
+        assert_ne!(a, b);
+        assert!(!a.contains('/') && !a.starts_with('.'), "{a}");
     }
 
     /// The two copies of the limits must not drift: the composer shows them,

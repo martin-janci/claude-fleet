@@ -251,6 +251,27 @@ pub async fn add_host(
             return list_one(store, &args.alias);
         }
     }
+    // A fleet name already in use for ANOTHER machine is not re-pointed by
+    // an add: the row would keep that machine's token, provisioned flag and
+    // fingerprint (so the new one never got hooks or an MCP entry, yet read
+    // provisioned), and the old machine's token would still authenticate as
+    // this host (review w13-3).
+    if let Some(existing) = lock(store)?.get_host_row(&args.alias)? {
+        if let Some(old) = existing
+            .ssh_alias
+            .as_deref()
+            .filter(|old| *old != args.ssh_alias)
+        {
+            return Err(IpcError::new(
+                codes::E_CONFLICT,
+                format!(
+                    "a host named {:?} already exists and is reached as {old:?}: pick another \
+                     name in fleet, or remove {:?} first to move the name to {:?}",
+                    args.alias, args.alias, args.ssh_alias
+                ),
+            ));
+        }
+    }
     let (reachable, claude_ver, tmux_ver, account) = if args.transport.as_deref() == Some("agent") {
         (false, None, None, None)
     } else {
@@ -404,6 +425,14 @@ pub async fn probe_host(
         } else {
             s.set_host_account(&args.alias, None)?;
         }
+        // A probe that found no version keeps the stored one (review w13-6):
+        // a narrower shell PATH than the sessions' is not an uninstall, and
+        // the reconcile's versions pass reads them where sessions run.
+        let read_claude = claude_ver.is_some();
+        let stored = s.get_host_row(&args.alias)?;
+        let claude_ver =
+            claude_ver.or_else(|| stored.as_ref().and_then(|h| h.claude_version.clone()));
+        let tmux_ver = tmux_ver.or_else(|| stored.as_ref().and_then(|h| h.tmux_version.clone()));
         s.update_host_probe(
             &args.alias,
             reachable,
@@ -413,7 +442,7 @@ pub async fn probe_host(
         )?;
         // Task 1: an explicit re-probe that read a version from the host
         // stamps it like the reconcile pass does.
-        if claude_ver.is_some() {
+        if read_claude {
             s.set_host_versions_at(&args.alias, now_unix())?;
         }
     }
@@ -516,14 +545,30 @@ pub async fn remove_host_with(
         None
     };
     let login_profiles = if args.delete_login_profiles && args.alias != "local" {
-        let names: Vec<String> = row
-            .claude_profiles
-            .iter()
-            .flatten()
-            .map(|p| p.name.clone())
-            .collect();
+        // A profile a live session still runs under stays: removing it
+        // would sign that session out mid-turn, as `remove` refuses to
+        // (w01-5). It is named in `error`, the rest go.
+        let mut names: Vec<String> = Vec::new();
+        let mut in_use: Vec<String> = Vec::new();
+        {
+            let s = lock(store)?;
+            for p in row.claude_profiles.iter().flatten() {
+                let live =
+                    crate::service::add_account::live_sessions_under(&s, &args.alias, &p.name)?;
+                if live.is_empty() {
+                    names.push(p.name.clone());
+                } else {
+                    in_use.push(format!("{}: in use by {}", p.name, live.join(", ")));
+                }
+            }
+        }
         let (removed, error) =
             crate::service::add_account::remove_login_profiles(tmux, &names).await;
+        let error = match (in_use.is_empty(), error) {
+            (true, error) => error,
+            (false, None) => Some(in_use.join("; ")),
+            (false, Some(e)) => Some(format!("{}; {e}", in_use.join("; "))),
+        };
         Some(LoginProfilesCleanup { removed, error })
     } else {
         None
@@ -571,7 +616,17 @@ pub fn merge_host(
             "local is this machine; merge it only on a hub with hub.local_host=false",
         ));
     }
-    let report = lock(store)?.merge_host_alias(&args.from, &args.into)?;
+    let report = {
+        let s = lock(store)?;
+        // The merge can move `into`'s own sessions to another org (from's
+        // org and rules become into's): announce them as the org tool does,
+        // a new generation first so a scoped stream re-reads (w06-3).
+        let before = s.session_orgs()?;
+        let report = s.merge_host_alias(&args.from, &args.into)?;
+        crate::service::orgs::bump_org_generation();
+        s.announce_org_moves(&before)?;
+        report
+    };
     // `from` is deleted: its tunnel goes with it, as `remove_host`'s does.
     tunnels.stop(&args.from);
     Ok(report)
@@ -659,6 +714,9 @@ pub(crate) const OAUTH_ACCOUNT_SCRIPT: &str = oauth_account_script!();
 /// rather than failing the whole probe. MUST be `quote`'d before it's handed to
 /// `bash -lc` over ssh (see `probe_with_token`).
 const PROBE_SCRIPT: &str = concat!(
+    // `crate::ssh::TOOL_PATH_PREFIX`, spelled out for `concat!` (review
+    // w13-6; a test holds the two equal).
+    "PATH=\"$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin\"; export PATH; ",
     "tmux -V 2>/dev/null || true\necho ---\nclaude --version 2>/dev/null || true\necho ---\n",
     oauth_account_script!()
 );
@@ -1736,6 +1794,15 @@ mod tests {
 
     // ── probe script: ssh argv-join + login-shell re-tokenization ─────────────
 
+    /// Review w13-6: the probe looks where sessions find their tools too.
+    #[test]
+    fn the_probe_looks_in_homebrew_and_local_bin_too() {
+        assert!(PROBE_SCRIPT.starts_with(crate::ssh::TOOL_PATH_PREFIX));
+        assert!(
+            crate::service::host_check::check_script().starts_with(crate::ssh::TOOL_PATH_PREFIX)
+        );
+    }
+
     #[test]
     fn probe_script_runs_as_one_program_when_quoted() {
         // The real PROBE_SCRIPT, single-quoted exactly as `probe_with_token`
@@ -1903,6 +1970,36 @@ mod tests {
             fake.calls()
         );
         assert!(host_row(&store, "gamma").is_some(), "the row is persisted");
+    }
+
+    /// Review w13-3: a fleet name in use for another machine is refused, not
+    /// silently moved to the new one with the old one's token and state.
+    #[tokio::test]
+    async fn add_host_never_moves_an_existing_name_to_another_machine() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("dev", Some("dev-old")).unwrap();
+            s.set_host_provisioned("dev", true).unwrap();
+        }
+        let fake = fake_fleet();
+        let err = add_host(
+            AddHostArgs {
+                alias: "dev".into(),
+                ssh_alias: "box2".into(),
+                transport: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_CONFLICT, "{err:?}");
+        assert!(err.message.contains("dev-old"), "{}", err.message);
+        assert!(fake.calls().is_empty(), "refused before any probe");
+        let row = host_row(&store, "dev").unwrap();
+        assert_eq!(row.ssh_alias.as_deref(), Some("dev-old"));
+        assert!(row.provisioned);
     }
 
     /// Review r18 A6: re-adding a connected agent host as an agent host
@@ -2357,6 +2454,49 @@ mod tests {
         assert!(!tunnels.health().contains_key("gone"));
     }
 
+    /// w06-3: a merge that gives `into` the org of `from` moves into's own
+    /// sessions to that org; they are announced, with a new org generation.
+    #[tokio::test]
+    async fn a_merge_announces_into_s_sessions_that_changed_org() {
+        let tunnels = TunnelSupervisor::with_spawner(
+            Arc::new(|_argv| Box::pin(std::future::pending())),
+            Duration::from_secs(3600),
+        );
+        let bus = Arc::new(crate::events::RecordingEventBus::new());
+        let store = Mutex::new(Store::open_with_bus_in_memory(bus.clone()).unwrap());
+        let sid = {
+            let s = store.lock().unwrap();
+            s.upsert_host("mac").unwrap();
+            s.upsert_host("mac-old").unwrap();
+            let acme = s.add_org("Acme", None, false).unwrap();
+            s.set_host_org("mac-old", Some(acme.id)).unwrap();
+            s.upsert_session("dev", "mac", None, None, 1, 1, "running", None)
+                .unwrap()
+        };
+        let generation = crate::service::orgs::org_generation();
+        bus.take();
+        merge_host(
+            MergeHostArgs {
+                from: "mac-old".into(),
+                into: "mac".into(),
+                confirm_nonce: None,
+            },
+            &store,
+            &tunnels,
+        )
+        .unwrap();
+        assert!(crate::service::orgs::org_generation() > generation);
+        let seen = bus.take();
+        assert!(seen.contains(&format!("session:updated:{sid}")), "{seen:?}");
+        let row = store
+            .lock()
+            .unwrap()
+            .get_session_by_id(sid)
+            .unwrap()
+            .unwrap();
+        assert!(row.org_id.is_some());
+    }
+
     /// Review w11-7 (b): Remove host may also delete fleet's token and key
     /// files there, best effort: a host that does not answer is removed all
     /// the same and the result says so. The made-up accounts its logins
@@ -2521,5 +2661,69 @@ mod tests {
             "{scripts:?}"
         );
         assert!(store.lock().unwrap().get_host_row("mac").unwrap().is_none());
+    }
+
+    /// w01-5: a profile a live session still runs under is not removed with
+    /// the host (Remove login refuses it the same way); it is named in the
+    /// report and the rest go.
+    #[tokio::test]
+    async fn remove_host_keeps_a_login_profile_a_live_session_uses() {
+        use crate::ssh_fake::{FakeSsh, Match, Reply};
+        let tunnels = TunnelSupervisor::with_spawner(
+            Arc::new(|_argv| Box::pin(std::future::pending())),
+            Duration::from_secs(3600),
+        );
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("mac").unwrap();
+            let p = |name: &str| crate::store::HostProfileRow {
+                name: name.into(),
+                account_uuid: None,
+                email: None,
+                credential: None,
+            };
+            s.set_host_profiles("mac", &[p("work"), p("ci")]).unwrap();
+            let id = s
+                .upsert_session("dev-1", "mac", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.set_session_profile(id, Some("work")).unwrap();
+        }
+        let ssh = Arc::new(FakeSsh::new());
+        ssh.on_host(
+            "mac",
+            Match::script_contains(".claude-profiles/"),
+            Reply::ok("__fleet_ok__\n"),
+        );
+        let tmux = crate::tmux::RemoteTmux {
+            client: Arc::clone(&ssh),
+            host: "mac".into(),
+        };
+        let out = remove_host_with(
+            RemoveHostArgs {
+                alias: "mac".into(),
+                delete_credentials: false,
+                delete_login_profiles: true,
+            },
+            &store,
+            &tunnels,
+            &tmux,
+        )
+        .await
+        .unwrap();
+        let c = out.login_profiles.expect("reported");
+        assert_eq!(c.removed, vec!["ci".to_string()]);
+        assert_eq!(c.error.as_deref(), Some("work: in use by dev-1"));
+        let scripts: Vec<String> = ssh
+            .calls_for("mac")
+            .iter()
+            .filter_map(|c| c.script())
+            .collect();
+        assert!(
+            !scripts
+                .iter()
+                .any(|s| s.contains(".claude-profiles/\"'work'")),
+            "{scripts:?}"
+        );
     }
 }

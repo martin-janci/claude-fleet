@@ -473,6 +473,27 @@ fn a_tool_error_becomes_the_same_ipc_error_the_service_layer_raised() {
     assert_eq!(err.details, None);
 }
 
+/// Review w15-4: a poisoned lock or a failed query on the hub says it is
+/// the hub's, so the desktop does not tell its person to restart itself.
+#[test]
+fn a_hub_lock_or_database_error_is_marked_as_the_hubs() {
+    let fake = Fake::answering(Ok(tool_error(
+        codes::E_LOCK,
+        "catalog lock poisoned",
+        Value::Null,
+    )));
+    let err = block_on(backend(&fake).session_history(1, None)).expect_err("an error");
+    assert_eq!(err.code, codes::E_LOCK);
+    assert_eq!(err.details, Some(json!({ "origin": "hub" })));
+    let fake = Fake::answering(Ok(tool_error(
+        codes::E_SQLITE,
+        "database is locked",
+        json!({ "table": "x" }),
+    )));
+    let err = block_on(backend(&fake).session_history(1, None)).expect_err("an error");
+    assert_eq!(err.details, Some(json!({ "table": "x", "origin": "hub" })));
+}
+
 /// `E_AMBIGUOUS` and `E_LINT` put the part a caller acts on in `details`;
 /// losing it would turn an actionable error into prose.
 #[test]

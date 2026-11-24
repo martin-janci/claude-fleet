@@ -51,6 +51,25 @@ pub(crate) use quoted_data;
 /// [`quoted_data!`]'s sentence.
 pub const QUOTED_DATA: &str = quoted_data!();
 
+/// What the reply-text consent (D48) releases, in the words its toggle, its
+/// confirm and `decide.jev.unassigned_reply` show (review 23b w12-1): every
+/// use case that sends Claude's own text. A macro, so that copy can
+/// `concat!` it; [`REPLY_TEXT_USES`] is the same text, and a test pins it
+/// to [`Feature::reply_text_words`].
+macro_rules! reply_text_uses {
+    () => {
+        "the turn outcome and a routine run's outcome (the end of a session's screen, \
+         a few lines), the summary check (up to 80 KB of a session's transcript: \
+         prompts, replies and tool lines), mission triage (a worker's own summary), \
+         the duplicate check (an agent's reasons for a proposed task) and quick answer \
+         (an agent's reasons on a chat form)"
+    };
+}
+pub(crate) use reply_text_uses;
+
+/// [`reply_text_uses!`]'s text.
+pub const REPLY_TEXT_USES: &str = reply_text_uses!();
+
 #[cfg(feature = "nl-detect")]
 pub mod bench;
 pub mod control_route;
@@ -303,6 +322,23 @@ impl Feature {
             self,
             Feature::TurnOutcome | Feature::RoutineRunOutcome | Feature::SummaryCheck
         )
+    }
+
+    /// How [`REPLY_TEXT_USES`] names this feature, for one that needs the
+    /// reply-text consent for some of what it sends: every
+    /// [`Feature::sends_reply_text`] feature, and the ones that drop the
+    /// agent's own text without the consent (mission triage a worker's
+    /// summary, duplicate and quick answer a `why`). `None` for the others.
+    pub fn reply_text_words(self) -> Option<&'static str> {
+        match self {
+            Feature::TurnOutcome => Some("the turn outcome"),
+            Feature::RoutineRunOutcome => Some("a routine run's outcome"),
+            Feature::SummaryCheck => Some("the summary check"),
+            Feature::MissionTriage => Some("mission triage"),
+            Feature::Duplicate => Some("the duplicate check"),
+            Feature::QuickAnswer => Some("quick answer"),
+            _ => None,
+        }
     }
 }
 

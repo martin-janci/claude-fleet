@@ -12,6 +12,8 @@
   import { buildArgs, type ActionSpec, type ResourceRecord } from './resources';
   import { useResourceFleet } from './resource_fleet';
   import {
+    memberGrantsLine,
+    memberGrantsTotal,
     memberPairing,
     memberSessionsWord,
     orgMemberGrants,
@@ -80,13 +82,8 @@
    *  it is read, or when the hub does not say). */
   let removing = $state<{ member: OrgMember; grants: MemberGrants | null; loading: boolean } | null>(null);
   let choice = $state<GrantsOnRemove>('revoke');
-  const shared = $derived(removing?.grants ? removing.grants.watch + removing.grants.drive : 0);
-  const sharedLine = $derived(
-    removing?.grants
-      ? `${shared} ${shared === 1 ? 'session' : 'sessions'} of ${orgName} ${shared === 1 ? 'is' : 'are'} shared with them ` +
-          `(${removing.grants.drive} to drive, ${removing.grants.watch} to watch). What happens to those shares?`
-      : '',
-  );
+  const shared = $derived(removing?.grants ? memberGrantsTotal(removing.grants) : 0);
+  const sharedLine = $derived(removing?.grants ? memberGrantsLine(orgName, removing.grants) : '');
 
   async function askRemove(m: OrgMember) {
     choice = 'revoke';
@@ -193,9 +190,10 @@
             <span>{nameOf(m)}</span>{#if m.display_name && m.display_name !== m.name}<span class="dim">{m.name}</span>{/if}
           </td>
           <td>
-            {#if !readonly && addAction}
+            {#if !readonly && addAction && !m.locked}
               <!-- M15 G4.7: the role is changed in place, through the same
-                   set_member the add form runs. -->
+                   set_member the add form runs. Not on a row the hub would
+                   refuse (your own, a fleet admin's: review w07-5). -->
               <select
                 aria-label={`Role of ${nameOf(m)}`}
                 disabled={busy}
@@ -239,7 +237,7 @@
                 disabled={busy}
                 data-testid={`member-pair-${m.person_id}`}
                 onclick={() => startPairing(m.name)}>Pair a device</button>
-              {#if removeAction}
+              {#if removeAction && !m.locked}
                 <button
                   type="button"
                   class="btn btn--quiet"

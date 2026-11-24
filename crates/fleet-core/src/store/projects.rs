@@ -821,6 +821,12 @@ impl Store {
             &format!("UPDATE sessions SET worktree_id = NULL WHERE {CROSS}"),
             rusqlite::params![project_id],
         )?;
+        // w05-2: no FK on pull_requests.session_id, and the ids are reused.
+        tx.execute(
+            "UPDATE pull_requests SET session_id = NULL \
+              WHERE session_id IN (SELECT id FROM sessions WHERE project_id = ?1)",
+            rusqlite::params![project_id],
+        )?;
         tx.execute(
             "DELETE FROM sessions WHERE project_id = ?1",
             rusqlite::params![project_id],
@@ -859,6 +865,15 @@ impl Store {
         let unblocked = self.accounts_blocked_for_project(project_id)?;
         tx.execute(
             "DELETE FROM account_project_blocks WHERE project_id = ?1",
+            rusqlite::params![project_id],
+        )?;
+        // Two more references a reused id would inherit (w05-3): its ticket
+        // space (the next project would number its tickets on from this
+        // one's prefix), detached but kept so old keys still resolve; and
+        // its pull requests' project (no FK).
+        super::ticket_keys::retire_project_ticket_space_in(&tx, project_id)?;
+        tx.execute(
+            "UPDATE pull_requests SET project_id = NULL WHERE project_id = ?1",
             rusqlite::params![project_id],
         )?;
         tx.execute(
@@ -1008,19 +1023,28 @@ impl Store {
         }
         let crossed_twin: Option<(String, String, String, String)> = {
             let mut stmt = self.conn.prepare(
-                "SELECT w1.host_alias, w1.name, w1.path, w2.path FROM worktrees w1
+                "SELECT w1.host_alias, w1.name, w1.path, w2.path,
+                        EXISTS (SELECT 1 FROM sessions s WHERE s.worktree_id = w1.id)
+                   FROM worktrees w1
                    JOIN worktrees w2 ON w2.project_id = ?2 AND w2.host_alias = w1.host_alias
                     AND w2.name = w1.name
                   WHERE w1.project_id = ?1 AND w1.path IS NOT w2.path
                   ORDER BY w1.id",
             )?;
             let rows = stmt.query_map(rusqlite::params![from, into], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
             })?;
             let mut first = None;
             for row in rows {
-                let (host, name, a, b): (String, String, String, String) = row?;
+                let (host, name, a, b, used): (String, String, String, String, bool) = row?;
                 if host == "local" && gone.contains(&a) {
+                    continue;
+                }
+                // A remote twin no session sits on folds into `into`'s row
+                // like any other twin: nothing carries its directory over,
+                // and fleet cannot look at that host from here to tell
+                // whether the directory is still there (w01-6).
+                if host != "local" && !used {
                     continue;
                 }
                 first = Some((host, name, a, b));
@@ -1032,7 +1056,7 @@ impl Store {
             return Err(IpcError::new(
                 codes::E_INVALID,
                 format!(
-                    "worktree {name} on {host} is {a} under {from_name} but {b} under {into_name}: two checkouts, not one; remove or rename the old checkout first, then merge"
+                    "worktree {name} on {host} is {a} under {from_name} but {b} under {into_name}: two checkouts, not one; remove or rename the old checkout first, then merge (or Clean up the session on that worktree, or forget {from_name} instead)"
                 ),
             ));
         }
@@ -1230,6 +1254,10 @@ impl Store {
             "UPDATE routines SET event_repo = ?2 WHERE lower(event_repo) = lower(?1)",
             rusqlite::params![from_name, into_name],
         )?;
+        // A space from kept (into has its own) is detached, as
+        // `delete_project` does: a project that reuses from's id must not
+        // number its tickets on from it (w05-3).
+        super::ticket_keys::retire_project_ticket_space_in(&tx, from)?;
         tx.execute("DELETE FROM projects WHERE id = ?1", [from])?;
         let report = ProjectMergeReport {
             from,
@@ -2127,14 +2155,47 @@ mod tests {
         let new2 = s
             .upsert_project("acme", "app", "/proj/github.com/frantisek/app")
             .unwrap();
-        s.upsert_worktree_on("mac", old, "feat", "/a/.worktrees/feat", None)
+        let old_feat = s
+            .upsert_worktree_on("mac", old, "feat", "/a/.worktrees/feat", None)
             .unwrap();
-        s.upsert_worktree_on("mac", new2, "feat", "/b/.worktrees/feat", None)
+        let new_feat = s
+            .upsert_worktree_on("mac", new2, "feat", "/b/.worktrees/feat", None)
+            .unwrap();
+        // A session sits on the old twin: it would carry the other
+        // directory's row.
+        let sid = s
+            .upsert_session(
+                "gone",
+                "mac",
+                Some(old),
+                Some(old_feat),
+                1,
+                1,
+                "ghost",
+                None,
+            )
             .unwrap();
         let e = s.merge_project(old, new2).unwrap_err();
         assert_eq!(e.code, "E_INVALID", "{}", e.message);
         assert!(e.message.contains("worktree feat"), "{}", e.message);
+        assert!(e.message.contains("forget frantisek/app"), "{}", e.message);
         assert!(s.get_project(old).unwrap().is_some());
+        // w01-6: once no session sits on it, a remote twin folds into
+        // `into`'s row, as a twin in the same directory does.
+        s.conn_for_test()
+            .execute("DELETE FROM sessions WHERE id = ?1", [sid])
+            .unwrap();
+        s.merge_project(old, new2).unwrap();
+        assert!(s.get_project(old).unwrap().is_none());
+        let left: Vec<i64> = {
+            let c = s.conn_for_test();
+            let mut st = c
+                .prepare("SELECT id FROM worktrees WHERE host_alias = 'mac' AND name = 'feat'")
+                .unwrap();
+            let v = st.query_map([], |r| r.get(0)).unwrap();
+            v.collect::<Result<_, _>>().unwrap()
+        };
+        assert_eq!(left, vec![new_feat]);
     }
 
     /// Review w05-7: a live session of the project that would go refuses

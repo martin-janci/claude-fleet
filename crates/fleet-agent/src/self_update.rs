@@ -29,7 +29,8 @@ use fleet_updater::binary::{
     parse_version_output, BinState, BinaryConfig, BinaryUpdater, Health, Host, Outcome,
 };
 use fleet_updater::common::{trusted_keys, FileSequences};
-use fleet_updater::net::{GitFetch, HubHttp};
+#[cfg(test)]
+use fleet_updater::net::GitFetch;
 use fleet_updater::systemd::SystemdHost;
 
 use crate::config::Config;
@@ -54,6 +55,37 @@ pub struct SelfUpdate {
     pub args: Vec<OsString>,
     /// Where the hub's `update_now` drops `update-now`.
     pub poke_dir: PathBuf,
+    /// The real path of the build this process runs, taken at start-up
+    /// before anything can re-point `link` (`main` fills it). On macOS
+    /// `current_exe` is the path the process was exec'd as, i.e. `link`
+    /// itself, so resolving it later follows `link` to whatever it points
+    /// at NOW (review w03-1).
+    pub started_as: Option<PathBuf>,
+}
+
+impl SelfUpdate {
+    /// Run before the config is read (review w09-2): a candidate that dies
+    /// before its pass ever resumes — one that refuses the config, say — is
+    /// rolled back by the start count `early_rollback` keeps, and this
+    /// process then `exec`s the previous build. Returns only when nothing
+    /// had to be done, or when the `exec` failed (logged).
+    pub fn guard_start(&self) {
+        match fleet_updater::binary::early_rollback(&self.paths.root, &self.paths.state_dir) {
+            Ok(None) => {}
+            Ok(Some(why)) => {
+                tracing::error!(%why, "[agent] the new build is rolled back before it starts");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt as _;
+                    let e = std::process::Command::new(&self.link)
+                        .args(&self.args)
+                        .exec();
+                    tracing::error!(link = %self.link.display(), error = %e, "[agent] starting the previous build failed");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "[agent] the update state could not be read"),
+        }
+    }
 }
 
 /// Whether this process runs the pass itself, and with what. `None` when an
@@ -94,6 +126,7 @@ pub fn plan(
         paths,
         link,
         args: argv[1..].to_vec(),
+        started_as: None,
     })
 }
 
@@ -134,16 +167,26 @@ impl SelfUpdate {
             link = %self.link.display(),
             "[agent] self-update on (no fleet-agent-update.timer here)"
         );
+        let mut failures = 0u32;
         loop {
             let (outcome, wait) = updater.tick().await;
+            let pass_end = tokio::time::Instant::now();
             // A refusal wakes the pass at every redial (~60 s). After an
             // attempt that failed before anything ran (a download or an
             // unpacked build that will not run), that would download the
-            // same tarball again every minute (review w09-4): such a pass
-            // waits its normal interval, and only `update-now` cuts it short.
-            let heed_refusals = !matches!(outcome, Outcome::Failed(_));
+            // same tarball again every minute (review w09-4). But waiting the
+            // full interval (6 h on stable) leaves a refused agent offline
+            // for that long after one passing download failure (review
+            // w03-3 / w18-3): while refused, a failed pass is retried on a
+            // short ladder instead, and only `update-now` cuts it shorter.
+            failures = if matches!(outcome, Outcome::Failed(_)) {
+                failures.saturating_add(1)
+            } else {
+                0
+            };
+            let retry_when_refused = refused_retry(failures);
             let poke = self.poke_dir.join("update-now");
-            let deadline = tokio::time::Instant::now() + wait;
+            let mut deadline = pass_end + wait;
             loop {
                 let step = deadline
                     .saturating_duration_since(tokio::time::Instant::now())
@@ -154,9 +197,19 @@ impl SelfUpdate {
                 tokio::select! {
                     () = tokio::time::sleep(step) => {}
                     () = link.refused.notified() => {
-                        if heed_refusals {
-                            tracing::info!("[agent] the hub refused this agent's protocol: checking for an update now");
-                            break;
+                        match retry_when_refused {
+                            None => {
+                                tracing::info!("[agent] the hub refused this agent's protocol: checking for an update now");
+                                break;
+                            }
+                            Some(back) if pass_end + back < deadline => {
+                                deadline = pass_end + back;
+                                tracing::info!(
+                                    "[agent] the hub refused this agent's protocol: retrying the failed update in {} s",
+                                    back.as_secs()
+                                );
+                            }
+                            Some(_) => {}
                         }
                     }
                 }
@@ -174,10 +227,7 @@ impl SelfUpdate {
         link: Arc<LinkStatus>,
     ) -> Result<BinaryUpdater<ExecHost>, String> {
         let state = BinState::load(&self.paths.state_dir)?;
-        let dial =
-            crate::proxy::UpdateDial::resolve(config.proxy.as_deref(), |k| std::env::var(k).ok())?;
-        let hub = HubHttp::with_ca(&config.hub, &config.token, None, config.ca_file.as_deref())?
-            .with_dial(dial.clone());
+        let (hub, git) = crate::update::update_clients(config, |k| std::env::var(k).ok())?;
         let channel = fleet_update::HubUpdateChannel::new(
             hub.clone(),
             trusted_keys(),
@@ -189,11 +239,12 @@ impl SelfUpdate {
                 user_scope: false,
                 hub: None,
                 link: self.link.clone(),
-                git: GitFetch::for_artifacts(None)?.with_dial(dial),
+                git,
                 mirror: Some(hub),
             },
             link: self.link.clone(),
             args: self.args.clone(),
+            started_as: self.started_as.clone().or_else(started_as),
             status: link,
             running: own_version()?,
         };
@@ -213,6 +264,24 @@ impl SelfUpdate {
     }
 }
 
+/// After `failures` failed passes in a row, how soon a refused agent tries
+/// again: `None` (no failure) heeds every refusal at once; otherwise a short
+/// ladder, so a passing download failure costs minutes, not the interval,
+/// and a build that keeps failing is not fetched every minute.
+fn refused_retry(failures: u32) -> Option<Duration> {
+    const LADDER_MIN: [u64; 4] = [2, 5, 15, 30];
+    let i = usize::try_from(failures.checked_sub(1)?).unwrap_or(usize::MAX);
+    Some(Duration::from_secs(
+        60 * LADDER_MIN[i.min(LADDER_MIN.len() - 1)],
+    ))
+}
+
+/// The resolved path of the running binary. Call it at start-up: on macOS
+/// `current_exe` names the symlink the process was started through.
+pub fn started_as() -> Option<PathBuf> {
+    std::env::current_exe().and_then(std::fs::canonicalize).ok()
+}
+
 fn own_version() -> Result<Version, String> {
     parse_version_output(env!("CARGO_PKG_VERSION"))
 }
@@ -223,6 +292,8 @@ pub struct ExecHost {
     files: SystemdHost,
     link: PathBuf,
     args: Vec<OsString>,
+    /// The build this process runs, resolved at start-up ([`started_as`]).
+    started_as: Option<PathBuf>,
     status: Arc<LinkStatus>,
     running: Version,
 }
@@ -231,14 +302,13 @@ impl ExecHost {
     /// Whether `link` already resolves to the build this process runs. After
     /// an `exec` the new process resumes the attempt and "restarts" again on
     /// the way through: that must be a no-op, not an endless `exec`.
-    /// `current_exe` rather than `/proc/self/exe`: macOS has no `/proc`, and
-    /// there the check was always false, so a rollback `exec`'d forever.
+    /// Compared with the path resolved at start-up, not `current_exe` now:
+    /// on macOS that is `link` itself, so it always matched and `restart`
+    /// never exec'd the new build (review w03-1); macOS also has no `/proc`
+    /// (review w09-1, the endless rollback `exec`).
     fn runs_link(&self) -> bool {
-        match (
-            std::fs::canonicalize(&self.link),
-            std::env::current_exe().and_then(std::fs::canonicalize),
-        ) {
-            (Ok(a), Ok(b)) => a == b,
+        match (std::fs::canonicalize(&self.link), self.started_as.as_ref()) {
+            (Ok(a), Some(b)) => &a == b,
             _ => false,
         }
     }
@@ -425,6 +495,18 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_agent_retries_a_failed_update_on_a_short_ladder() {
+        assert_eq!(refused_retry(0), None);
+        let mins = |n| refused_retry(n).map(|d| d.as_secs() / 60);
+        assert_eq!(mins(1), Some(2));
+        assert_eq!(mins(2), Some(5));
+        assert_eq!(mins(3), Some(15));
+        assert_eq!(mins(4), Some(30));
+        assert_eq!(mins(40), Some(30));
+        assert_eq!(mins(u32::MAX), Some(30));
+    }
+
+    #[test]
     fn its_own_version_parses() {
         assert!(own_version().is_ok());
     }
@@ -443,6 +525,7 @@ mod tests {
             },
             link: PathBuf::from("/nonexistent"),
             args: vec![],
+            started_as: started_as(),
             status: notifier.link(),
             running: own_version().unwrap(),
         };
@@ -467,14 +550,62 @@ mod tests {
     }
 
     /// The rollback loop guard: a link that resolves to this very binary is
-    /// "already running", on every OS (macOS has no `/proc/self/exe`).
+    /// "already running", on every OS (macOS has no `/proc/self/exe`). And
+    /// once the link is re-pointed at another build (an install, a
+    /// rollback) it is not, even though the process was started through
+    /// that very link (macOS's `current_exe` names the link: review w03-1).
     #[cfg(unix)]
     #[test]
     fn a_link_to_this_very_binary_is_already_running() {
         let dir = tempfile::tempdir().unwrap();
         let link = dir.path().join("current");
-        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &link).unwrap();
+        let me = std::env::current_exe().unwrap();
+        std::os::unix::fs::symlink(&me, &link).unwrap();
         let host = ExecHost {
+            files: SystemdHost {
+                unit: "x".into(),
+                user_scope: false,
+                hub: None,
+                link: link.clone(),
+                git: GitFetch::new(None).unwrap(),
+                mirror: None,
+            },
+            link: link.clone(),
+            args: vec![],
+            // As macOS hands it over: the link itself, resolved at start-up.
+            started_as: std::fs::canonicalize(&link).ok(),
+            status: crate::conn::Notifier::at(None).link(),
+            running: own_version().unwrap(),
+        };
+        assert!(host.runs_link());
+        // So `restart` is a no-op rather than an `exec`.
+        assert!(host.restart().is_ok());
+
+        // An install re-points the link at the new build: it is no longer
+        // what runs, so `restart` must exec it (not checked here: it would
+        // replace the test process).
+        let other = dir.path().join("fleet-agent-new");
+        std::fs::write(&other, b"").unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&other, &link).unwrap();
+        assert!(!host.runs_link());
+    }
+
+    /// Review 23b w19-4: the check holds for an exe path outside `/proc`,
+    /// as on macOS, so a Linux run proves it too: a link to the binary the
+    /// process was started from is "already running", a link to another
+    /// is not.
+    #[cfg(unix)]
+    #[test]
+    fn the_link_check_compares_the_started_binary_not_proc() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = dir.path().join("fleet-agent-1.2.3");
+        let other = dir.path().join("fleet-agent-1.2.2");
+        std::fs::write(&started, b"new").unwrap();
+        std::fs::write(&other, b"old").unwrap();
+        let link = dir.path().join("current");
+        std::os::unix::fs::symlink(&started, &link).unwrap();
+        let mut host = ExecHost {
             files: SystemdHost {
                 unit: "x".into(),
                 user_scope: false,
@@ -487,9 +618,94 @@ mod tests {
             args: vec![],
             status: crate::conn::Notifier::at(None).link(),
             running: own_version().unwrap(),
+            started_as: std::fs::canonicalize(&started).ok(),
         };
         assert!(host.runs_link());
-        // So `restart` is a no-op rather than an `exec`.
-        assert!(host.restart().is_ok());
+        host.started_as = std::fs::canonicalize(&other).ok();
+        assert!(!host.runs_link());
+        host.started_as = None;
+        assert!(!host.runs_link());
+    }
+
+    /// Review 23b w19-4: the update passes' hub client really dials the
+    /// proxy (a `CONNECT` to the hub), and a host the environment's
+    /// no-proxy list names goes direct.
+    #[tokio::test]
+    async fn the_update_clients_dial_the_proxy_and_skip_no_proxy_hosts() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        async fn read_head(s: &mut tokio::net::TcpStream) -> String {
+            let mut head = Vec::new();
+            let mut b = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                s.read_exact(&mut b).await.unwrap();
+                head.push(b[0]);
+            }
+            String::from_utf8(head).unwrap()
+        }
+        const OK: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+        // The hub: answers any GET.
+        let hub = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hub_port = hub.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let (mut s, _) = hub.accept().await.unwrap();
+                tokio::spawn(async move {
+                    read_head(&mut s).await;
+                    let _ = s.write_all(OK).await;
+                });
+            }
+        });
+        // The proxy: records each CONNECT, then tunnels to the target.
+        let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = proxy.local_addr().unwrap().port();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen_by_proxy = Arc::clone(&seen);
+        tokio::spawn(async move {
+            loop {
+                let (mut client, _) = proxy.accept().await.unwrap();
+                let seen = Arc::clone(&seen_by_proxy);
+                tokio::spawn(async move {
+                    let head = read_head(&mut client).await;
+                    let target = head
+                        .strip_prefix("CONNECT ")
+                        .and_then(|r| r.split_once(' '))
+                        .map(|(t, _)| t.to_string())
+                        .unwrap();
+                    seen.lock().unwrap().push(target.clone());
+                    let mut upstream = tokio::net::TcpStream::connect(&target).await.unwrap();
+                    client
+                        .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                        .await
+                        .unwrap();
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                });
+            }
+        });
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "hub": format!("http://127.0.0.1:{hub_port}"),
+            "token": "t",
+            "insecure": true,
+        }))
+        .unwrap();
+        let proxy_url = format!("http://127.0.0.1:{proxy_port}");
+        let env = |no_proxy: Option<&'static str>| {
+            let proxy_url = proxy_url.clone();
+            move |k: &str| match k {
+                "HTTPS_PROXY" => Some(proxy_url.clone()),
+                "NO_PROXY" => no_proxy.map(str::to_string),
+                _ => None,
+            }
+        };
+        let (hub, _) = crate::update::update_clients(&config, env(None)).unwrap();
+        assert_eq!(hub.get("/update/artifact/ab", 64).await.unwrap(), b"ok");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![format!("127.0.0.1:{hub_port}")],
+            "the hub was reached through the proxy"
+        );
+        let (hub, _) = crate::update::update_clients(&config, env(Some("127.0.0.1"))).unwrap();
+        assert_eq!(hub.get("/update/artifact/ab", 64).await.unwrap(), b"ok");
+        assert_eq!(seen.lock().unwrap().len(), 1, "no-proxy goes direct");
     }
 }

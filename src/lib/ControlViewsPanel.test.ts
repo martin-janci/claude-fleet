@@ -45,6 +45,7 @@ describe('ControlViewsPanel (step 9.4)', () => {
   it("counts Control's approvals and the missions waiting on you, and lists them (w04-7)", async () => {
     const { confirmQueue } = await import('./confirms');
     const { missionList } = await import('./mission_room');
+    const { waitingMissions } = await import('./mission_waits');
     confirmQueue.set([{ nonce: 'n1', tool: 'new_session', summary: 'host=h', caller: 'client:op', operator: true, asked_at: 1 }]);
     missionList.set({
       loaded: true,
@@ -54,6 +55,11 @@ describe('ControlViewsPanel (step 9.4)', () => {
         { id: 5, name: 'Old', goal: '', mode: 'finite', state: 'cancelled', level: 2, plan_version: 1, created_at: 1, updated_at: 1, version: 1, waiting_on: { reason: 'question' } } as never,
       ],
     });
+    // The count is the rail's (review w09-5), whose missions are the
+    // waiting-missions store's.
+    waitingMissions.set([
+      { id: 4, name: 'Receipts', goal: '', mode: 'finite', state: 'active', level: 2, plan_version: 1, created_at: 1, updated_at: 1, version: 1, waiting_on: { reason: 'sign_grant', since: 1, open_cards: 0 } } as never,
+    ]);
     try {
       const { getByTestId } = render(ControlViewsPanel);
       await tick();
@@ -62,6 +68,7 @@ describe('ControlViewsPanel (step 9.4)', () => {
       expect(getByTestId('control-needs-you-mission').textContent).toContain('Receipts · Grant needs signing');
     } finally {
       confirmQueue.set([]);
+      waitingMissions.set([]);
       missionList.set({ loaded: false, missions: [], error: null });
     }
   });

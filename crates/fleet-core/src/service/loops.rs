@@ -391,6 +391,61 @@ mod tests {
         );
     }
 
+    /// w17-3: a detached pass that reports its loop's health goes through
+    /// [`kick`] (or catches its own panic), never a raw `rt::spawn`: a
+    /// panic there would unwind past its `report` and leave the loop on its
+    /// last "ok".
+    #[test]
+    fn a_reporting_pass_is_never_a_raw_spawn() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(
+            &crate::repo_files::path("crates/fleet-core/src/service"),
+            &mut files,
+        );
+        let mut raw = Vec::new();
+        for f in files {
+            let text = std::fs::read_to_string(&f).unwrap();
+            for (at, m) in text.match_indices("crate::rt::spawn(async move {") {
+                // The spawned block itself, to its matching brace: what runs
+                // after the spawn returns is not in the task.
+                let open = at + m.len();
+                let mut depth = 1;
+                let mut end = text.len();
+                for (i, c) in text[open..].char_indices() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => depth -= 1,
+                        _ => {}
+                    }
+                    if depth == 0 {
+                        end = open + i;
+                        break;
+                    }
+                }
+                let body = &text[open..end];
+                // A tick loop reports through `run_reporting_tick`, which
+                // catches each pass and reports its panic.
+                if body.contains("loops::report(")
+                    && !body.contains("caught")
+                    && !body.contains("run_reporting_tick(")
+                {
+                    raw.push(format!("{}", f.display()));
+                }
+            }
+        }
+        assert!(raw.is_empty(), "use loops::kick for these passes: {raw:?}");
+    }
+
     #[test]
     fn a_paused_pass_is_not_a_run() {
         let reg = Registry::new();

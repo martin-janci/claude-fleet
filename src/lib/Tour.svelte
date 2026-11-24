@@ -7,6 +7,7 @@
 -->
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import { isEditable } from './terminal_keys';
   import Button from './kit/Button.svelte';
   import Kbd from './kit/Kbd.svelte';
   import {
@@ -66,7 +67,13 @@
 
   function onKeydown(e: KeyboardEvent) {
     if (!step) return;
-    if (e.key === 'Escape' && !e.defaultPrevented) {
+    if (e.key === 'Escape') {
+      // In the capture phase `defaultPrevented` is always false, so it says
+      // nothing. An Esc that closes what a step's "try it" opened (the
+      // switcher, the `?` sheet), or that a field takes, is not the tour's
+      // (review w14-5): it ends the tour only when nothing else is open.
+      const t = e.target instanceof HTMLElement ? e.target : null;
+      if (document.querySelector('dialog[open]') || isEditable(t) || t?.closest?.('dialog')) return;
       endTour();
       return;
     }

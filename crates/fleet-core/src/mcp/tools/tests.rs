@@ -488,28 +488,57 @@ fn the_owners_device_may_refresh_one_hosts_content_and_nothing_wider() {
     };
     assert!(super::fleet::provision_scope_allowed(
         &desktop,
-        &params(Some("mefistos"), true, false)
+        &params(Some("mefistos"), true, false),
+        false
     )
     .is_ok());
-    for (p, what) in [
-        (params(None, true, false), "every host"),
+    for (p, first, what) in [
+        (params(None, true, false), false, "every host"),
         (
             params(Some("mefistos"), false, false),
-            "a full run mints a token",
+            false,
+            "a full run over a token replaces nothing the device may",
         ),
-        (params(Some("mefistos"), true, true), "a rotation"),
+        (params(Some("mefistos"), true, true), false, "a rotation"),
+        (
+            params(Some("mefistos"), false, true),
+            true,
+            "a rotation, even of none",
+        ),
+        (
+            params(None, false, false),
+            true,
+            "every host, even new ones",
+        ),
     ] {
-        let e = super::fleet::provision_scope_allowed(&desktop, &p).expect_err(what);
+        let e = super::fleet::provision_scope_allowed(&desktop, &p, first).expect_err(what);
         assert!(
             e.message.starts_with("E_FORBIDDEN"),
             "{what}: {}",
             e.message
         );
     }
-    assert!(
-        super::fleet::provision_scope_allowed(&Caller::master(), &params(None, false, true))
-            .is_ok()
-    );
+    // Review w13-1: a host added from the app has no token: its first full
+    // provisioning is the trusted full device's (it revokes nothing)…
+    assert!(super::fleet::provision_scope_allowed(
+        &trusted(desktop.clone()),
+        &params(Some("mefistos"), false, false),
+        true
+    )
+    .is_ok());
+    // …and never an untrusted one's.
+    assert!(super::fleet::provision_scope_allowed(
+        &desktop,
+        &params(Some("mefistos"), false, false),
+        true
+    )
+    .is_err());
+    assert!(super::fleet::provision_scope_allowed(
+        &Caller::master(),
+        &params(None, false, true),
+        false
+    )
+    .is_ok());
     // Never a host's own Claude, nor a readonly device.
     assert!(!guard::access_allows(
         &host_caller("mefistos", TokenMode::Full),
@@ -9450,6 +9479,47 @@ async fn within_the_brief_the_operators_prompt_to_its_own_session_is_pre_approve
     confirm_nonce_of(&other);
 }
 
+/// Review w17-3: a `queue_prompt` retried with the same `client_msg_id`
+/// (its first answer lost on a bad line) answers the first result and
+/// queues nothing more; another id queues another prompt.
+#[tokio::test]
+async fn a_queued_prompt_retried_with_its_client_msg_id_is_queued_once() {
+    let (s, _, on_b) = two_host_store();
+    let t = guarded_tools(s, true);
+    let later = crate::store::now_unix() + 3_600;
+    let queue = |id: &str| {
+        serde_json::from_value::<QueuePromptParams>(serde_json::json!({
+            "session_id": on_b, "prompt": "also check CI",
+            "not_before": later, "client_msg_id": id,
+        }))
+        .unwrap()
+    };
+    let first = t
+        .queue_prompt(Extension(Caller::master()), Parameters(queue("q-1")))
+        .await
+        .unwrap();
+    let again = t
+        .queue_prompt(Extension(Caller::master()), Parameters(queue("q-1")))
+        .await
+        .unwrap();
+    let a = result_json(&first);
+    assert_eq!(a, result_json(&again), "the retry answers the first result");
+    assert!(a["queued_id"].as_i64().is_some(), "{a}");
+    let waiting = |t: &FleetTools| {
+        crate::service::sessions::queued_prompts(
+            crate::service::sessions::QueuedPromptsArgs { session_id: on_b },
+            &t.store,
+        )
+        .unwrap()
+        .len()
+    };
+    assert_eq!(waiting(&t), 1);
+    t.queue_prompt(Extension(Caller::master()), Parameters(queue("q-2")))
+        .await
+        .unwrap();
+    assert_eq!(waiting(&t), 2);
+}
+
 /// Review w04-4: "within your brief" holds only while Control still follows
 /// the thread. Into a session it started that the person muted, whose pull
 /// request merged, or that went quiet, the operator's prompt asks again.
@@ -13230,10 +13300,7 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // `worktree_id` ([`SESSION_KEY_NAMES`]), so nothing about the shape of
     // its parameters said so.
     //
-    // **It disagrees with the desktop**, which has `delete_worktree: 'drive'`
-    // (`src/lib/share.ts`): the hub is now the stricter side, so a `drive`
-    // grantee is offered the control and refused it. `share.ts` has to move to
-    // `'own'` — frontend territory, named in this round's hand-off.
+    // `src/lib/share.ts` has it `'own'` too (round 2 w08-7).
     ("delete_worktree", &["Own"]),
     ("repo_blame", &["Read"]),
     ("repo_branch_diff", &["Read"]),
@@ -22201,6 +22268,150 @@ async fn org_admin_never_takes_over_a_person_who_already_exists() {
     role.person = Some("bob".into());
     role.role = Some("viewer".into());
     call(admin, role).await.expect("a member's role");
+}
+
+/// A trusted full device of `name`, a fleet admin who is not the hub's
+/// owner (`fleet-hub realm role map fleet-admin --user <name>`), resolved
+/// as `authorize` resolves it.
+fn non_owner_fleet_admin(store: &Arc<Mutex<Store>>, name: &str) -> (Caller, i64) {
+    use crate::mcp::auth::{apply_realm, resolve_token, sha256_hex, RealmSets};
+    use crate::store::{Principal, RoleRef, ROLE_FLEET_ADMIN};
+    let s = store.lock().unwrap();
+    let person = s.create_person(name, None).unwrap().id;
+    let device = format!("{name}-phone");
+    let tok = format!("{name}-phone-tok");
+    s.insert_client_token(&device, &sha256_hex(&tok), "full")
+        .unwrap();
+    s.set_client_person(&device, Some(person)).unwrap();
+    s.set_client_trust(&device, true).unwrap();
+    let fa = s
+        .role(RoleRef::Realm(ROLE_FLEET_ADMIN))
+        .unwrap()
+        .unwrap()
+        .id;
+    s.map_role(Principal::Person(person), fa).unwrap();
+    let rows = s.auth_client_tokens().unwrap();
+    let mut c = resolve_token(&tok, "master", &[], &rows, s.personal_owner_id().unwrap())
+        .expect("the device resolves");
+    apply_realm(&mut c, &RealmSets::from_vecs(s.realm_sets().unwrap()));
+    assert!(c.is_fleet_admin && !c.is_personal_owner);
+    (c, person)
+}
+
+/// Review w07-1: Settings' "Belongs to (optional; you when empty)" — a
+/// fleet admin who is not the hub's owner, naming nobody, pairs a device
+/// for THEMSELVES, never for the owner (whose private sessions it would
+/// read).
+#[tokio::test]
+async fn pair_device_with_no_person_is_for_the_caller_not_the_owner() {
+    let (tools, _guards, store) = client_tools();
+    let (ada, _) = non_owner_fleet_admin(&store, "ada");
+    let mut pair = org_admin_args("pair_device");
+    pair.device = Some("ada-laptop".into());
+    let v = result_json(
+        &tools
+            .org_admin(Extension(ada), Parameters(pair.clone()))
+            .await
+            .expect("her own device"),
+    );
+    assert_eq!(v["person"], "ada", "{v}");
+    // The owner's own device, naming nobody, still pairs for the owner.
+    let owner = trusted(client_caller("laptop", TokenMode::Full));
+    pair.device = Some("owner-tablet".into());
+    let v = result_json(
+        &tools
+            .org_admin(Extension(owner), Parameters(pair))
+            .await
+            .expect("the owner's"),
+    );
+    let owner_name = {
+        let s = store.lock().unwrap();
+        let id = s.personal_owner_id().unwrap().unwrap();
+        s.get_person(id).unwrap().unwrap().name
+    };
+    assert_eq!(v["person"], owner_name.as_str(), "{v}");
+}
+
+/// Review w07-1, decision (a): a fleet admin who is not the hub's owner
+/// pairs or hands over a device only to themselves, a new name, or a person
+/// with no identity yet; never to the owner, another fleet admin, or
+/// somebody who already has a device. The owner's own device may.
+#[tokio::test]
+async fn a_non_owner_fleet_admin_hands_devices_only_to_people_with_no_identity() {
+    let (tools, _guards, store) = client_tools();
+    let (ada, _) = non_owner_fleet_admin(&store, "ada");
+    let (_bob, _) = non_owner_fleet_admin(&store, "bob");
+    let owner_name = {
+        let s = store.lock().unwrap();
+        let id = s.personal_owner_id().unwrap().unwrap();
+        // Dave already has a device; Erin exists with nothing yet.
+        let dave = s.create_person("dave", None).unwrap().id;
+        s.insert_client_token("dave-phone", "digest-dave", "full")
+            .unwrap();
+        s.set_client_person("dave-phone", Some(dave)).unwrap();
+        s.create_person("erin", None).unwrap();
+        s.insert_client_token("spare", "digest-spare", "full")
+            .unwrap();
+        s.get_person(id).unwrap().unwrap().name
+    };
+    let pair = |device: &str, person: &str| {
+        let mut a = org_admin_args("pair_device");
+        a.device = Some(device.into());
+        a.person = Some(person.into());
+        a
+    };
+    let code = |r: Result<CallToolResult, McpError>| -> String {
+        match r {
+            Ok(_) => "ok".into(),
+            Err(e) => e.data.as_ref().unwrap()["code"].as_str().unwrap().into(),
+        }
+    };
+    for (i, (who, want)) in [
+        (owner_name.as_str(), "E_FORBIDDEN"),
+        ("bob", "E_FORBIDDEN"),
+        ("dave", "E_FORBIDDEN"),
+        ("ada", "ok"),
+        ("erin", "ok"),
+        ("carol", "ok"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let got = code(
+            tools
+                .org_admin(
+                    Extension(ada.clone()),
+                    Parameters(pair(&format!("pair-{i}"), who)),
+                )
+                .await,
+        );
+        assert_eq!(got, want, "pair_device for {who}");
+    }
+    let hand = |person: &str| {
+        let mut a = org_admin_args("set_device_person");
+        a.device = Some("spare".into());
+        a.person = Some(person.into());
+        a
+    };
+    for (who, want) in [
+        (owner_name.as_str(), "E_FORBIDDEN"),
+        ("bob", "E_FORBIDDEN"),
+        ("dave", "E_FORBIDDEN"),
+        ("frank", "ok"),
+    ] {
+        let got = code(
+            tools
+                .org_admin(Extension(ada.clone()), Parameters(hand(who)))
+                .await,
+        );
+        assert_eq!(got, want, "set_device_person to {who}");
+    }
+    // The owner's own device names anybody.
+    let owner = trusted(client_caller("laptop", TokenMode::Full));
+    tools
+        .org_admin(Extension(owner), Parameters(pair("for-dave", "dave")))
+        .await
+        .expect("the owner pairs for anybody");
 }
 
 fn org_admin_args(action: &str) -> crate::service::org_admin::OrgAdminArgs {

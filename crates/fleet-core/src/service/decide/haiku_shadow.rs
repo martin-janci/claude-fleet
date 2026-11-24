@@ -28,7 +28,7 @@
 use super::haiku::{self, Haiku, HaikuConfig, HaikuReply, PROVIDER_HAIKU};
 use super::{
     breaker_state, day_start, fingerprint, int_setting, owns_the_fleet, CallSettings, Caller,
-    DecideCtx, DecideRequest, Fallback, FeatureMode, Mode, Question,
+    DecideCtx, DecideRequest, Fallback, Feature, FeatureMode, Mode, Question,
 };
 use crate::ipc_error::lock;
 use crate::service::settings;
@@ -79,9 +79,13 @@ pub struct Job {
 /// Whether `req` gets a second opinion, and if so the job that asks it.
 /// `None` for every question the fences above keep out (most, by default).
 pub fn plan(ctx: &DecideCtx, req: &DecideRequest) -> Option<Job> {
+    // Not `control_route` (review 23b w12-2): its one request holds the
+    // targets of every consenting org under `org_id: None`, so the host's
+    // org cannot fence it.
     if req.caller() != Caller::Live
         || !matches!(req.request.question, Question::Choice { .. })
         || req.feature.sends_reply_text()
+        || req.feature == Feature::ControlRoute
     {
         return None;
     }
@@ -121,6 +125,9 @@ pub fn plan(ctx: &DecideCtx, req: &DecideRequest) -> Option<Job> {
         .decision_fp_key()
         .ok()
         .map(|k| fingerprint(&k, &req.request.redacted()));
+    // The literal secrets masked as Jev's request masks them (review 23b
+    // w12-3); a store that cannot list them asks nothing.
+    let secrets = crate::service::diagnostics::known_secrets(&s).ok()?;
     drop(s);
 
     if req.request.question.check().is_err() {
@@ -153,9 +160,11 @@ pub fn plan(ctx: &DecideCtx, req: &DecideRequest) -> Option<Job> {
     }
     let exec = ctx.haiku_exec.clone().or_else(|| EXEC.get().cloned())?;
     let slot = Slot::claim(&cfg.host)?;
+    let mut req = req.clone();
+    req.request = req.request.masked(&secrets);
     Some(Job {
         ctx: ctx.clone(),
-        req: req.clone(),
+        req,
         exec,
         cfg,
         host_org,

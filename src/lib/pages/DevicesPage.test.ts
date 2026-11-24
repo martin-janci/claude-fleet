@@ -52,8 +52,8 @@ function route(extra: Record<string, unknown> = {}) {
     if (cmd === 'list_orgs') return [acme];
     if (cmd === 'list_people')
       return [
-        { id: 1, name: 'owner', owner: true, created_at: 1, devices: ['laptop'], groups: [], roles: [], roles_display: [] },
-        { id: 2, name: 'ada', owner: false, created_at: 2, devices: ['ada-phone'], groups: [], roles: [], roles_display: [] },
+        { id: 1, name: 'owner', owner: true, state: 'owner', created_at: 1, devices: ['laptop'], groups: [], roles: [], roles_display: [] },
+        { id: 2, name: 'ada', owner: false, state: 'live', created_at: 2, devices: ['ada-phone'], groups: [], roles: [], roles_display: [] },
       ];
     if (cmd === 'catalog_list_catalogs') return [{ name: 'personal' }, { name: 'acme' }];
     if (cmd === 'pair_device') return PAIRING;
@@ -70,8 +70,8 @@ beforeEach(() => {
   orgs.set([acme]);
   devices.set([laptop, phone]);
   people.set([
-    { id: 1, name: 'owner', owner: true, created_at: 1, devices: ['laptop'], groups: [], roles: [], roles_display: [] },
-    { id: 2, name: 'ada', owner: false, created_at: 2, devices: ['ada-phone'], groups: [], roles: [], roles_display: [] },
+    { id: 1, name: 'owner', owner: true, state: 'owner', created_at: 1, devices: ['laptop'], groups: [], roles: [], roles_display: [] },
+    { id: 2, name: 'ada', owner: false, state: 'live', created_at: 2, devices: ['ada-phone'], groups: [], roles: [], roles_display: [] },
   ]);
   catalogStatuses.set([{ name: 'personal' }, { name: 'acme' }] as never);
   route();
@@ -263,6 +263,25 @@ describe('Settings → People', () => {
     await fireEvent.click(screen.getByTestId('record-delete'));
     await fireEvent.click(screen.getByTestId('record-confirm'));
     await waitFor(() => expect(argsOf('disable_person')).toEqual({ person_id: 2 }));
+  });
+
+  it('review w07-4: no Disable on the owner, and a disabled person is enabled, not disabled again', async () => {
+    route({
+      list_people: [
+        { id: 1, name: 'owner', owner: true, state: 'owner', created_at: 1, devices: [], groups: [], roles: [], roles_display: [] },
+        { id: 3, name: 'bo', owner: false, state: 'disabled', created_at: 2, disabled_at: 5, devices: [], groups: [], roles: [], roles_display: [] },
+      ],
+    });
+    show();
+    await waitFor(() => expect(screen.getAllByTestId('resource-row')).toHaveLength(2));
+    await fireEvent.click(screen.getAllByTestId('resource-row')[0]);
+    expect(screen.queryByTestId('record-delete')).toBeNull();
+    expect(screen.queryByTestId('record-action-person.enable')).toBeNull();
+    await fireEvent.click(screen.getAllByTestId('resource-row')[1]);
+    expect(screen.queryByTestId('record-delete')).toBeNull();
+    await fireEvent.click(screen.getByTestId('record-action-person.enable'));
+    await fireEvent.click(screen.getByTestId('record-confirm'));
+    await waitFor(() => expect(argsOf('enable_person')).toEqual({ person_id: 3 }));
   });
 });
 

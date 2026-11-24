@@ -10,6 +10,8 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import MissionTriage from './MissionTriage.svelte';
 import MissionNudge from './MissionNudge.svelte';
+import { ALL_SCOPES, orgs, scopeFilter, type OrgDetail } from './orgs';
+import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import { asProposal, countsLine, outcomeLabel, resetTriageCacheForTests, stepLabel, type Triage } from './mission_triage';
 
 const stuck: Triage = {
@@ -51,7 +53,19 @@ describe('mission triage helpers', () => {
 });
 
 describe('MissionTriage', () => {
-  beforeEach(() => vi.mocked(invoke).mockReset());
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.draft_release_notes': 'true' });
+  });
+
+  it('offers no Draft while Draft release notes is off (review 23b w12-8)', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS });
+    vi.mocked(invoke).mockImplementation(async (c) => (c === 'mission_triage' ? stuck : null));
+    render(MissionTriage, { missionId: 4, onstep: vi.fn() });
+    await flush();
+    expect(screen.getByTestId('mission-triage')).toBeTruthy();
+    expect(screen.queryByTestId('mission-triage-draft')).toBeNull();
+  });
 
   it('shows no card for a mission that is not stuck', async () => {
     vi.mocked(invoke).mockImplementation(async (c) => (c === 'mission_triage' ? { may_change: true } : null));
@@ -152,6 +166,33 @@ describe('MissionNudge', () => {
     // A finished mission is never asked about.
     expect(triageCalls().map((c) => c.mission_id)).toEqual([1, 2]);
     expect(triageCalls().every((c) => !c.refresh)).toBe(true);
+  });
+
+  it('picks the stuck ones before it caps the list, and cuts them to the scope (review w09-2)', async () => {
+    const running = Array.from({ length: 6 }, (_, i) => ({ id: 10 + i, name: `Run ${i}`, state: 'active', org_id: 1 }));
+    vi.mocked(invoke).mockImplementation(async (c, a) => {
+      if (c === 'work_missions')
+        return [...running, { id: 2, name: 'Braked', state: 'paused', org_id: 1 }, { id: 3, name: 'Theirs', state: 'paused', org_id: 2 }];
+      if (c === 'mission_triage') {
+        const id = (a as { args: { mission_id: number } }).args.mission_id;
+        return id === 2 || id === 3 ? stuck : { may_change: true };
+      }
+      return null;
+    });
+    orgs.set([
+      { id: 1, name: 'one', created_at: 1, rules: [], hosts: [], trackers: [] } as unknown as OrgDetail,
+      { id: 2, name: 'two', created_at: 1, rules: [], hosts: [], trackers: [] } as unknown as OrgDetail,
+    ]);
+    scopeFilter.set('org:1');
+    try {
+      render(MissionNudge);
+      await flush();
+      const rows = screen.getAllByTestId('mission-nudge-row');
+      expect(rows.map((r) => r.querySelector('button')?.textContent)).toEqual(['Braked']);
+    } finally {
+      scopeFilter.set(ALL_SCOPES);
+      orgs.set([]);
+    }
   });
 
   it('review r15: asks Jev once per mission per state, across re-opens', async () => {

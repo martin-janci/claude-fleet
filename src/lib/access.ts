@@ -51,6 +51,17 @@ export type GrantLevel = (typeof GRANT_LEVELS)[number];
  *  nothing, which also covers "we cannot tell yet". */
 export type SessionAccess = 'own' | GrantLevel | null;
 
+/**
+ * Review w08-3 / w09-8, option (a): whether a row's waits are this person's
+ * to answer, so it notifies and counts in Needs you. Their own row (or one
+ * whose access is unknown) does, and one shared with them at Answer or
+ * Steer; at Read the question is the owner's: it is listed, never counted
+ * or notified.
+ */
+export function waitsOnMe(a: SessionAccess): boolean {
+  return a !== 'watch';
+}
+
 function isGrantLevel(v: unknown): v is GrantLevel {
   return typeof v === 'string' && (GRANT_LEVELS as readonly string[]).includes(v);
 }

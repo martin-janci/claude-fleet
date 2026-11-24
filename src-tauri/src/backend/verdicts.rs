@@ -104,10 +104,11 @@ pub fn verdict(command: &str) -> Option<&'static Verdict> {
 /// target verified against the release key.
 const WHY_SELF_UPDATE: &str = "this app's own build: paired, the hub's /update/check decides      (an update_proto route, not an MCP tool, exempt from the contract gate), standalone the      published channel does; either way the target is verified against the release key and      installed on THIS machine";
 
-/// Trackers (work graph M3.1): the hub's `work_admin` is master-only.
-const TRACKERS_ARE_ADMIN: &str = "trackers and their credentials are fleet administration: the \
-     hub's work_admin is master-only, and a paired client is never the fleet's administrator; \
-     configure them on the hub with `fleet-hub tracker add|set-credential|test`";
+/// Trackers (work graph M3.1): this desktop does not route `work_admin`
+/// (C17); the hub owner's trusted full phone may (contract 13, review w15-7).
+const TRACKERS_ARE_ADMIN: &str = "trackers and their credentials are fleet administration, \
+     which this desktop does not route: set them up on the hub (`fleet-hub tracker \
+     add|set-credential|test`) or from the hub owner's trusted phone (Trackers)";
 
 /// Ticket keys (`store::ticket_keys`): a project's prefix is fleet
 /// administration, `work_admin`, master-only.
@@ -661,6 +662,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("add_person", Verdict::Routed { tool: "org_admin" }),
     ("rename_person", Verdict::Routed { tool: "org_admin" }),
     ("disable_person", Verdict::Routed { tool: "org_admin" }),
+    ("enable_person", Verdict::Routed { tool: "org_admin" }),
     (
         "session_summary_since",
         Verdict::Routed {

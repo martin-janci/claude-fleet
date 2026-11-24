@@ -13,6 +13,22 @@ fn answered_by(caller: &Caller) -> String {
     }
 }
 
+/// PURE: [`super::messaging::veil_authors`]'s rule over a form's
+/// `answered_by` (review w08-4). The session's owner and the master read
+/// every answerer; anyone else reads their own answer and the control API's,
+/// and another person's device as "someone else", so one grantee never
+/// learns who the others are or what devices they use.
+fn veil_answered_by(v: &mut forms::FormView, mine: &str, sees_all: bool) {
+    if sees_all {
+        return;
+    }
+    if let Some(by) = v.answered_by.as_deref() {
+        if by != mine && by != "the control API" {
+            v.answered_by = Some("someone else".into());
+        }
+    }
+}
+
 #[tool_router(router = forms_router, vis = "pub(super)")]
 impl FleetTools {
     #[tool(
@@ -132,10 +148,10 @@ impl FleetTools {
                 Reach::Read,
                 "the form's session",
             )?;
-            let view = match lock(&self.store) {
-                Ok(s) => forms::view_with_proposal(&s, &row),
-                Err(_) => forms::view(&row),
-            };
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            let mut view = forms::view_with_proposal(&s, &row);
+            let sees_all = self.sees_every_answerer(&s, &caller, row.session_id);
+            veil_answered_by(&mut view, &answered_by(&caller), sees_all);
             return ok_json_compact(&view);
         }
         // answer / decline: a person's, through `drive` on the session.
@@ -232,6 +248,7 @@ impl FleetTools {
         f: &AskListFilter,
     ) -> Result<Vec<forms::FormView>, McpError> {
         let s = lock(&self.store).map_err(to_mcp_err)?;
+        let mine = answered_by(caller);
         let rows = s
             .forms(f.session_id, f.state.as_deref())
             .map_err(|e| to_mcp_err(e.into()))?;
@@ -249,7 +266,70 @@ impl FleetTools {
                 )
                 .is_ok()
             })
-            .map(forms::view)
+            .map(|r| {
+                let mut v = forms::view(r);
+                let sees_all = self.sees_every_answerer(&s, caller, r.session_id);
+                veil_answered_by(&mut v, &mine, sees_all);
+                v
+            })
             .collect())
+    }
+
+    /// The form's session's owner, or the master: they read who answered.
+    fn sees_every_answerer(
+        &self,
+        s: &crate::store::Store,
+        caller: &Caller,
+        session_id: i64,
+    ) -> bool {
+        if caller.is_master() {
+            return true;
+        }
+        let me = super::messaging::caller_person(s, caller);
+        let owner = s
+            .get_session_by_id(session_id)
+            .ok()
+            .flatten()
+            .and_then(|row| row.owner_person_id);
+        me.is_some() && me == owner
+    }
+}
+
+#[cfg(test)]
+mod veil_tests {
+    use super::*;
+
+    fn answered(by: &str) -> forms::FormView {
+        forms::FormView {
+            form_id: "f_1".into(),
+            session_id: 1,
+            host_alias: "local".into(),
+            title: "t".into(),
+            spec: serde_json::Value::Null,
+            why: None,
+            state: "answered".into(),
+            answers: None,
+            secrets: None,
+            note: None,
+            answered_by: Some(by.into()),
+            created_at: 0,
+            decided_at: None,
+            proposal: None,
+        }
+    }
+
+    #[test]
+    fn a_grantee_reads_another_grantees_answer_as_someone_else() {
+        let mut v = answered("Bo's Pixel (device)");
+        veil_answered_by(&mut v, "Cy's Mac (device)", false);
+        assert_eq!(v.answered_by.as_deref(), Some("someone else"));
+
+        let mut own = answered("Cy's Mac (device)");
+        veil_answered_by(&mut own, "Cy's Mac (device)", false);
+        assert_eq!(own.answered_by.as_deref(), Some("Cy's Mac (device)"));
+
+        let mut owner = answered("Bo's Pixel (device)");
+        veil_answered_by(&mut owner, "Ada's Mac (device)", true);
+        assert_eq!(owner.answered_by.as_deref(), Some("Bo's Pixel (device)"));
     }
 }

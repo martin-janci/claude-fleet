@@ -459,6 +459,24 @@ fn an_existing_person_is_never_taken_over_by_name() {
     );
 }
 
+/// Review w07-3: a person paired by code before SSO (no identity row) and
+/// then disabled is not brought back as a new live person by a sign-in
+/// under their name.
+#[test]
+fn a_disabled_unlinked_person_is_not_provisioned_again() {
+    let s = Store::open_in_memory().unwrap();
+    let ada = s.create_person("ada", None).unwrap();
+    s.disable_person(ada.id).unwrap();
+    let oidc = OidcProvider::with_transport(provisioning_config(), Arc::new(FakeTransport::new()));
+    let err = oidc
+        .resolve_person(&s, &signed_in(Some("ada"), &[]))
+        .unwrap_err();
+    assert!(matches!(err, Refusal::Forbidden(_)), "{err:?}");
+    assert!(err.message().contains("disabled"), "{err:?}");
+    assert!(s.get_person_by_name("ada").unwrap().is_none());
+    assert!(s.get_identity(ISS, "0b7d-uuid").unwrap().is_none());
+}
+
 #[test]
 fn a_disabled_person_and_a_missing_role_are_refused() {
     let s = Store::open_in_memory().unwrap();

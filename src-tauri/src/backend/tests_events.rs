@@ -1948,6 +1948,42 @@ async fn a_later_resync_kills_what_has_gone_while_this_client_was_detached() {
     );
 }
 
+/// w06-5: an account deleted while this client was detached is removed by
+/// the next resync, as a host is; the first resync invents no removal.
+#[tokio::test]
+async fn a_later_resync_removes_an_account_that_went_in_the_gap() {
+    let (resync, seen, table) = resync_over(&[
+        ("list_sessions", "[]"),
+        ("list_hosts", "[]"),
+        ("list_tasks", "[]"),
+        (
+            "list_accounts",
+            r#"[{"uuid":"real"},{"uuid":"setuptoken-1"}]"#,
+        ),
+    ]);
+    resync.resync().await;
+    assert!(!seen.names().contains(&"account:removed"));
+    let before = seen.events().len();
+    table.set(&[
+        ("list_sessions", "[]"),
+        ("list_hosts", "[]"),
+        ("list_tasks", "[]"),
+        ("list_accounts", r#"[{"uuid":"real"}]"#),
+    ]);
+    resync.resync().await;
+    let after: Vec<(&'static str, Value)> = seen.events().into_iter().skip(before).collect();
+    assert!(
+        after.contains(&("account:removed", json!({ "uuid": "setuptoken-1" }))),
+        "{after:?}"
+    );
+    assert!(
+        !after
+            .iter()
+            .any(|(n, p)| *n == "account:removed" && p["uuid"] == "real"),
+        "{after:?}"
+    );
+}
+
 /// SF-4. `Seen` used to be written only by a resync, so a row that arrived
 /// as a LIVE event and vanished during a gap was never in `before` and never
 /// removed: a permanent ghost in the sidebar, every action on it failing,

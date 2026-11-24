@@ -948,6 +948,27 @@ impl Store {
         Ok(())
     }
 
+    /// [`Self::set_session_agent`] for a session fleet has just started,
+    /// which has not run a prompt yet: also forgets the conversation id and
+    /// transcript the creating reconcile pass may have paired it with while
+    /// the row still said Claude (a terminal `claude` in the same checkout,
+    /// review 23b w01-2), and the status that pass took from that
+    /// conversation. The agent's own id and status come from its next pass.
+    pub fn set_new_session_agent(&self, id: i64, agent: &str) -> Result<(), rusqlite::Error> {
+        self.set_session_agent(id, agent)?;
+        let changed = self.conn.execute(
+            "UPDATE sessions SET claude_session_id = NULL, transcript_path = NULL, \
+               claude_status = NULL \
+             WHERE id = ?1 AND (claude_session_id IS NOT NULL OR transcript_path IS NOT NULL \
+               OR claude_status IS NOT NULL)",
+            rusqlite::params![id],
+        )?;
+        if changed > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(())
+    }
+
     /// The tmux names of `host_alias`'s rows running `agent` (shell rows
     /// aside). Reconcile asks the host where those of them that are live
     /// keep their Codex conversations.
@@ -1869,6 +1890,7 @@ impl Store {
                  WHERE session_id = ?2 AND retired_at IS NULL",
                 rusqlite::params![now_unix(), id],
             )?;
+            Store::release_pr_openers_in(&tx, &[id])?;
             tx.execute("DELETE FROM sessions WHERE id=?1", rusqlite::params![id])?;
         }
         let id: Option<i64> = tx
@@ -1927,6 +1949,7 @@ impl Store {
         // No FK on form_requests: a pending form would outlive its row
         // (review w13-2).
         super::forms::cancel_pending_forms_in(&tx, &[id], now_unix())?;
+        Store::release_pr_openers_in(&tx, &[id])?;
         tx.execute("DELETE FROM sessions WHERE id=?1", rusqlite::params![id])?;
         tx.commit()?;
         self.form_notify.notify_waiters();
@@ -2672,6 +2695,20 @@ impl Store {
             rusqlite::params![path, row_id, claude_session_id],
         )?;
         Ok(())
+    }
+
+    /// When a reconcile pass last saw the session live on its host
+    /// (`last_reconciled_at`), if ever: a host that cannot be reached
+    /// leaves it behind, while the row keeps its last status.
+    pub fn session_reconciled_at(&self, id: i64) -> Result<Option<i64>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT last_reconciled_at FROM sessions WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
     }
 
     /// The hook-reported transcript path of a session, if any.
@@ -3590,6 +3627,69 @@ mod tests {
             .unwrap();
         assert!(out.reclassified.is_empty(), "{out:?}");
         assert_eq!(lost_reason_of(&s, a), Some("missing".to_string()));
+    }
+
+    /// Review 23b w19-3: w13-1 end to end. A session its person `/exit`ed
+    /// (its hook said `stopped`) is ghosted `missing` by the reconcile
+    /// pass, and a later `tmux_server_gone` verdict leaves it `missing`. A
+    /// crashed sibling (never `stopped`) is ghosted `process_died`, which
+    /// the verdict leaves resumable as it is.
+    #[test]
+    fn an_exited_session_stays_missing_through_the_ghost_pass_and_a_verdict() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let mut live = Vec::new();
+        for name in ["exited", "crashed"] {
+            let id = s
+                .upsert_session(name, "h", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, &format!("cid-{name}")).unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET last_hook_at = 100, claude_status = ?1 WHERE id = ?2",
+                    rusqlite::params![
+                        if name == "exited" {
+                            "stopped"
+                        } else {
+                            "working"
+                        },
+                        id
+                    ],
+                )
+                .unwrap();
+            live.push(id);
+        }
+        let (exited, crashed) = (live[0], live[1]);
+        // The pass that no longer sees either pane.
+        let mut changes: Vec<RowChange> = Vec::new();
+        Store::ghost_and_clean(
+            s.conn_ref(),
+            "h",
+            &[],
+            400,
+            super::super::rows::KIND_TMUX,
+            None,
+            None,
+            None,
+            None,
+            &mut changes,
+        )
+        .unwrap();
+        assert_eq!(lost_reason_of(&s, exited), Some("missing".to_string()));
+        assert_eq!(
+            lost_reason_of(&s, crashed),
+            Some("process_died".to_string())
+        );
+        // Then the last session ends and tmux exits.
+        let out = s
+            .mark_host_sessions_lost("h", "tmux_server_gone", &[], 500, 0)
+            .unwrap();
+        assert!(out.reclassified.iter().all(|r| r.id != exited), "{out:?}");
+        assert_eq!(lost_reason_of(&s, exited), Some("missing".to_string()));
+        assert_eq!(
+            lost_reason_of(&s, crashed),
+            Some("process_died".to_string())
+        );
     }
 
     #[test]

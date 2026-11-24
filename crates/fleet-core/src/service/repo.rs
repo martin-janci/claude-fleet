@@ -106,17 +106,35 @@ pub fn repo_err(out: &std::process::Output) -> IpcError {
 /// `repo_err` unless the command exits 0. This is `repo_script` +
 /// `run_in_repo` + the success check that every git call otherwise repeats;
 /// callers that must inspect a non-zero exit themselves use the pieces.
+///
+/// The stdout handed back is `body`'s alone (w10-8): `run_shell` is
+/// `bash -lc`, and a host whose login profile prints a banner would
+/// otherwise put it in front of every reading (a porcelain line to
+/// `ensure_clean`, a row to the `repo_read` parsers). A marker line goes
+/// out before `body`, and everything up to it is dropped.
 pub async fn run_git(
     ssh: &Arc<SshClient>,
     host: &str,
     tmux_name: &str,
     body: &str,
 ) -> Result<std::process::Output, IpcError> {
-    let out = run_in_repo(ssh, host, &repo_script(tmux_name, body)).await?;
+    let mut out = run_in_repo(ssh, host, &repo_script(tmux_name, &marked_body(body))).await?;
+    if let Some(own) = crate::service::move_session::carry::payload(&out.stdout) {
+        out.stdout = own.to_vec();
+    }
     if !out.status.success() {
         return Err(repo_err(&out));
     }
     Ok(out)
+}
+
+/// PURE: `body`, after a line that marks where its own stdout starts
+/// (see [`run_git`]).
+fn marked_body(body: &str) -> String {
+    format!(
+        "printf '%s\\n' {}\n{body}",
+        quote(crate::service::move_session::carry::OUT_MARKER)
+    )
 }
 
 /// True when `git status --porcelain` output indicates a dirty worktree.
@@ -146,7 +164,12 @@ pub async fn ensure_clean(
 /// and `repo_commit_diff`.
 pub fn diff_from_bytes(raw: &[u8]) -> (String, bool, bool) {
     let text = String::from_utf8_lossy(raw);
-    let binary = text.contains("Binary files ") || text.contains("GIT binary patch");
+    // Only git's own header lines, which start at column 0: a hunk line
+    // always starts with ' ', '+', '-' or '\', so a text diff that merely
+    // mentions the phrase is not blanked (review w11-1).
+    let binary = text.lines().any(|l| {
+        (l.starts_with("Binary files ") && l.ends_with(" differ")) || l == "GIT binary patch"
+    });
     let truncated = raw.len() > MAX_DIFF_BYTES;
     let diff = if binary {
         String::new()
@@ -173,6 +196,23 @@ mod tests {
         assert!(s.contains("#{pane_current_path}"), "got: {s}");
         assert!(s.contains("rev-parse --show-toplevel"), "got: {s}");
         assert!(s.trim_end().ends_with("git -C \"$root\" status"));
+    }
+
+    /// w10-8: a login banner ahead of `body`'s output is dropped, so a
+    /// banner is never read as a changed file.
+    #[test]
+    fn run_git_reads_only_what_its_body_printed() {
+        let s = repo_script(
+            "dev-foo",
+            &marked_body("git -C \"$root\" status --porcelain"),
+        );
+        assert!(s.contains("printf '%s\\n' '__CF_OUT__'\ngit -C"), "{s}");
+        let stdout = b"Welcome to vps!\nLast login: today\n__CF_OUT__\n";
+        let own = crate::service::move_session::carry::payload(stdout).unwrap();
+        assert!(!is_dirty(own), "the banner is not a change");
+        let stdout = b"motd\n__CF_OUT__\n M src/a.rs\n";
+        let own = crate::service::move_session::carry::payload(stdout).unwrap();
+        assert!(is_dirty(own));
     }
 
     #[test]
@@ -229,6 +269,16 @@ mod tests {
         assert!(bin);
         assert!(!trunc);
         assert_eq!(d, "");
+    }
+
+    #[test]
+    fn diff_from_bytes_keeps_a_text_diff_that_mentions_the_phrase() {
+        let raw =
+            b"@@ -1 +1 @@\n-old\n+diff_from_bytes(b\"Binary files a/x and b/x differ\\n\");\n \
+GIT binary patch\n";
+        let (d, bin, _) = diff_from_bytes(raw);
+        assert!(!bin, "a hunk line is not a header");
+        assert!(d.contains("+diff_from_bytes"));
     }
 
     #[test]

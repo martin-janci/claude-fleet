@@ -42,6 +42,12 @@ pub fn org_generation() -> u64 {
     ORG_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Move [`ORG_GENERATION`]: for a change outside the org tool that can move
+/// sessions between orgs (a host merge, w06-3). Before the announcement.
+pub fn bump_org_generation() {
+    ORG_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Who is asking, for every work read and write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrgScope {
@@ -1580,6 +1586,23 @@ pub fn admin(
                 )
                 .with_details(serde_json::json!({
                     "trackers": trackers.iter().map(|(i, _)| i).collect::<Vec<_>>()
+                })));
+            }
+            // A catalog's org is `ON DELETE RESTRICT`: say so in words
+            // rather than fail at the end with a raw SQLite error (w05-5).
+            let catalogs = s.catalogs_of_org(id)?;
+            if !catalogs.is_empty() {
+                let names: Vec<&str> = catalogs.iter().map(|(_, n)| n.as_str()).collect();
+                return Err(IpcError::new(
+                    codes::E_INVALID_STATE,
+                    format!(
+                        "org {:?} still owns catalog {}; remove it first (remove_catalog)",
+                        org.name,
+                        names.join(", ")
+                    ),
+                )
+                .with_details(serde_json::json!({
+                    "catalogs": catalogs.iter().map(|(i, _)| i).collect::<Vec<_>>()
                 })));
             }
             s.remove_org(id)?;

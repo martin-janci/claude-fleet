@@ -29,8 +29,9 @@ pub struct PinnedDashboardRow {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub can_undo: bool,
     /// What `dashboards { undo }` does to it: `restore` (puts back the
-    /// version before Control's change), `remove` (Control pinned it new:
-    /// it is unpinned), absent when there is nothing to undo.
+    /// version before Control's change), `remove` (Control pinned it new
+    /// and nobody else replaced it since: it is unpinned), absent when
+    /// there is nothing to undo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undo: Option<String>,
 }
@@ -51,15 +52,20 @@ pub struct PinnedDashboardWrite<'a> {
 }
 
 const COLS: &str = "dash_id, person_id, title, spec, why, device, pinned_at, updated_at, \
-                    previous_spec IS NOT NULL";
+                    previous_spec IS NOT NULL, created_by";
 
 fn row(r: &rusqlite::Row<'_>) -> Result<PinnedDashboardRow> {
     let spec: String = r.get(3)?;
     let device: Option<String> = r.get(5)?;
     let can_undo: bool = r.get(8)?;
+    // Who pinned it first, never who changed it last (review w14-1): after
+    // the person put their own version back over Control's, the row's
+    // `device` named Control again, and Undo offered to unpin the person's
+    // own dashboard.
+    let created_by: Option<String> = r.get(9)?;
     let undo = if can_undo {
         Some("restore".to_string())
-    } else if device.as_deref() == Some(AGENT_DEVICE) {
+    } else if created_by.as_deref() == Some(AGENT_DEVICE) {
         Some("remove".to_string())
     } else {
         None
@@ -88,8 +94,8 @@ impl Store {
     pub fn pin_dashboard(&self, w: &PinnedDashboardWrite<'_>) -> Result<PinnedDashboardRow> {
         self.conn.execute(
             "INSERT INTO pinned_dashboards
-               (dash_id, person_id, title, spec, why, device, pinned_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+               (dash_id, person_id, title, spec, why, device, pinned_at, updated_at, created_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?6)
              ON CONFLICT (dash_id, COALESCE(person_id, 0)) DO UPDATE SET
                previous_spec = CASE WHEN pinned_dashboards.spec = excluded.spec
                    OR (pinned_dashboards.device = ?8 AND excluded.device = ?8)

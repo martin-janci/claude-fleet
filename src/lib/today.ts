@@ -150,17 +150,35 @@ export function scopeToday(
   return out;
 }
 
+/** Every `attention::Reason` the hub sends, in words (review w09-3): an
+ *  unknown token from a newer hub reads as "needs a look", never raw. */
 const ATTENTION_WORDS: Record<string, string> = {
   waiting: 'waiting for an answer',
   stuck: 'stuck',
   failed: 'turn failed',
   lifecycle: 'needs a look',
+  host_down: 'host unreachable',
+  account_limit: 'login at its limit',
+  no_credentials: 'login signed out',
+  stop_failed: 'stop failed',
+  context_full: 'context almost full',
+  stale_working: 'says working, no news',
+  ci_failing: 'checks failing',
+  probably_waiting: 'probably waiting',
 };
+
+/** The reasons whose state is `failed` (`Reason::state`): their dot is red. */
+const FAILED_REASONS = new Set(['failed', 'stop_failed', 'ci_failing']);
+
+/** A Today session's reason is a failure, not a wait. */
+export function attentionFailed(attention: string | null | undefined): boolean {
+  return attention != null && FAILED_REASONS.has(attention);
+}
 
 /** How a session reads in a line: its name, and why it is listed. */
 export function sessionPhrase(s: TodaySession, bucket: TodayBucket, setAside = false): string {
   if (bucket === 'waiting' && s.attention) {
-    return `${s.name} (${ATTENTION_WORDS[s.attention] ?? s.attention})`;
+    return `${s.name} (${ATTENTION_WORDS[s.attention] ?? 'needs a look'})`;
   }
   // G1.6: Jev's proposal says so, wherever its group stands.
   // One the person set aside with "Not waiting" says nothing (w11-11).
@@ -274,6 +292,11 @@ const waitingIn = (gs: readonly TodayGroup[]) =>
 export interface TodayExtras {
   approvals: number;
   failedRoutines: number;
+  /** Open review asks to this person (review w09-5). */
+  reviewAsks?: number;
+  /** What the extra fleets' Inboxes count (`fleetInboxCount`), as the rail
+   *  counts them (w11-8: Today left the other fleets out). */
+  fleets?: number;
 }
 
 /** The four tiles: sessions (and missions) that need you, sessions in
@@ -283,7 +306,13 @@ export interface TodayExtras {
 export function todayKpis(v: TodayView, extras: TodayExtras = { approvals: 0, failedRoutines: 0 }): TodayKpis {
   const waiting = waitingIn(v.waiting);
   return {
-    needsYou: waiting + (v.missions?.length ?? 0) + extras.approvals + extras.failedRoutines,
+    needsYou:
+      waiting +
+      (v.missions?.length ?? 0) +
+      extras.approvals +
+      extras.failedRoutines +
+      (extras.reviewAsks ?? 0) +
+      (extras.fleets ?? 0),
     inProgress: sessionsIn(v.inProgress) + sessionsIn(v.waiting) - waiting,
     shipped: v.shipped.length,
     stale: sessionsIn(v.stale),

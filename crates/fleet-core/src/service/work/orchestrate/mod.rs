@@ -175,9 +175,10 @@ pub fn fill_spend(s: &Store, m: &mut MissionRow, now: i64) -> Result<(), IpcErro
     m.cost_micros = Some(s.mission_cost_micros(m.id)?);
     let grant = s.live_mission_grant(m.id, now)?;
     m.budget_micros = grant.as_ref().and_then(|g| g.budget_micros);
-    // Whether it waits on a person (G1.6): only an active mission does, so
-    // the others skip the card read.
-    m.waiting_on = if m.state == "active" {
+    // Whether it waits on a person (G1.6): only an active mission does, or
+    // a paused one a brake asked a question on (review 23b w09-1), so the
+    // others skip the card read.
+    m.waiting_on = if m.state == "active" || m.state == "paused" {
         let cards = s.mission_cards(m.id, crate::store::CARDS_OPEN_CAP)?;
         crate::service::attention::mission_waiting(m, grant.is_some(), &cards)
     } else {

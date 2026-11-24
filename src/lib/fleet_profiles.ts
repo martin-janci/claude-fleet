@@ -24,6 +24,7 @@
 // themselves, which `env_vars list` already shows them).
 import { derived, get, writable } from 'svelte/store';
 import { invokeCmd, type IpcError } from './result';
+import { errorText } from './error_copy';
 import { PRIMARY, fleets, onFleetForgotten, type FleetInfo } from './fleets';
 import { readPref, writePref } from './prefs';
 
@@ -131,7 +132,8 @@ export function profileFromParts(personId: number | null, rows: readonly EnvVarR
   };
 }
 
-const errText = (e: IpcError) => e.message || e.code;
+// The plain sentence (review w15-6), never a bare code.
+const errText = (e: IpcError) => errorText(e);
 
 /** Fleet slot id → the newest read's number: a read applies its answer only
  *  while it is still the newest for its fleet, so a slow stale answer never

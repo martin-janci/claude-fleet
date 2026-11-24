@@ -34,15 +34,26 @@ export function sharerName(
   return info?.sharedByName ?? personName(info?.sharedBy ?? row.owner_person_id, orgs);
 }
 
-/** The session waits on a person, which for a recipient is the owner. */
-export function waitsOnOwner(state: AttentionState | null): boolean {
+/** The session waits on a person. */
+function waits(state: AttentionState | null): boolean {
   return state === 'action_required' || state === 'blocked';
+}
+
+/** The session waits on its owner: it waits on a person, and this
+ *  recipient's level cannot answer it. At Answer or Steer the dialog is the
+ *  recipient's to answer (review w08-2). */
+export function waitsOnOwner(state: AttentionState | null, level: GrantLevel): boolean {
+  return level === 'watch' && waits(state);
 }
 
 /** The header's state word for a recipient: "Waiting for Martin" while the
  *  session waits on its owner, else null (the usual word stands). */
-export function recipientStateLabel(state: AttentionState | null, sharer: string | null): string | null {
-  return waitsOnOwner(state) ? `Waiting for ${sharer ?? 'the owner'}` : null;
+export function recipientStateLabel(
+  state: AttentionState | null,
+  sharer: string | null,
+  level: GrantLevel,
+): string | null {
+  return waitsOnOwner(state, level) ? `Waiting for ${sharer ?? 'the owner'}` : null;
 }
 
 /** The header chip: "Shared with you · Read". */
@@ -86,7 +97,8 @@ export function sharedRowLine(
   const parts = [who];
   if (info?.viaOrg) parts.push(`via ${info.viaOrg}`);
   parts.push(LEVEL_NAMES[level]);
-  if (waitsOnOwner(state)) parts.push(`waiting for ${sharer ?? 'the owner'}`);
+  if (waitsOnOwner(state, level)) parts.push(`waiting for ${sharer ?? 'the owner'}`);
+  else if (waits(state)) parts.push('waiting for you');
   return parts.join(' · ');
 }
 

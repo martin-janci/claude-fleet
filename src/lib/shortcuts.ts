@@ -173,7 +173,10 @@ export const SHORTCUTS: readonly Shortcut[] = [
   row('global', 'open-in-editor', 'Open in VS Code', split(['Meta+Shift+E'], ['Ctrl+Alt+E'])),
   row('global', 'inspector', 'Inspector', split(['Alt+Meta+B'], ['Ctrl+Alt+B'])),
   // Step 5.3: matched by TerminalView , where the strip is.
-  row('global', 'new-terminal', 'New terminal', split(['Alt+Meta+T'], ['Ctrl+Alt+T']), { step: '5.3' }),
+  // Off the Mac, Ctrl+Alt+T is the system terminal's on Ubuntu/GNOME and
+  // KDE, which take it before the app sees it (review w14-8): Ctrl+Alt+Shift+T
+  // is advertised there, and Ctrl+Alt+T stays accepted where it does arrive.
+  row('global', 'new-terminal', 'New terminal', split(['Alt+Meta+T'], ['Ctrl+Alt+Shift+T', 'Ctrl+Alt+T']), { step: '5.3' }),
   // Ctrl+Alt+` is the advertised chord off the Mac (the canvas's); plain
   // Ctrl+` stays accepted for those who learned it first.
   row('global', 'next-terminal', 'Next terminal', split(['Meta+`'], ['Ctrl+Alt+`', 'Ctrl+`']), { step: '5.3' }),

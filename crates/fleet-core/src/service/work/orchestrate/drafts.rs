@@ -544,6 +544,7 @@ pub async fn brief(args: &WorkLinkArgs, deps: &Deps, scope: &ViewScope) -> Resul
         let briefs = BRIEFS.lock().unwrap_or_else(|e| e.into_inner());
         return Ok(briefs.get(&key).cloned().unwrap_or_default());
     }
+    settings::require_writing_help(&*lock(&deps.store)?, settings::WORK_DRAFT_MORNING_BRIEF)?;
     let today = crate::service::work::today::today(&deps.store, args.since, scope)?;
     let target = {
         let s = lock(&deps.store)?;
@@ -759,6 +760,7 @@ pub async fn dashboard_summary(
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "dashboard_summary needs prompt"))?;
+    settings::require_writing_help(&*lock(&deps.store)?, settings::WORK_DASHBOARD_SUMMARY)?;
     if request.chars().count() > SUMMARY_REQUEST_MAX_CHARS {
         return Err(IpcError::new(
             codes::E_INVALID,

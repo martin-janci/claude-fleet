@@ -32,6 +32,36 @@ export function writePref<T>(key: string, value: T): void {
   }
 }
 
+/**
+ * Keep `store` in step with `key` when ANOTHER window of the app writes it
+ * (a pop-out terminal, review w14-2): the `storage` event fires only in the
+ * windows that did not write. Returns the unsubscribe.
+ */
+export function followPref<T>(
+  key: string,
+  store: { set(v: T): void },
+  isValid: (v: unknown) => v is T,
+): () => void {
+  return followStorage(PREFIX + key, (raw) => {
+    try {
+      const v = JSON.parse(raw);
+      if (isValid(v)) store.set(v);
+    } catch {
+      /* not ours to repair */
+    }
+  });
+}
+
+/** Call `apply` with the new value whenever another window writes `rawKey`. */
+export function followStorage(rawKey: string, apply: (raw: string) => void): () => void {
+  if (typeof window === 'undefined') return () => {};
+  const on = (e: StorageEvent) => {
+    if (e.key === rawKey && e.newValue !== null) apply(e.newValue);
+  };
+  window.addEventListener('storage', on);
+  return () => window.removeEventListener('storage', on);
+}
+
 /** Forget a pref so the next read falls back to its default. */
 export function clearPref(key: string): void {
   if (typeof localStorage === 'undefined') return;

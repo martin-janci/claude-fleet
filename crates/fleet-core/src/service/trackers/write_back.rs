@@ -207,15 +207,33 @@ pub fn on_enabled(s: &Store, tracker_id: i64) -> Result<usize, IpcError> {
 /// drains the outbox, and it skips a tracker whose credential was refused or
 /// that wants a browser login. Queued anyway, a promotion would read
 /// "Creating…" and a comment "Sending…" with no end and no reason.
+///
+/// Whether the sync runs is what this process started with: the interval
+/// is read once, at start (review 23b w02-8). A sync turned on since is not
+/// running until a restart; one turned off since still drains.
 pub fn refuse_unsendable(s: &Store, t: &TrackerRow) -> Result<(), IpcError> {
-    if super::sync::interval_in(s).is_none() {
+    unsendable_for(s, t, super::sync::sync_state())
+}
+
+/// [`refuse_unsendable`] with the process's sync state given.
+pub(crate) fn unsendable_for(s: &Store, t: &TrackerRow, sync: u8) -> Result<(), IpcError> {
+    let configured = super::sync::interval_in(s).is_some();
+    let off = match sync {
+        super::sync::SYNC_RUNNING => None,
+        super::sync::SYNC_OFF if configured => Some(
+            "the tracker sync was off when this hub started, and turning it on \
+             (work.sync_interval_secs) takes a restart"
+                .to_string(),
+        ),
+        _ if !configured => {
+            Some("the tracker sync is off on this hub (work.sync_interval_secs = 0)".to_string())
+        }
+        _ => None,
+    };
+    if let Some(why) = off {
         return Err(IpcError::new(
             crate::ipc_error::codes::E_INVALID_STATE,
-            format!(
-                "the tracker sync is off on this hub (work.sync_interval_secs = 0), so \
-                 nothing would be sent to {}",
-                t.name
-            ),
+            format!("{why}, so nothing would be sent to {}", t.name),
         ));
     }
     let fix = match t.state.as_str() {

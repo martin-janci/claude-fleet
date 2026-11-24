@@ -38,8 +38,10 @@ fn instances_to_kill(
 /// Terminate every other running instance of this app before we open the DB or
 /// bind the MCP port. Matches by executable file name, so it catches *all*
 /// builds (dev `target/debug/claude-fleet`, release bundle, other worktrees).
-/// SIGTERM first so the other instance can release its SSH ControlMasters and
-/// flush SQLite, then SIGKILL any straggler after a short grace window.
+/// SIGTERM first, then SIGKILL any straggler after a short grace window. The
+/// desktop installs no SIGTERM handler, so the TERM ends the other instance
+/// at once: its exit cleanup (`ExitCleanup` in `lib.rs`) does not run, and
+/// what it would have closed is left to this launch's own reaping.
 pub(crate) fn kill_other_instances() {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System};
 

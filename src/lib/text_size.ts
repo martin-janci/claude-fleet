@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import { readPref, writePref } from './prefs';
+import { followPref, readPref, writePref } from './prefs';
 
 /**
  * Text size (Settings › Appearance, gap plan G4.6): scales the whole app
@@ -56,5 +56,11 @@ export async function applyTextSize(pct: TextSize, zoom: Zoom | null = null): Pr
 
 /** Keep this window at the pref; returns the stop. */
 export function initTextSize(): () => void {
-  return textSize.subscribe((v) => void applyTextSize(v));
+  const unsub = textSize.subscribe((v) => void applyTextSize(v));
+  // A change made in another window (review w14-2).
+  const unfollow = followPref('ui.textSize', textSize, isTextSize);
+  return () => {
+    unsub();
+    unfollow();
+  };
 }

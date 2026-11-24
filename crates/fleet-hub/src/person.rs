@@ -2,11 +2,11 @@
 //! (multi-user M1, migration 098).
 //!
 //! **Written straight to `state.db`, not through a tool**, for
-//! `session.rs`'s reason and one more. There is no `people` tool at all:
-//! M1 gives no caller admin authority over another person (spec §4.1), so
-//! who this hub's people ARE is not a question the control API answers to
-//! anybody. The operator's authority here is shell access to the hub
-//! machine, which spec §4.5 already puts outside what fleet promises, and
+//! `session.rs`'s reason and one more. Through the control API people are
+//! administered from a fleet admin's device (`org_admin { add_person,
+//! rename_person, disable_person, enable_person }`, `realm_admin`); an org
+//! admin lists their org's members only. The operator's authority here is
+//! shell access to the hub machine, which spec §4.5 already puts outside what fleet promises, and
 //! it is the same authority `fleet-hub client bind-person` and `session
 //! claim` already use: open the store and write. The auth-epoch and
 //! grant-generation machinery means a running hub honours the change from
@@ -19,8 +19,8 @@
 //!
 //! **What is NOT here.** No `add`: a person is created by naming them
 //! (`pair --person`, `client bind-person`), so adding one without a device
-//! would only make a row nobody can reach. No `enable`: there is no
-//! `Store::enable_person`, deliberately — see [`PersonCmd::Disable`]. And
+//! would only make a row nobody can reach. `enable` lifts a disable but
+//! gives back none of what it revoked — see [`PersonCmd::Disable`]. And
 //! nothing in this module reads a session: `list` prints PEOPLE, never
 //! their sessions, a count of them, or anything derived from a session
 //! row. An operator may take a departed person's reach away; privacy has
@@ -436,7 +436,8 @@ pub fn run(
                 }),
             );
             out::line(&format!(
-                "linked {issuer} account {} to {} (person {}): signing in with it pairs a                  device as them",
+                "linked {issuer} account {} to {} (person {}): signing in with it pairs a \
+                 device as them",
                 subject.trim(),
                 row.name,
                 row.id
@@ -461,7 +462,8 @@ pub fn run(
                 serde_json::json!({ "issuer": issuer, "subject": subject.trim() }),
             );
             out::line(&format!(
-                "unlinked {issuer} account {}; devices already paired with it stay paired                  until `fleet-hub client revoke`",
+                "unlinked {issuer} account {}; devices already paired with it stay paired \
+                 until `fleet-hub client revoke`",
                 subject.trim()
             ));
         }

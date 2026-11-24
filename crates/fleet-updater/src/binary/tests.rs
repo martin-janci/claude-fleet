@@ -598,6 +598,40 @@ async fn a_candidate_that_keeps_dying_under_validation_is_rolled_back() {
     assert!(failed.contains("while being validated"), "{failed}");
 }
 
+/// Review w03-4: the designed resume (the `exec`) and two interruptions
+/// still validate; and an interruption long after the previous resume (a
+/// reboot an hour later) starts the count again instead of rolling a good
+/// build back and bad-listing it.
+#[tokio::test]
+async fn only_resumes_close_together_count_towards_the_cap() {
+    let mut r = rig(Behaviour::Good, Component::Agent);
+    let (o, _) = r.u.tick().await;
+    assert_eq!(o, Outcome::Updated(Version::new(0, 5, 4)));
+    let cand = Candidate {
+        version: Version::new(0, 5, 4),
+        sha256: sha256_hex(&tarball("0.5.4")),
+        schema_to: None,
+    };
+    let resume = |r: &mut Rig| {
+        r.u.state.phase = UpdatePhase::Validating;
+        r.u.state.candidate = Some(cand.clone());
+    };
+    // The exec, then two interruptions.
+    for _ in 0..3 {
+        resume(&mut r);
+        let (o, _) = r.u.tick().await;
+        assert_eq!(o, Outcome::Updated(Version::new(0, 5, 4)));
+    }
+    assert_eq!(r.u.state.resumes, MAX_RESUMES);
+    // The next one comes an hour after the last: not a crash loop.
+    r.u.state.resumed_at = r.u.state.resumed_at.map(|t| t - 3600);
+    resume(&mut r);
+    let (o, _) = r.u.tick().await;
+    assert_eq!(o, Outcome::Updated(Version::new(0, 5, 4)), "{o:?}");
+    assert_eq!(r.u.state.resumes, 1);
+    assert!(!r.u.state.bad.is_bad(&cand.version, Some(&cand.sha256)));
+}
+
 #[test]
 fn old_releases_are_pruned_but_never_the_running_or_previous_one() {
     let mut r = rig(Behaviour::Good, Component::Agent);
@@ -672,4 +706,55 @@ fn a_restore_is_needed_unless_the_schema_did_not_move() {
         Some(&cand(Some(150))),
         Some(140)
     ));
+}
+
+/// Review w09-2 (its pre-config half): a candidate that dies before its
+/// pass ever resumes (here: never reaching the pass at all) is rolled back
+/// by the start count `early_rollback` keeps, run before anything it could
+/// die on. The exec into it and `MAX_RESUMES` restarts are allowed.
+#[test]
+fn a_candidate_that_dies_before_its_pass_is_rolled_back_on_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let (root, state_dir) = (dir.path().join("root"), dir.path().join("state"));
+    let (old, new) = (
+        Version::parse("1.0.0").unwrap(),
+        Version::parse("1.1.0").unwrap(),
+    );
+    std::fs::create_dir_all(&root).unwrap();
+    point(&root.join("current"), Path::new(&safe(&new.to_string()))).unwrap();
+    let st = BinState {
+        phase: UpdatePhase::Validating,
+        candidate: Some(Candidate {
+            version: new.clone(),
+            sha256: "ab".repeat(32),
+            schema_to: None,
+        }),
+        previous: Some(Before {
+            version: old.clone(),
+            schema: None,
+            backup: None,
+        }),
+        ..BinState::default()
+    };
+    st.save(&state_dir).unwrap();
+    for _ in 0..MAX_STARTS {
+        assert_eq!(early_rollback(&root, &state_dir).unwrap(), None);
+    }
+    let why = early_rollback(&root, &state_dir)
+        .unwrap()
+        .expect("rolled back");
+    assert!(why.contains("never came up"), "{why}");
+    assert_eq!(
+        std::fs::read_link(root.join("current")).unwrap(),
+        Path::new(&safe(&old.to_string()))
+    );
+    let st = BinState::load(&state_dir).unwrap();
+    assert_eq!(
+        st.phase,
+        UpdatePhase::Failed,
+        "the pass finishes the rollback"
+    );
+    assert!(st.bad.is_bad(&new, Some(&"ab".repeat(32))));
+    // The previous build now runs: its starts are not counted.
+    assert_eq!(early_rollback(&root, &state_dir).unwrap(), None);
 }

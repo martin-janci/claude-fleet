@@ -697,6 +697,19 @@ impl OidcProvider {
                 link_hint.replace("<person>", &name)
             )));
         }
+        // Nor is a disabled one brought back as a new live person under the
+        // same name: `person disable` ends SSO reach too, also for somebody
+        // who was paired by code before SSO was set up (review w07-3).
+        if s.list_people()
+            .map_err(internal)?
+            .iter()
+            .any(|p| p.disabled_at.is_some() && p.name == name)
+        {
+            return Err(Refusal::Forbidden(format!(
+                "a person named {name:?} was disabled on this hub; ask its operator                  (fleet-hub person enable {name}, then: {})",
+                link_hint.replace("<person>", &name)
+            )));
+        }
         // The two writes are admin events (identity sub-project 1), in the
         // same transaction; the sign-in itself is not one.
         s.atomically(|s| {

@@ -25,6 +25,7 @@
   import {
     ago,
     applies,
+    deleteApplies,
     badgesOf,
     hubHost,
     budgetMeter,
@@ -249,7 +250,7 @@
         >
       {/each}
     {/if}
-    {#if !readonly && resource.delete}
+    {#if !readonly && resource.delete && deleteApplies(resource, record)}
       <button type="button" class="btn btn--quiet" disabled={busy} data-testid="record-delete" onclick={remove}
         >{resource.delete.label}</button
       >

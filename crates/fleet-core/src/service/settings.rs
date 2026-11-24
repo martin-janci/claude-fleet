@@ -671,8 +671,15 @@ pub const WORK_DRAFT_BRIEFS: &str = "work.draft_briefs";
 /// New task drafts the title from the notes (`work::title_draft`).
 pub const WORK_DRAFT_TASK_TITLES: &str = "work.draft_task_titles";
 /// Finish drafts a mission's release note from its merged PRs
-/// (`work::orchestrate::drafts::release_note`).
+/// (`work::orchestrate::drafts::release_note`), and a stuck mission's
+/// triage card drafts its words (`work::orchestrate::triage`).
 pub const WORK_DRAFT_RELEASE_NOTES: &str = "work.draft_release_notes";
+/// Today drafts the morning brief from the day's digest
+/// (`work::orchestrate::drafts::brief`).
+pub const WORK_DRAFT_MORNING_BRIEF: &str = "work.draft_morning_brief";
+/// A dashboard's summary widget writes its paragraph
+/// (`work::orchestrate::drafts::dashboard_summary`).
+pub const WORK_DASHBOARD_SUMMARY: &str = "work.dashboard_summary";
 /// A watched session's "Since 13:20" catch-up summary
 /// (`service::watch_summary`).
 pub const WORK_CATCH_UP_SUMMARIES: &str = "work.catch_up_summaries";
@@ -1831,7 +1838,23 @@ pub const SPECS: &[Spec] = &[
         "false",
         Kind::Bool,
         "Draft release notes",
-        "Finish: Draft writes a finished mission's release note from its merged PRs, on the mission's planner host.",
+        "Missions: Draft writes a finished mission's release note from its merged PRs, and a stuck mission's triage card, on the mission's planner host.",
+    )
+    .tags(&[Tag::Ai]),
+    Spec::new(
+        WORK_DRAFT_MORNING_BRIEF,
+        "false",
+        Kind::Bool,
+        "Draft the morning brief",
+        "Today: Draft the brief writes the morning brief from today's digest with claude -p on the host of one of today's sessions.",
+    )
+    .tags(&[Tag::Ai]),
+    Spec::new(
+        WORK_DASHBOARD_SUMMARY,
+        "false",
+        Kind::Bool,
+        "Dashboard summaries",
+        "Dashboards: a summary widget writes its paragraph from the page's counts with claude -p on the host of one of your sessions running today.",
     )
     .tags(&[Tag::Ai]),
     Spec::new(
@@ -1839,7 +1862,7 @@ pub const SPECS: &[Spec] = &[
         "false",
         Kind::Bool,
         "Catch-up summaries",
-        "A watched session offers \"Since 13:20\": what it did since you last looked, summarised on its own host and account.",
+        "A watched session offers \"Since 13:20\": what it did since you last looked, summarised on its own host and account. It needs no organisation's consent to Jev: only the summary check (decide.jev.summary_check) sends the excerpt there.",
     )
     .tags(&[Tag::Ai]),
     Spec::new(
@@ -2180,10 +2203,16 @@ pub const SPECS: &[Spec] = &[
         "false",
         Kind::Bool,
         "Jev: send unassigned replies",
-        "Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all.",
+        // Every use case by name (review w12-1); what each one sends is in
+        // the confirmation below, longer than a setting's help may be.
+        "Also send Claude's own text from sessions in no organisation, on top of the sessions themselves, for whichever of the turn outcome, a routine run's outcome, the summary check, mission triage, the duplicate check and quick answer is on. The confirmation says what each sends.",
     )
     .tags(&[Tag::Experimental, Tag::Network])
-    .danger("Claude's reply text from sessions outside every organisation will be sent to TypeSafe too."),
+    .danger(concat!(
+        "Claude's own text from sessions outside every organisation will be sent to TypeSafe too: ",
+        crate::service::decide::reply_text_uses!(),
+        "."
+    )),
     Spec::new(
         DECIDE_JEV_TIMEOUT_MS,
         "1500",

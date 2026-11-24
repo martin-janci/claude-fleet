@@ -34,12 +34,13 @@ fn person(store: &Mutex<Store>, id: i64) -> ViewScope {
 /// A mission of a new person's, and the deps around its store.
 fn fixture(name: &str) -> (Deps, ViewScope, MissionRow) {
     let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
-    settings::set(
-        &lock(&store).unwrap(),
+    for key in [
         settings::WORK_DRAFT_RELEASE_NOTES,
-        "true",
-    )
-    .unwrap();
+        settings::WORK_DRAFT_MORNING_BRIEF,
+        settings::WORK_DASHBOARD_SUMMARY,
+    ] {
+        settings::set(&lock(&store).unwrap(), key, "true").unwrap();
+    }
     let who = lock(&store).unwrap().create_person(name, None).unwrap().id;
     let me = person(&store, who);
     let m = missions::save(
@@ -598,4 +599,89 @@ async fn a_summary_widget_needs_a_request_and_a_host() {
         .query_row("SELECT COUNT(*) FROM aux_usage", [], |r| r.get(0))
         .unwrap();
     assert_eq!(booked, 0);
+}
+
+/// Review 23b w12-8 (a): the morning brief and a dashboard's summary widget
+/// are Writing help drafts, off until turned on: off, a draft is refused
+/// before any host is picked, and answering the last brief still works.
+#[tokio::test]
+async fn the_brief_and_the_summary_widget_are_off_until_turned_on() {
+    let (deps, me, _) = fixture("writing-help-off");
+    for key in [
+        settings::WORK_DRAFT_MORNING_BRIEF,
+        settings::WORK_DASHBOARD_SUMMARY,
+    ] {
+        settings::set(&lock(&deps.store).unwrap(), key, "false").unwrap();
+        assert_eq!(settings::spec(key).unwrap().default, "false", "{key}");
+    }
+    let last = WorkLinkArgs {
+        action: "today_brief".into(),
+        ..Default::default()
+    };
+    assert_eq!(brief(&last, &deps, &me).await.unwrap(), Brief::default());
+    let refresh = WorkLinkArgs {
+        refresh: Some(true),
+        ..last
+    };
+    let err = brief(&refresh, &deps, &me).await.unwrap_err();
+    assert!(
+        err.message.contains("Draft the morning brief is off"),
+        "{}",
+        err.message
+    );
+    let err = dashboard_summary(
+        &WorkLinkArgs {
+            action: "dashboard_summary".into(),
+            prompt: Some("How is it going?".into()),
+            ..Default::default()
+        },
+        &deps,
+        &me,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message.contains("Dashboard summaries is off"),
+        "{}",
+        err.message
+    );
+}
+
+/// Review 23b w12-8: a stuck mission's triage card drafts its words only
+/// with Draft release notes on; off, the Draft is refused before any host.
+#[tokio::test]
+async fn the_triage_cards_draft_rides_the_release_note_toggle() {
+    let (deps, me, m) = fixture("triage-owner");
+    {
+        let s = lock(&deps.store).unwrap();
+        settings::set(&s, settings::WORK_DRAFT_RELEASE_NOTES, "false").unwrap();
+        s.set_mission_state(m.id, None, "active", "t").unwrap();
+        s.set_mission_state(m.id, None, "paused", "t").unwrap();
+        s.record_mission_event(
+            m.id,
+            &crate::store::NewMissionEvent {
+                kind: "budget",
+                actor: "loop",
+                work_item_id: None,
+                task_id: None,
+                decision_id: None,
+                payload: Some(serde_json::json!({ "why": "out of budget" })),
+            },
+        )
+        .unwrap();
+    }
+    let args = WorkLinkArgs {
+        action: "mission_triage".into(),
+        mission_id: Some(m.id),
+        refresh: Some(true),
+        ..Default::default()
+    };
+    let err = super::super::triage::triage(&args, &deps, &me)
+        .await
+        .unwrap_err();
+    assert!(
+        err.message.contains("Draft release notes is off"),
+        "{}",
+        err.message
+    );
 }

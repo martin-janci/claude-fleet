@@ -488,7 +488,10 @@ pub(crate) const KIND_FENCES: &[(&str, KindFence)] = &[
     ),
     (
         "account",
-        KindFence::NoSessionContent("an `AccountRow`: a Claude account, its plan and its limits"),
+        KindFence::NoSessionContent(
+            "an `AccountRow`: a Claude account, its plan and its limits; or a removed \
+            account's uuid",
+        ),
     ),
     (
         "project",

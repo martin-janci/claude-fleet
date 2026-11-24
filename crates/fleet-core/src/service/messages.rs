@@ -2395,7 +2395,9 @@ mod tests {
         assert_eq!(got.body, "early");
     }
 
-    #[tokio::test]
+    /// On a paused clock (review 23b w19-5): the wake is measured in tokio
+    /// time, so a loaded box cannot fail it, and a 500 ms poll still would.
+    #[tokio::test(start_paused = true)]
     async fn wait_for_reply_wakes_on_a_message_that_arrives_while_waiting() {
         let (store, ssh, a, b) = fixture();
         let store = std::sync::Arc::new(store);
@@ -2404,7 +2406,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             send_message(args(a, b, "late"), &s2, &ssh2).await.unwrap();
         });
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         let got = wait_for_reply(
             &store,
             b,

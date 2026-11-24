@@ -328,16 +328,21 @@ async fn authorize(
         // allowlist (desktop / loopback hub): a public hub's master token
         // must never be accepted from a URL that proxies and logs can see.
         // A hook-only token (review w10-5), derived from a host token: good
-        // on `/hook` and nowhere else.
+        // on `/hook` and on the host recorder's `/voice/capture` (it reads
+        // the same `fleet-hook.headers` file; the handler demands a host
+        // caller and refuses peers, review w18-1), and nowhere else.
         Err(StatusCode::UNAUTHORIZED)
-            if request.uri().path() == "/hook"
+            if matches!(request.uri().path(), "/hook" | "/voice/capture")
                 && auth::bearer_token(request.headers().get(axum::http::header::AUTHORIZATION))
                     .is_some_and(|t| t.starts_with(auth::HOOK_TOKEN_PREFIX)) =>
         {
             auth::bearer_token(request.headers().get(axum::http::header::AUTHORIZATION))
                 .and_then(|t| auth::resolve_hook_token(t, &rows.hosts))
                 .ok_or_else(|| {
-                    tracing::warn!("[mcp] rejected /hook request: unknown hook token");
+                    tracing::warn!(
+                        "[mcp] rejected {} request: unknown hook token",
+                        request.uri().path()
+                    );
                     StatusCode::UNAUTHORIZED
                 })?
         }
@@ -1272,6 +1277,7 @@ mod tests {
                 scope: crate::store::ApiScope::Act,
                 hosts: None,
                 expires_at: None,
+                created_by_person: None,
             })
             .unwrap();
             s.revoke_client_token("old").unwrap();
@@ -1948,6 +1954,20 @@ mod tests {
         assert!(
             mcp_derived.contains("401"),
             "the hook-only token must not reach /mcp:\n{mcp_derived}"
+        );
+        // …but the host recorder's voice capture reads the same headers
+        // file (review w18-1): past auth to the handler (voice is off here).
+        let voice_derived = round_trip(
+            addr,
+            &format!(
+                "GET /voice/capture?tmux=x HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+                 Authorization: Bearer {derived}\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert!(
+            !voice_derived.contains("401") && voice_derived.contains("voice relay is off"),
+            "the hook-only token must reach /voice/capture:\n{voice_derived}"
         );
         // …and one derived from a token the hub does not hold is nobody.
         let stranger = auth::hook_token("not-a-host-tok");

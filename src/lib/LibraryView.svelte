@@ -22,6 +22,9 @@
   import Icon from './kit/Icon.svelte';
   import { readPref, writePref } from './prefs';
   import { selectedSession } from './selection';
+  import { sessionBlocked } from './share';
+  import { pairedLocalRefusal } from './access';
+  import { hubStatus } from './hub';
   import { fmtSize, saveDownload } from './downloads';
   import { timeAgo } from './session_status';
   import { localMidnight } from './today';
@@ -100,9 +103,19 @@
     void load();
   });
 
+  // The composer's gates on the same upload (review w11-7): it is this
+  // machine's own copy onto the owner's host, with no hub in the path to
+  // refuse it, so a grantee without `send_prompt` gets no Upload…, nor does
+  // a paired desktop on the hub's own-machine row.
+  const uploadBlocked = $derived(
+    $selectedSession
+      ? ($sessionBlocked($selectedSession, 'send_prompt') ?? pairedLocalRefusal($selectedSession, $hubStatus))
+      : null,
+  );
+
   async function upload() {
     const s = $selectedSession;
-    if (!s || busy) return;
+    if (!s || busy || uploadBlocked !== null) return;
     busy = true;
     error = null;
     const r = await uploadToSession(s);
@@ -154,10 +167,11 @@
       type="button"
       class="upload"
       data-testid="library-upload"
-      disabled={!$selectedSession || busy}
-      title={$selectedSession
-        ? `Put files beside ${$selectedSession.tmux_name} on ${$selectedSession.host_alias}`
-        : 'Pick a session first: uploads go beside the session in focus'}
+      disabled={!$selectedSession || busy || uploadBlocked !== null}
+      title={uploadBlocked ??
+        ($selectedSession
+          ? `Put files beside ${$selectedSession.tmux_name} on ${$selectedSession.host_alias}`
+          : 'Pick a session first: uploads go beside the session in focus')}
       onclick={upload}>{busy ? 'Uploading…' : 'Upload…'}</button
     >
   </div>

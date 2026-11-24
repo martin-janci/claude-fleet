@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from './error_copy';
   import ListLoading from './ListLoading.svelte';
   import { untrack } from 'svelte';
   import Inspector from './Inspector.svelte';
@@ -172,7 +173,7 @@
   function historyError(e: IpcError, catalog: string): string {
     if (e.code === 'E_FORBIDDEN') return `This client has no grant on catalog ${catalog}; ask the operator to grant assets on it.`;
     if (e.code === 'E_INVALID' && /\bunknown\b[^]*\basset_history\b/i.test(e.message)) return 'This hub does not keep asset history yet; update the hub.';
-    return e.message;
+    return errorText(e);
   }
 
   // Every entry to the History tab reads it afresh (a Save since the last

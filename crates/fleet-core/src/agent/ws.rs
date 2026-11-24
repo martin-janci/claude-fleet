@@ -601,6 +601,7 @@ async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadli
         // (the agent writes it to its identity file).
         host_alias: Some(alias.clone()),
     });
+    let drop_cancelled = forgets_on_cancel(&hello.agent_version);
     let conn_id = registry.connect_bound(&alias, hello, tx, credential.clone());
     if stale() {
         tracing::warn!(host = %alias, conn = conn_id, "[agent] its token changed as it registered; dropping");
@@ -626,6 +627,7 @@ async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadli
         alias.clone(),
         conn_id,
         superseded.clone(),
+        drop_cancelled,
     ));
     let who = Registered {
         registry: &registry,
@@ -762,6 +764,7 @@ async fn first_hello(
 ///
 /// It ends when the registry's channel closes — which is what deregistering,
 /// or being replaced by a second connection for the same alias, does to it.
+#[allow(clippy::too_many_arguments)]
 async fn write_loop(
     mut sink: SplitSink<WebSocket, Message>,
     mut rx: mpsc::UnboundedReceiver<HubFrame>,
@@ -770,6 +773,7 @@ async fn write_loop(
     alias: String,
     conn_id: ConnId,
     superseded: tokio_util::sync::CancellationToken,
+    drop_cancelled: bool,
 ) {
     // Small frames first, then pings, then bulk ones (an upload's chunks,
     // a big upload): an `exec` or a `cancel` queued behind a 200 MiB file
@@ -827,9 +831,13 @@ async fn write_loop(
         // its caller was already told it failed, and up to 200 MiB would
         // otherwise still cross (and be written) behind it (review w10-4).
         // Everything queued before the `cancel` is in `bulk` by now: the
-        // drain above runs before the small lane is popped.
+        // drain above runs before the small lane is popped. Only to an agent
+        // that forgets the upload's pieces on `cancel`: an older one frees
+        // them only when the final frame arrives (review w18-2).
         if let HubFrame::Cancel { id } = &frame {
-            bulk.retain(|f| bulk_upload_id(f) != Some(id.as_str()));
+            if drop_cancelled {
+                bulk.retain(|f| bulk_upload_id(f) != Some(id.as_str()));
+            }
         }
         // Armed BEFORE the frame goes out, so the answer can never beat its
         // own budget onto the socket.
@@ -899,6 +907,16 @@ fn is_bulk(frame: &HubFrame) -> bool {
 }
 
 /// The upload a bulk frame belongs to.
+/// Whether an agent of this version forgets a chunked upload's pieces on
+/// `cancel` (f3f59f2ba, after 0.6.5). An older one keeps them until the
+/// final frame: it must still be sent the rest, or the pieces stay for the
+/// life of the connection and fill its 64-id assembly (review w18-2). An
+/// unparsable version is taken as old: sending the rest is only bandwidth.
+fn forgets_on_cancel(agent_version: &str) -> bool {
+    fleet_update::Version::parse(agent_version.trim())
+        .is_ok_and(|v| v > fleet_update::Version::new(0, 6, 5))
+}
+
 fn bulk_upload_id(frame: &HubFrame) -> Option<&str> {
     match frame {
         HubFrame::UploadChunk { id, .. } | HubFrame::Upload { id, .. } => Some(id),
@@ -1341,6 +1359,18 @@ fn answered_id(frame: &AgentFrame) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    /// Review w18-2: the cancelled upload's rest is dropped only for an
+    /// agent that forgets its pieces on `cancel`.
+    #[test]
+    fn only_an_agent_that_forgets_on_cancel_loses_the_rest_of_an_upload() {
+        for old in ["0.6.5", "0.6.4", "0.5.0", "", "garbage", "9.9"] {
+            assert!(!super::forgets_on_cancel(old), "{old}");
+        }
+        for new in ["0.6.6", "0.6.6-rc.1", "0.7.0", "1.0.0", " 0.6.6 "] {
+            assert!(super::forgets_on_cancel(new), "{new}");
+        }
+    }
+
     use super::*;
 
     /// A chunked upload's final frame rides behind its chunks however small

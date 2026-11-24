@@ -336,6 +336,21 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// End `expired` every pending action whose job lost its rule: a
+    /// revoke before #1140 left them `pending` for good, still counted in
+    /// Needs you (review 23b w02-6). Every job is inserted with a rule, so
+    /// a job without one had its rule revoked (`ON DELETE SET NULL`,
+    /// migration 185). Returns how many ended.
+    pub fn expire_orphaned_agent_actions(&self) -> Result<usize, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE agent_actions SET state = 'expired', decided_by = 'revoked', \
+               decided_at = ?1, error = 'the rule was revoked' \
+             WHERE state = 'pending' \
+               AND job_id IN (SELECT id FROM agent_jobs WHERE rule_id IS NULL)",
+            params![super::now_unix()],
+        )
+    }
+
     /// Remove every rule (the agents' Pause all). Returns how many went.
     /// Every pending action of a rule ends `expired`, as on a revoke.
     pub fn revoke_all_agent_rules(&self) -> Result<usize, rusqlite::Error> {
@@ -930,6 +945,28 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Retire the fleet-own proposals (`work_task`, `fix_session`,
+    /// `setting`, `session_recover`) still pending since before `cutoff`:
+    /// `expired`, decided by `timed out`. They are about the fleet as it
+    /// was when proposed, so a card nobody answered for a day leaves the
+    /// Inbox instead of acting on a stale picture once approved. Other
+    /// kinds (a PR review, a tracker comment) wait for their person as
+    /// before. The number expired.
+    pub fn expire_stale_fleet_actions(
+        &self,
+        cutoff: i64,
+        now: i64,
+    ) -> Result<usize, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE agent_actions SET state = 'expired', decided_by = 'timed out', \
+               decided_at = ?2, \
+               error = 'nobody answered it in time; the fleet has moved on since' \
+             WHERE state = 'pending' AND created_at < ?1 \
+               AND kind IN ('work_task', 'fix_session', 'setting', 'session_recover')",
+            params![cutoff, now],
+        )
+    }
+
     /// Retention: delete up to `limit` actions that reached an end state
     /// (`rejected`, `executed`, `failed`, `expired`) and were created before
     /// `cutoff`; the number deleted. A `pending` action still waits for a
@@ -1241,6 +1278,45 @@ mod tests {
         assert!(s.finish_agent_job(j.id, &bad, 0, 0).is_err());
     }
 
+    /// Review 23b w02-6: a pending action whose rule was revoked before
+    /// revokes expired them (its job's `rule_id` went NULL) ends `expired`;
+    /// one whose rule is still there stays pending.
+    #[test]
+    fn a_pending_action_of_a_rule_revoked_long_ago_expires() {
+        let s = Store::open_in_memory().unwrap();
+        let gone = s.grant_agent_rule(&rule("review", "gh:o/r")).unwrap();
+        let kept = s.grant_agent_rule(&rule("review", "gh:o/q")).unwrap();
+        s.record_agent_poll(gone, 1000, None, &[job(gone, "gh:o/r#1", "k1")])
+            .unwrap();
+        s.record_agent_poll(kept, 1000, None, &[job(kept, "gh:o/q#1", "k2")])
+            .unwrap();
+        let jobs = s.list_agent_jobs(None, 10).unwrap();
+        let job_of = |rid: i64| jobs.iter().find(|j| j.rule_id == Some(rid)).unwrap().id;
+        let orphan = s
+            .insert_agent_action(job_of(gone), "post_review", "{}", 10)
+            .unwrap();
+        let live = s
+            .insert_agent_action(job_of(kept), "post_review", "{}", 10)
+            .unwrap();
+        // The pre-#1140 revoke: the rule went, its actions stayed pending.
+        s.conn_ref()
+            .execute("DELETE FROM agent_rules WHERE id = ?1", params![gone])
+            .unwrap();
+        assert_eq!(s.expire_orphaned_agent_actions().unwrap(), 1);
+        assert_eq!(s.expire_orphaned_agent_actions().unwrap(), 0);
+        let state = |id: i64| {
+            s.conn_ref()
+                .query_row(
+                    "SELECT state, decided_by FROM agent_actions WHERE id = ?1",
+                    params![id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(state(orphan), ("expired".into(), Some("revoked".into())));
+        assert_eq!(state(live).0, "pending");
+    }
+
     #[test]
     fn the_sweep_takes_only_old_actions_that_ended() {
         let s = Store::open_in_memory().unwrap();
@@ -1282,6 +1358,39 @@ mod tests {
             1,
             "the job stays"
         );
+    }
+
+    #[test]
+    fn a_fleet_own_proposal_nobody_answered_expires_after_its_ttl() {
+        let s = Store::open_in_memory().unwrap();
+        let rid = s.grant_agent_rule(&rule("review", "gh:o/r")).unwrap();
+        s.record_agent_poll(rid, 1000, None, &[job(rid, "gh:o/r#1", "k1")])
+            .unwrap();
+        let jid = s.list_agent_jobs(None, 1).unwrap()[0].id;
+        let add = |kind: &str, at: i64| s.insert_agent_action(jid, kind, "{}", at).unwrap();
+        let old_recover = add("session_recover", 10);
+        let old_setting = add("setting", 11);
+        let old_review = add("post_review", 12);
+        let fresh_task = add("work_task", 900);
+        let answered = add("fix_session", 13);
+        s.decide_agent_action(answered, true, "p", 20).unwrap();
+
+        assert_eq!(s.expire_stale_fleet_actions(500, 1000).unwrap(), 2);
+        let state = |id: i64| {
+            s.agent_actions_of_job(jid)
+                .unwrap()
+                .into_iter()
+                .find(|a| a.id == id)
+                .unwrap()
+        };
+        let r = state(old_recover);
+        assert_eq!(r.state, "expired");
+        assert_eq!(r.decided_by.as_deref(), Some("timed out"));
+        assert_eq!(state(old_setting).state, "expired");
+        assert_eq!(state(old_review).state, "pending", "not a fleet-own kind");
+        assert_eq!(state(fresh_task).state, "pending", "within its TTL");
+        assert_eq!(state(answered).state, "approved", "a person answered it");
+        assert_eq!(s.expire_stale_fleet_actions(500, 1001).unwrap(), 0);
     }
 
     #[test]

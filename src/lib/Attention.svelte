@@ -51,6 +51,7 @@
   import { push } from './toasts';
   import { selectSessionExplicitly } from './selection';
   import { sidebarView } from './work_view';
+  import { accessOf, waitsOnMe } from './access';
 
   /** Open a session of this window's fleet from a toast or a notification:
    *  the live row, if it is still there (review w11-4, w11-12). */
@@ -122,7 +123,14 @@
   const openedAt = Math.floor(Date.now() / 1000);
 
   onMount(() => {
-    const unsub = sessions.subscribe((rows) => {
+    // Review w08-3 (option a): a session shared with this person at Read
+    // waits on its owner, so it never notifies here.
+    const mine = (rows: SessionRow[]) => {
+      const of = get(accessOf);
+      return rows.filter((r) => waitsOnMe(of(r)));
+    };
+    const unsub = sessions.subscribe((all) => {
+      const rows = mine(all);
       if (prev === null || !get(sessionsLoaded)) {
         prev = stuckSnapshot(rows);
         return;
@@ -131,7 +139,8 @@
       prev = stuckSnapshot(rows);
       if (fresh.length > 0) announce(fresh);
     });
-    const unsubStates = sessions.subscribe((rows) => {
+    const unsubStates = sessions.subscribe((all) => {
+      const rows = mine(all);
       const opts = { idleSecs: get(attentionIdleMinutes) * 60, now: Math.floor(Date.now() / 1000), facts: get(attentionFacts) };
       const before = prevStates;
       prevStates = notifySnapshot(rows, opts);

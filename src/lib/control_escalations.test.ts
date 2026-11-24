@@ -222,6 +222,19 @@ describe('mission cards (w04-7)', () => {
     expect(missionEscalations(ms, new Set(), new Set([5]))).toEqual([]);
   });
 
+  it('a paused mission a brake asked a question on is a card (review 23b w09-1)', () => {
+    const ms = [m(7, { state: 'paused', waiting_on: { reason: 'question' } }), m(8, { state: 'paused' })];
+    expect(missionEscalations(ms, new Set()).map((c) => c.missionId)).toEqual([7]);
+  });
+
+  it('Later puts off this ask, not the next question (review 23b w09-4)', () => {
+    const asked = [m(9, { waiting_on: { reason: 'question', since: 100 } })];
+    const [card] = missionEscalations(asked, new Set());
+    expect(missionEscalations(asked, new Set([card.key]))).toEqual([]);
+    const next = [m(9, { waiting_on: { reason: 'question', since: 200 } })];
+    expect(missionEscalations(next, new Set([card.key])).map((c) => c.missionId)).toEqual([9]);
+  });
+
   it("Control's missions are those a receipt or the hub names, while followed", () => {
     const receipts = [{ kind: 'mission', mission_id: 4 }] as unknown as ControlHandoff[];
     const follows = new Map([

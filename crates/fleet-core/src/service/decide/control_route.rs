@@ -304,6 +304,13 @@ pub fn subject_id(fp_key: &crate::store::Secret, text: &str, now: i64) -> String
     format!("msg:{}", &mac[..16])
 }
 
+/// The org a Control message is gated as: the operator session's, `None`
+/// when there is no operator or it belongs to no org.
+pub fn message_org(s: &Store) -> Option<i64> {
+    let op = crate::service::control_journal::operator_row(s)?;
+    s.session_org(op.id).ok().flatten()
+}
+
 /// Route one message the person has just sent in Control. Never an error
 /// a send could notice: every failure is `none`. Holds the store lock only
 /// for reads, never across the call.
@@ -312,11 +319,15 @@ pub async fn propose(ctx: &DecideCtx, scope: &ViewScope, text: &str) -> ControlR
         return ControlRoute::none();
     }
     let now = ctx.now();
-    let (mode, targets, asked, subject) = {
+    let (mode, targets, asked, subject, org) = {
         let Ok(s) = lock(&ctx.store) else {
             return ControlRoute::none();
         };
-        let Ok(mode) = gate_at(&s, Feature::ControlRoute, None, now) else {
+        // The message is gated as the Control operator's org's (review 23b
+        // w12-5): its text is about that org's work. Unassigned only when
+        // the operator has no org.
+        let org = message_org(&s);
+        let Ok(mode) = gate_at(&s, Feature::ControlRoute, org, now) else {
             return ControlRoute::none();
         };
         let targets = match targets(&s, scope) {
@@ -331,7 +342,7 @@ pub async fn propose(ctx: &DecideCtx, scope: &ViewScope, text: &str) -> ControlR
             return ControlRoute::none();
         };
         let asked = consenting(&s, &targets);
-        (mode, targets, asked, subject_id(&fp_key, text, now))
+        (mode, targets, asked, subject_id(&fp_key, text, now), org)
     };
     if unclear(text) {
         // The rule answered: nothing to ask the model, nothing recorded.
@@ -356,7 +367,7 @@ pub async fn propose(ctx: &DecideCtx, scope: &ViewScope, text: &str) -> ControlR
             feature: Feature::ControlRoute,
             subject_kind: SUBJECT_KIND.into(),
             subject_id: subject,
-            org_id: None,
+            org_id: org,
             request: question_for(text, &asked),
             // Today nothing routes a message: it stays with Control.
             baseline: Some(CONTROL.into()),

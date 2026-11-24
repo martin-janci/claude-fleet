@@ -1417,7 +1417,7 @@ fn now_utc() -> String {
 /// Said beside a refusal that means the hub no longer takes this host as
 /// an agent.
 pub const FORGOTTEN_HINT: &str = "the hub does not take this host as an agent any more; if it was \
-     removed, remove the agent too: docs/hub.md, Removing the agent";
+     removed, remove the agent too: `fleet-agent uninstall` (add --user for a user unit)";
 
 /// Whether `e` says the hub no longer knows this host as an agent: its
 /// token is unknown (401), or the host is not an agent host (403).

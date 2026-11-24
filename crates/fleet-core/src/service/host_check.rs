@@ -123,9 +123,10 @@ pub fn check_script() -> String {
 /// [`check_script`], checking a projects base path first when one is given.
 pub fn check_script_with(base_path: Option<&str>) -> String {
     format!(
-        "{}printf 'tmuxv=%s\\n' \"$(tmux -V 2>/dev/null)\"; \
+        "{}{}printf 'tmuxv=%s\\n' \"$(tmux -V 2>/dev/null)\"; \
          for a in {}; do command -v \"$a\" >/dev/null 2>&1 && printf 'agent=%s\\n' \"$a\"; done; \
          printf '%s\\n' '{SETTINGS_MARK}'; cat \"$HOME/.claude/settings.json\" 2>/dev/null; true",
+        crate::ssh::TOOL_PATH_PREFIX,
         base_path.map(base_path_script).unwrap_or_default(),
         AGENT_BINARIES.join(" ")
     )

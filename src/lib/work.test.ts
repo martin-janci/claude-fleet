@@ -69,6 +69,13 @@ describe('resume commands', () => {
     if (!r.ok) expect(r.error.message).toBe(RESUME_UNSUPPORTED);
   });
 
+  it('a hub without resume_plan reads as unsupported, not as its refusal (review w15-8)', async () => {
+    vi.mocked(invoke).mockRejectedValueOnce({ code: 'E_INVALID', message: 'unknown work action "resume_plan"; one of tree' });
+    const r = await workResumePlan('ABC-1');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.message).toBe(RESUME_UNSUPPORTED);
+  });
+
   it('sends the plan and purge arguments the commands expect', async () => {
     vi.mocked(invoke).mockResolvedValueOnce({ key: 'ABC-1', modes: [] });
     await workResumePlan('ABC-1', { linkId: 4, withBrief: true });

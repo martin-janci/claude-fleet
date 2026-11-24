@@ -248,14 +248,17 @@ pub(super) fn ensure_remote_project_script(
     worktree: Option<&RemoteWorktree<'_>>,
 ) -> String {
     let root = quote(project_root);
+    // `-e`, not `-d` (w10-9): a linked or bare-repo checkout's `.git` is a
+    // FILE, and cloning over it ends in `rmdir` failing "not empty".
     let mut script = format!(
         "set -e\n\
-         if [ ! -d {root}/.git ]; then \
+         if [ ! -e {root}/.git ]; then \
            mkdir -p \"$(dirname -- {root})\"; \
            tmp=\"$(dirname -- {root})/.fleet-clone-$$\"; rm -rf \"$tmp\"; \
            git clone {url} \"$tmp\" && {{ [ ! -e {root} ] || rmdir {root}; }} && mv \"$tmp\" {root} || {{ rm -rf \"$tmp\"; exit 1; }}; \
-         fi\n",
+         {same_repo}fi\n",
         url = quote(clone_url),
+        same_repo = same_repo_check(project_root, clone_url),
     );
     if let Some(wt) = worktree {
         if let Some(branch) = mirrored_branch(worktree) {
@@ -280,6 +283,34 @@ pub(super) fn ensure_remote_project_script(
         }
     }
     script
+}
+
+/// PURE (w10-10): the `else` arm of the clone guard in
+/// [`ensure_remote_project_script`]: a checkout already at the project root
+/// must be THIS repository. Under the flat layout a fork and its upstream
+/// (`me/app`, `org/app`) share `<root>/app`, and a start of one would
+/// otherwise run in the other's clone. Its `origin` is compared with the
+/// GitHub `owner/repo` the clone URL names (case-insensitively, any URL
+/// form); a checkout with no `origin`, or a clone URL that is not a GitHub
+/// one, is not judged. Empty when there is nothing to compare.
+fn same_repo_check(project_root: &str, clone_url: &str) -> String {
+    let Some(want) = clone_url
+        .strip_prefix("git@github.com:")
+        .map(|r| r.trim_end_matches(".git").to_ascii_lowercase())
+        .filter(|r| r.split('/').count() == 2)
+    else {
+        return String::new();
+    };
+    let root = quote(project_root);
+    let w = quote(&want);
+    format!(
+        "else u=\"$(git -C {root} remote get-url origin 2>/dev/null || true)\"; \
+           lu=\"$(printf '%s' \"$u\" | tr '[:upper:]' '[:lower:]')\"; \
+           case \"$lu\" in ''|*[:/]{w}|*[:/]{w}.git|*[:/]{w}/) ;; \
+             *) echo \"fleet: {root_text} holds $u, not {want_text}\" >&2; exit 1;; esac; ",
+        root_text = project_root.replace(['"', '\\', '$', '`'], "_"),
+        want_text = want.replace(['"', '\\', '$', '`'], "_"),
+    )
 }
 
 /// The `E_GIT_SETUP` for a failed `ensure_remote_project` script. A mirror
@@ -357,11 +388,13 @@ pub(super) fn worktree_add_script(root: &str, name: &str, base: Option<&str>) ->
          if [ -n \"$basebr\" ] && git show-ref --verify --quiet \"refs/heads/$basebr\"; then start=\"$basebr\"\n\
          elif [ -n \"$basebr\" ] && git show-ref --verify --quiet \"refs/remotes/origin/$basebr\"; then start=\"origin/$basebr\"\n\
          else start=\"$def\"\n\
+         {FRESH_DEFAULT_SNIPPET}\
          fi\n\
          if [ \"$basebr\" = \"$name\" ] && git show-ref --verify --quiet \"refs/heads/$name\"; then\n\
          git worktree add \"$wt\" \"$name\" 1>&2\n\
          else\n\
          git worktree add \"$wt\" -b \"$name\" \"$start\" 1>&2\n\
+         [ \"$start\" = \"origin/$def\" ] && git -C \"$wt\" branch --unset-upstream >/dev/null 2>&1 || true\n\
          fi\n\
          echo {WORKTREE_CREATED_MARK}\n\
          fi\n\
@@ -371,6 +404,19 @@ pub(super) fn worktree_add_script(root: &str, name: &str, base: Option<&str>) ->
         dir = quote(&crate::projects::worktree_dir_name(name)),
     )
 }
+
+/// The default-branch arm of [`worktree_add_script`] (w10-7): the host's
+/// local default branch is often the commit it was cloned at (nobody works
+/// in a remote base checkout, and `ensure_remote_project` never pulls), so
+/// a best-effort, bounded fetch runs first (no prompt; skipped where there
+/// is no `timeout`, offline it simply fails), and the new branch starts from
+/// `origin/<default>` when the local one is behind it or equal. A local
+/// default with commits of its own is kept. The branch tracks nothing: its
+/// upstream is unset after the add, so a push never aims at the default.
+const FRESH_DEFAULT_SNIPPET: &str = "if [ -n \"$def\" ] && command -v timeout >/dev/null 2>&1; then \
+     GIT_TERMINAL_PROMPT=0 timeout 20 git fetch -q origin \"$def\" >/dev/null 2>&1 || true; fi\n\
+     if [ -n \"$def\" ] && git show-ref --verify --quiet \"refs/remotes/origin/$def\" \
+     && git merge-base --is-ancestor \"$def\" \"origin/$def\" 2>/dev/null; then start=\"origin/$def\"; fi\n";
 
 /// Where a new worktree goes under a repo root (the script's cwd): the
 /// repo's `.worktrees/` unless it already uses `.claude/worktrees/`. Sets
@@ -1553,7 +1599,7 @@ pub(super) async fn new_session_inner(
             .as_deref()
             .filter(|a| *a != crate::store::AGENT_CLAUDE && !is_shell)
         {
-            s.set_session_agent(row.id, agent)?;
+            s.set_new_session_agent(row.id, agent)?;
         }
         finalize_new_session(
             &s,

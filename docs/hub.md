@@ -994,11 +994,23 @@ loopback hub, or to the public URL directly on a public hub.
 
 ### Removing the agent
 
-There is no `fleet-agent uninstall` yet. After `remove_host` (or after moving
-the host back to `transport: ssh`) the hub refuses the agent's token (401, or
-403 "not an agent host"); the agent keeps dialling every minute or so and its
-status (`fleet-agent status`, systemd's `STATUS=`) says the hub no longer
-takes it. Remove it on the host:
+After `remove_host` (or after moving the host back to `transport: ssh`) the
+hub refuses the agent's token (401, or 403 "not an agent host"); the agent
+keeps dialling every few minutes and its status (`fleet-agent status`,
+systemd's `STATUS=`) says the hub no longer takes it and names the command
+below. Remove it on the host:
+
+```bash
+sudo fleet-agent uninstall          # Linux, system unit (installed with sudo)
+fleet-agent uninstall --user        # Linux, --user unit; macOS (no flag needed)
+```
+
+It stops and disables the unit and the update timer (on macOS it boots the
+LaunchAgent out), removes them, the config (it holds the host's token; pass
+`--config` if `install --config` put it elsewhere) and the updater's state,
+and reloads systemd. The sessions the agent started keep running, and the
+binaries stay: it prints where they are. An agent older than `uninstall`
+is removed by hand:
 
 ```bash
 # Linux, system unit (installed with sudo)
@@ -1915,12 +1927,13 @@ records the actor as none). Groups are addressed by path
 `--json`.
 
 ```sh
-# Create a group under /orgs and put a person in it
-fleet-hub realm group create platform --parent /orgs
-fleet-hub realm group add /orgs/platform ada
+# Create a top-level group and put a person in it (the groups under /orgs
+# are the orgs' own, managed by their memberships)
+fleet-hub realm group create platform
+fleet-hub realm group add /platform ada
 
 # Give the whole group the fleet-admin role (a person: --user ada)
-fleet-hub realm role map fleet-admin --group /orgs/platform
+fleet-hub realm role map fleet-admin --group /platform
 fleet-hub realm effective ada
 
 # Read the audit log: who changed what, newest first
@@ -4027,7 +4040,7 @@ Every command below refuses in hub client mode; the full table, with the command
 | --- | --- |
 | `account_spend` | this app collects no usage while a hub owns the fleet, so its store has no spend per account; read usage on the hub |
 | `account_usage_history` | this app does not poll account usage while a hub owns the fleet, so it keeps no history; read usage on the hub |
-| `add_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
+| `add_tracker` | trackers and their credentials are fleet administration, which this desktop does not route: set them up on the hub (`fleet-hub tracker add\|set-credential\|test`) or from the hub owner's trusted phone (Trackers) |
 | `catalog_spawn_author_session` | an author session is a Claude session started in the catalog's checkout on the machine that owns it, and the hub has no tool that starts one; edit the assets from this panel, or start a session in the checkout on the hub's machine |
 | `check_local_prereqs` | the onboarding checklist is about running a fleet from this machine, which the hub is doing instead |
 | `decide_status_map_proposal` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
@@ -4054,7 +4067,7 @@ Every command below refuses in hub client mode; the full table, with the command
 | `record_host_placement` | the decision model's runs are recorded on the hub that owns the fleet; nothing to record here |
 | `refresh_account_usage` | it reads the account's usage over this machine's SSH connection to the host; refresh it on the hub |
 | `remove_host` | removing a host is fleet administration, which the hub reserves for its own operator — remove it there with `fleet-hub` |
-| `remove_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
+| `remove_tracker` | trackers and their credentials are fleet administration, which this desktop does not route: set them up on the hub (`fleet-hub tracker add\|set-credential\|test`) or from the hub owner's trusted phone (Trackers) |
 | `repair_session` | Refuses when explicit: false, the automatic pre-attach check (otherwise routes to `repair_session`): the hub's repair_session always runs the EXPLICIT repair, which may unregister a stale worktree entry, adopt a moved checkout and recreate a branch — this app will not turn an automatic pre-attach check into that; repair explicitly, or from the hub |
 | `repair_workspaces_now` | repairing every workspace or restoring every host's lost sessions at once is the fleet's own pass: on a paired client, open the host in Hosts and use its Repair or Restore, which route to the hub |
 | `repo_checkout` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
@@ -4074,13 +4087,13 @@ Every command below refuses in hub client mode; the full table, with the command
 | `save_host_setup` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
 | `set_ticket_prefix` | which prefix a project's ticket keys carry is fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; set them on the hub with `fleet-hub tracker prefixes` and `fleet-hub tracker prefix <PREFIX> --project <id>` |
-| `set_tracker_credential` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
+| `set_tracker_credential` | trackers and their credentials are fleet administration, which this desktop does not route: set them up on the hub (`fleet-hub tracker add\|set-credential\|test`) or from the hub owner's trusted phone (Trackers) |
 | `status_map_proposals` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
-| `test_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
+| `test_tracker` | trackers and their credentials are fleet administration, which this desktop does not route: set them up on the hub (`fleet-hub tracker add\|set-credential\|test`) or from the hub owner's trusted phone (Trackers) |
 | `ticket_prefixes` | which prefix a project's ticket keys carry is fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; set them on the hub with `fleet-hub tracker prefixes` and `fleet-hub tracker prefix <PREFIX> --project <id>` |
-| `tracker_sync_metrics` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
+| `tracker_sync_metrics` | trackers and their credentials are fleet administration, which this desktop does not route: set them up on the hub (`fleet-hub tracker add\|set-credential\|test`) or from the hub owner's trusted phone (Trackers) |
 | `tunnel_status` | the tunnels belong to the process that owns the fleet; check them on the hub |
-| `update_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
+| `update_tracker` | trackers and their credentials are fleet administration, which this desktop does not route: set them up on the hub (`fleet-hub tracker add\|set-credential\|test`) or from the hub owner's trusted phone (Trackers) |
 | `work_retention_status` | work retention is the hub's own sweep of its store: its status and sweep_now are the hub's work_admin, master-only, and a paired client is never the fleet's administrator; set the windows with set_setting and read the status on the hub |
 | `work_retention_sweep` | work retention is the hub's own sweep of its store: its status and sweep_now are the hub's work_admin, master-only, and a paired client is never the fleet's administrator; set the windows with set_setting and read the status on the hub |
 <!-- END GENERATED: hub-client verdicts -->

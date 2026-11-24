@@ -196,7 +196,21 @@ impl UpdateDial {
                 else {
                     return Ok(None);
                 };
-                (Proxy::parse(&url)?, first(&["NO_PROXY", "no_proxy"]))
+                // The environment's proxy may be one the agent cannot speak
+                // (`https://`, `socks5://`) while its `NO_PROXY` covers the
+                // hub, which the WebSocket then dials directly: the update
+                // passes go direct too, as before, rather than turning
+                // self-update off for good (review w03-2). Only a configured
+                // `--proxy` is strict (`install` checks it).
+                match Proxy::parse(&url) {
+                    Ok(p) => (p, first(&["NO_PROXY", "no_proxy"])),
+                    Err(why) => {
+                        tracing::warn!(
+                            "[agent] ignoring the environment's proxy for updates, connecting directly: {why}"
+                        );
+                        return Ok(None);
+                    }
+                }
             }
         };
         Ok(Some(UpdateDial { proxy, no_proxy }))
@@ -385,6 +399,23 @@ mod tests {
         assert!(d.proxies("fleet.rlt.sk"));
         assert!(UpdateDial::from_config(Some(""), &e).unwrap().is_none());
         assert!(UpdateDial::from_config(None, env(&[])).unwrap().is_none());
+    }
+
+    /// Review w03-2: an environment proxy the agent cannot speak leaves the
+    /// update passes direct (as the WebSocket is, where `NO_PROXY` names the
+    /// hub), not self-update off; a configured one stays strict.
+    #[test]
+    fn an_environment_proxy_the_agent_cannot_speak_goes_direct() {
+        for url in ["https://proxy.corp:3128", "socks5://proxy:1080"] {
+            let e = env(&[("HTTPS_PROXY", url), ("NO_PROXY", ".rlt.sk")]);
+            assert!(
+                UpdateDial::from_config(None, &e).unwrap().is_none(),
+                "{url}"
+            );
+            assert!(UpdateDial::from_config(Some(url), &e).is_err(), "{url}");
+        }
+        let e = env(&[("ALL_PROXY", "socks5://proxy:1080")]);
+        assert!(UpdateDial::from_config(None, &e).unwrap().is_none());
     }
 
     /// End to end against a CONNECT proxy on loopback: the bytes after the

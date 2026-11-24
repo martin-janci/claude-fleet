@@ -18,7 +18,9 @@ const PLAIN: Record<string, string> = {
   E_AGENT_PROTOCOL: "The host's agent answered in a way this version doesn't understand",
   E_HUB_UNREACHABLE: "Couldn't reach the hub",
   E_HUB_TIMEOUT: 'The hub took too long to answer',
-  E_HUB_PROTOCOL: "The hub answered in a way this version doesn't understand",
+  // Review w15-5: in practice the hub is older than this app and lacks the
+  // tool (`ipc_error.rs`), so the fix is on the hub's side.
+  E_HUB_PROTOCOL: "The hub doesn't know this action yet. Update the hub",
   E_TIMEOUT: 'That took too long to answer',
   E_PTY_CLOSED: 'The terminal connection closed',
   E_PTY_BUSY: 'The terminal is busy; try again in a moment',
@@ -106,8 +108,21 @@ function connectionLost(e: Pick<IpcError, 'details'>): boolean {
   return (e.details as { connection_lost?: unknown } | null | undefined)?.connection_lost === true;
 }
 
+/** Review w15-4: the same codes from the hub (`details.origin`, set by the
+ *  desktop's remote backend): the hub restarts itself only for its store
+ *  lock, and restarting this app does nothing for the hub's. */
+const HUB_PLAIN: Record<string, string> = {
+  E_LOCK: 'The hub hit an internal error. Its operator needs to restart it',
+  E_SQLITE: "The hub's database couldn't do that",
+};
+
+function fromHub(e: Pick<IpcError, 'details'>): boolean {
+  return (e.details as { origin?: unknown } | null | undefined)?.origin === 'hub';
+}
+
 function plainFor(e: Pick<IpcError, 'code' | 'details'>): string | undefined {
   if (connectionLost(e)) return CONNECTION_LOST;
+  if (fromHub(e) && HUB_PLAIN[e.code]) return HUB_PLAIN[e.code];
   return PLAIN[e.code];
 }
 
@@ -225,4 +240,18 @@ export function hubUnavailableWords(reason: string): string {
   if (/settings store|cannot read hub\./.test(reason)) return "This app couldn't read its own settings";
   if (/client token|token store/.test(reason)) return "This app can't read its saved sign-in for the hub";
   return "This app can't use the hub right now";
+}
+
+/** Whether an error means the backend does not know the action at all —
+ *  and only that: any other refusal (a bad cursor, a hub that is down, a
+ *  protocol hiccup) is the backend's own sentence, never "update the hub". */
+export function isOlderHub(e: Pick<IpcError, 'code' | 'message'> | null | undefined): boolean {
+  if (!e) return false;
+  // The hub's `work` / `work_link` action enum: `unknown work action "tree";
+  // one of …`.
+  if (e.code === 'E_INVALID') return /\bunknown (?:work(?:_link)? )?action\b/i.test(e.message);
+  // A hub with no such tool at all (rmcp's dispatch refusal).
+  if (e.code === 'E_HUB_PROTOCOL') return /\btool\b.*\bnot found\b|\bunknown tool\b|\bno such tool\b/i.test(e.message);
+  // A desktop build older than the command: Tauri's own refusal.
+  return e.code === 'E_UNKNOWN' && /command\s+\S+\s+not found/i.test(e.message);
 }

@@ -2,7 +2,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { SessionRow, SessionEvent } from './sessions';
 import type { SessionEvent as TimelineEvent } from './timeline';
 import type { HostRow, HostEvent, HostHealth } from './hosts';
-import type { AccountRow } from './accounts';
+import { dropAccounts, type AccountRow } from './accounts';
 import type { ProjectRow, WorktreeRow, ProjectEvent } from './projects';
 import type { TaskRow, TaskEvent } from './tasks';
 import type { AccountUsageSnapshot } from './account_usage_store';
@@ -65,6 +65,10 @@ export type RowEventHandlers = {
   onSessionEvents?: (events: SessionEvent[]) => void;
   onHostEvents?: (events: HostEvent[]) => void;
   onAccountEvents?: (rows: AccountRow[]) => void;
+  /** One call per flush with the uuids of every `account:removed` (w06-5).
+   *  Defaults to `dropAccounts` whenever accounts are wired at all, so a
+   *  deleted account leaves every window, not only the one that asked. */
+  onAccountsRemoved?: (uuids: string[]) => void;
   onProjectEvents?: (events: ProjectEvent[]) => void;
   onTaskEvents?: (events: TaskEvent[]) => void;
   /** One call per flush with every `account_usage:updated` row. */
@@ -163,6 +167,7 @@ type Queued =
     }
   | { name: 'host:removed'; payload: { alias: string } }
   | { name: 'account:upserted'; payload: AccountRow }
+  | { name: 'account:removed'; payload: { uuid: string } }
   | { name: 'project:updated'; payload: ProjectRow }
   | { name: 'worktree:updated'; payload: WorktreeRow }
   | { name: 'worktree:removed'; payload: { id: number } }
@@ -229,6 +234,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     const sessionEvents: SessionEvent[] = [];
     const hostEvents: HostEvent[] = [];
     const accountRows: AccountRow[] = [];
+    const accountsRemoved: string[] = [];
     const projectEvents: ProjectEvent[] = [];
     const taskEvents: TaskEvent[] = [];
     const accountUsageEvents: AccountUsageSnapshot[] = [];
@@ -283,6 +289,9 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
         case 'account:upserted':
           deliver(() => handlers.onAccountUpserted?.(ev.payload));
           accountRows.push(ev.payload);
+          break;
+        case 'account:removed':
+          if (typeof ev.payload?.uuid === 'string') accountsRemoved.push(ev.payload.uuid);
           break;
         case 'project:updated':
           deliver(() => handlers.onProjectUpdated?.(ev.payload));
@@ -375,6 +384,9 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     if (sessionEvents.length > 0) deliver(() => handlers.onSessionEvents?.(sessionEvents));
     if (hostEvents.length > 0) deliver(() => handlers.onHostEvents?.(hostEvents));
     if (accountRows.length > 0) deliver(() => handlers.onAccountEvents?.(accountRows));
+    if (accountsRemoved.length > 0) {
+      deliver(() => (handlers.onAccountsRemoved ?? dropAccounts)(accountsRemoved));
+    }
     if (projectEvents.length > 0) deliver(() => handlers.onProjectEvents?.(projectEvents));
     if (taskEvents.length > 0) deliver(() => handlers.onTaskEvents?.(taskEvents));
     if (accountUsageEvents.length > 0) deliver(() => handlers.onAccountUsageEvents?.(accountUsageEvents));
@@ -408,7 +420,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
       handlers.onHostRemoved ||
       handlers.onHostEvents
     ),
-    account: !!(handlers.onAccountUpserted || handlers.onAccountEvents),
+    account: !!(handlers.onAccountUpserted || handlers.onAccountEvents || handlers.onAccountsRemoved),
     project: !!(
       handlers.onProjectUpdated ||
       handlers.onWorktreeUpdated ||
@@ -459,6 +471,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('host:pinged', wanted.host),
     sub('host:removed', wanted.host),
     sub('account:upserted', wanted.account),
+    sub('account:removed', wanted.account),
     sub('project:updated', wanted.project),
     sub('worktree:updated', wanted.project),
     sub('worktree:removed', wanted.project),

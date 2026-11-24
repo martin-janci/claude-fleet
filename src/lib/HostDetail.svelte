@@ -173,7 +173,7 @@
   }
 
   async function reprovision() {
-    if (provisionBlocked !== null || provisioning) return;
+    if (provisionBlocked !== null || provisioning || (!host.reachable && !isLocal)) return;
     provisioning = true;
     const r = await provisionHost(host.alias);
     provisioning = false;
@@ -182,8 +182,14 @@
       return;
     }
     const mine = r.value.find((x) => x.host === host.alias);
-    if (mine && mine.status === 'failed') {
-      push({ kind: 'error', message: `Re-provisioning ${host.alias} failed: ${mine.detail ?? 'no detail'}` });
+    // Only a row that says it ran is success (review w13-4): an offline
+    // host is `skipped`, and a hidden one is not in the answer at all.
+    if (!mine || mine.status !== 'provisioned') {
+      const why = mine?.detail ?? (mine ? 'no detail' : 'the hub did not provision it (hidden, or not one of its hosts)');
+      push({
+        kind: 'error',
+        message: `${host.alias} was not re-provisioned${mine?.status === 'failed' ? ' (failed)' : ''}: ${why}`,
+      });
       return;
     }
     push({ kind: 'success', message: `${host.alias} re-provisioned` });
@@ -827,8 +833,11 @@
         type="button"
         class="action"
         class:advised={reprovisionAdvised}
-        disabled={provisioning || provisionBlocked !== null}
-        title={provisionBlocked ?? 'Write fleet’s hooks, skills and CLAUDE.md block to this host again'}
+        disabled={provisioning || provisionBlocked !== null || (!host.reachable && !isLocal)}
+        title={provisionBlocked ??
+          (!host.reachable && !isLocal
+            ? `${host.alias} is offline: re-provision it once it answers`
+            : 'Write fleet’s hooks, skills and CLAUDE.md block to this host again')}
         data-testid="detail-reprovision"
         onclick={reprovision}>{provisioning ? 're-provisioning…' : 'Re-provision this host'}</button
       >

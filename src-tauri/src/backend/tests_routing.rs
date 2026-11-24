@@ -3203,6 +3203,23 @@ fn org_admin_mutation_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        (
+            "enable_person",
+            "org_admin",
+            json!({ "action": "enable_person", "person_id": 2 }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::enable_person(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        person_id: Some(2),
+                        ..OrgAdminArgs::new("enable_person")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
     ]
 }
 

@@ -143,7 +143,8 @@ describe('reading a profile', () => {
     });
     const st = await loadProfile('company');
     expect(st.source).toBe('fallback');
-    expect(st.envError).toBe('timed out');
+    // The plain sentence, never the raw text (review w15-6).
+    expect(st.envError).toBe('The hub took too long to answer');
     expect(st.profile?.env).toBeUndefined();
     render(FleetProfiles);
     await vi.waitFor(() => expect(screen.getByTestId('fleet-profile-env-company').textContent).toContain('Could not read the variables'));

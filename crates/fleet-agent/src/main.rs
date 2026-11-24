@@ -19,6 +19,10 @@ fn main() -> ExitCode {
             Err(why) => fail(&why),
         },
         Command::Status(args) => status(args.user),
+        Command::Uninstall(args) => match uninstall_cmd(args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(why) => fail(&why),
+        },
         Command::Update(args) => match update_cmd(args) {
             Ok(true) => ExitCode::SUCCESS,
             Ok(false) => ExitCode::FAILURE,
@@ -62,6 +66,74 @@ fn update_cmd(args: cli::UpdateArgs) -> Result<bool, String> {
     ))
 }
 
+/// `uninstall`: the scope's unit (or LaunchAgent), config and update state.
+fn uninstall_cmd(args: cli::UninstallArgs) -> Result<(), String> {
+    let mut out = std::io::stdout();
+    if cfg!(target_os = "macos") {
+        let home = home().ok_or("uninstall needs $HOME")?;
+        let config_home = config_home().ok_or("uninstall needs $XDG_CONFIG_HOME or $HOME")?;
+        let mut layout = fleet_agent::launchd::Layout::user(&home, &config_home);
+        if let Some(c) = args.config {
+            layout.config_path = c;
+        }
+        let paths = fleet_agent::update::UpdatePaths::user(&home);
+        fleet_agent::launchd::uninstall(
+            uid(),
+            &layout,
+            &paths.state_dir,
+            &mut fleet_agent::launchd::RealLaunchctl,
+            &mut out,
+        )?;
+        binaries_note(&paths);
+        return Ok(());
+    }
+    let (scope, mut layout, paths) = if args.user {
+        let home = home().ok_or("--user needs $HOME")?;
+        let config_home = config_home().ok_or("--user needs $XDG_CONFIG_HOME or $HOME")?;
+        (
+            install::Scope::User,
+            Layout::user(&config_home),
+            fleet_agent::update::UpdatePaths::user(&home),
+        )
+    } else {
+        if !is_root() {
+            return Err(
+                "the system unit needs root: run it with sudo, or pass --user \
+                        for an agent installed with install --user"
+                    .into(),
+            );
+        }
+        (
+            install::Scope::System {
+                run_as: String::new(),
+            },
+            Layout::system(),
+            fleet_agent::update::UpdatePaths::system(),
+        )
+    };
+    if let Some(c) = args.config {
+        layout.config_path = c;
+    }
+    install::uninstall(
+        &scope,
+        &layout,
+        &paths.state_dir,
+        &mut RealSystemctl,
+        &mut out,
+    )?;
+    binaries_note(&paths);
+    Ok(())
+}
+
+/// What `uninstall` leaves: the binaries, which may be in use elsewhere.
+fn binaries_note(paths: &fleet_agent::update::UpdatePaths) {
+    println!(
+        "kept the binaries: {} and {} (remove them by hand when nothing else runs them)",
+        paths.root.display(),
+        paths.default_link.display()
+    );
+}
+
 fn fail(why: &str) -> ExitCode {
     eprintln!("fleet-agent: {why}");
     ExitCode::FAILURE
@@ -91,6 +163,15 @@ fn run(args: cli::RunArgs) -> ExitCode {
         .with(fmt)
         .with(fleet_agent::report::ReportLayer)
         .init();
+    // Settled before the runtime's threads exist: it may set
+    // `RUNTIME_DIRECTORY`, which the hub's `update_now` line reads to know
+    // where to drop `update-now`. And before the config is read: a new
+    // build that cannot start (one that refuses the config) is rolled back
+    // here, never reaching its pass (review w09-2).
+    let self_update = self_update_plan();
+    if let Some(plan) = &self_update {
+        plan.guard_start();
+    }
     // With no flags: the user's own config if there is one, else the system's.
     let default_config = config_home()
         .map(|h| Layout::user(&h).config_path)
@@ -100,10 +181,6 @@ fn run(args: cli::RunArgs) -> ExitCode {
         Ok(c) => c,
         Err(why) => return fail(&why),
     };
-    // Settled before the runtime's threads exist: it may set
-    // `RUNTIME_DIRECTORY`, which the hub's `update_now` line reads to know
-    // where to drop `update-now`.
-    let self_update = self_update_plan();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -136,6 +213,8 @@ fn self_update_plan() -> Option<fleet_agent::self_update::SelfUpdate> {
     // elsewhere it lands in the updater's own directory. `run` watches
     // whichever it is.
     let mut plan = plan;
+    // Before anything can re-point `current` (review w03-1).
+    plan.started_as = fleet_agent::self_update::started_as();
     match std::env::var_os("RUNTIME_DIRECTORY").filter(|d| !d.is_empty()) {
         Some(d) => plan.poke_dir = PathBuf::from(d),
         None => {

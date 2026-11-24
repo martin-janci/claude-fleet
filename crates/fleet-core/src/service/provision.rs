@@ -300,6 +300,20 @@ pub async fn provision_one_with(
     token: &str,
     force_git_tree: bool,
 ) -> Result<(), IpcError> {
+    provision_one_tracked(ssh, host, base, token, force_git_tree, &mut false).await
+}
+
+/// [`provision_one_with`], setting `token_landed` once a file carrying
+/// `token` was written on the host (the MCP entry, step 2): from then on
+/// the host presents it, whatever a later step does (review w13-2).
+async fn provision_one_tracked(
+    ssh: &dyn SshExec,
+    host: &str,
+    base: &HubBase,
+    token: &str,
+    force_git_tree: bool,
+    token_landed: &mut bool,
+) -> Result<(), IpcError> {
     // 0. + 1. Skills (live-discovered, no restart). Both ship from the repo
     //    so every fleet host gets the same shared copy.
     provision_skills(ssh, host, force_git_tree).await?;
@@ -309,6 +323,7 @@ pub async fn provision_one_with(
     provision_claude_md(ssh, host).await?;
     // 2. MCP entry: read → merge (preserve siblings) → back up → write.
     rewrite_mcp_entry(ssh, host, base, token).await?;
+    *token_landed = true;
     // 3. Ensure tmux clipboard passthrough for OSC 52.
     provision_tmux_clipboard(ssh, host).await?;
     // 4. Stop / WorktreeCreate hooks. Required for safe-kill finalization on
@@ -785,14 +800,16 @@ pub async fn provision_content_only(
     host: &str,
     base: &HubBase,
 ) -> Result<Option<String>, IpcError> {
-    let token = {
+    let (token, was_provisioned) = {
         let s = lock(store)?;
-        s.get_host_token(host)?.map(|t| t.token).ok_or_else(|| {
+        let token = s.get_host_token(host)?.map(|t| t.token).ok_or_else(|| {
             IpcError::new(
                 codes::E_NO_TOKEN,
                 format!("{host} has no host token; run a full provision_hosts first"),
             )
-        })?
+        })?;
+        let was = s.get_host_row(host)?.is_some_and(|h| h.provisioned);
+        (token, was)
     };
     // How SessionStart installs and, on an agent host with a hook relay,
     // where the hooks post.
@@ -817,6 +834,16 @@ pub async fn provision_content_only(
     } else {
         None
     };
+    // A host that never had a full run (one added from the app, whose token
+    // `install_agent` or `agent-token` minted) has no MCP entry: this pass
+    // cannot write one, so it must not read "provisioned, not stale" for
+    // good (review w13-1). It stays unprovisioned, and says why.
+    if !was_provisioned {
+        return Ok(Some(format!(
+            "{host}'s skills and hooks were refreshed, but it never had a full provisioning, \
+             so its MCP entry is missing; provision {host} (not content only)"
+        )));
+    }
     // the ag step is retryable, so a warning from it is owed another pass
     mark_provisioned(store, host, warning.as_deref(), warning.is_some());
     Ok(warning)
@@ -1321,7 +1348,28 @@ pub async fn provision_host_with_token(
         let s = lock(store)?;
         base.with_start_context(&s).for_host(&s, host)
     };
-    provision_one_with(ssh, host, base, &token, force_git_tree(store)).await?;
+    let mut landed = false;
+    if let Err(e) =
+        provision_one_tracked(ssh, host, base, &token, force_git_tree(store), &mut landed).await
+    {
+        // A new token the host already holds in a file is committed anyway:
+        // keeping the old one would leave every MCP call and hook from the
+        // host refused until somebody provisions again, while the error
+        // read as "nothing changed" (review w13-2). A non-rotating run
+        // converges every file on the committed token.
+        if minted && landed {
+            commit_host_token(store, host, &token, minted)?;
+            return Err(IpcError::new(
+                &e.code,
+                format!(
+                    "{host} was partly provisioned with its new token, which is now the one \
+                     in use; provision {host} again to finish: {}",
+                    e.message
+                ),
+            ));
+        }
+        return Err(e);
+    }
     commit_host_token(store, host, &token, minted)?;
     // A public hub is reached directly; only a loopback hub needs the
     // reverse tunnel so the host's 127.0.0.1:<port> lands on this machine.
@@ -4115,6 +4163,33 @@ mod tests {
         let row = store.lock().unwrap().get_host_row("h1").unwrap().unwrap();
         assert!(!row.provision_stale);
 
+        // Review w13-1: a host with a token (`install_agent` minted it) but
+        // no full run gets its content, and stays unprovisioned, saying why.
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("h3", Some("h3")).unwrap();
+            // Its own token: `host_tokens.token` is unique across hosts.
+            s.upsert_host_token("h3", "tok-h3-0123456789abcdef")
+                .unwrap();
+        }
+        let warning = provision_content_only(&store, &fresh_host(), "h3", &base())
+            .await
+            .unwrap()
+            .expect("a warning");
+        assert!(
+            warning.contains("never had a full provisioning"),
+            "{warning}"
+        );
+        assert!(
+            !store
+                .lock()
+                .unwrap()
+                .get_host_row("h3")
+                .unwrap()
+                .unwrap()
+                .provisioned
+        );
+
         // A host with no token needs a full provisioning first.
         store.lock().unwrap().insert_host("h2", Some("h2")).unwrap();
         let err = provision_content_only(&store, &fresh_host(), "h2", &base())
@@ -4796,9 +4871,13 @@ mod tests {
             s.set_host_hidden("hid", true).unwrap();
         }
         let fake = fresh_host();
+        // It fails before any file carries its new token (the MCP entry's
+        // `~/.claude.json` does not parse): a failure after that commits the
+        // token (review w13-2, `rotate_mints_a_new_token_*` below); this one keeps
+        // none.
         fake.on_host(
             "broken",
-            Match::script(&remote_read_script(SETTINGS_JSON)),
+            Match::script(&remote_read_script(CLAUDE_JSON)),
             Reply::ok("not json"),
         );
         let tunnels = quiet_tunnels();
@@ -4992,10 +5071,11 @@ mod tests {
             .unwrap()
             .token;
 
-        // Rotation against a host that now fails: the OLD token stays.
+        // Rotation against a host that fails before any file carries the
+        // new token: the OLD token stays.
         let failing = provisioned_host();
         failing.on(
-            Match::script(&remote_read_script(SETTINGS_JSON)),
+            Match::script(&remote_read_script(CLAUDE_JSON)),
             Reply::ok("{broken"),
         );
         let err = provision_host_with_token(&store, &failing, &tunnels, "h", &base(), true)
@@ -5010,6 +5090,38 @@ mod tests {
             .unwrap()
             .token;
         assert_eq!(after_fail, first, "a failed rotate never strands the host");
+
+        // Review w13-2: one that fails AFTER the MCP entry took the new token
+        // (the hooks' settings.json does not parse) commits it, and says so:
+        // the host presents the new one from now on.
+        let partly = provisioned_host();
+        partly.on(
+            Match::script(&remote_read_script(SETTINGS_JSON)),
+            Reply::ok("{broken"),
+        );
+        let err = provision_host_with_token(&store, &partly, &tunnels, "h", &base(), true)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "E_PROVISION");
+        assert!(
+            err.message.contains("partly provisioned"),
+            "{}",
+            err.message
+        );
+        let committed = store
+            .lock()
+            .unwrap()
+            .get_host_token("h")
+            .unwrap()
+            .unwrap()
+            .token;
+        assert_ne!(committed, first);
+        assert!(partly
+            .calls()
+            .iter()
+            .filter_map(Call::stdin_str)
+            .any(|u| u.contains(&committed)));
+        let first = committed;
 
         // Rotation that succeeds persists the new token the host received.
         let ok = provisioned_host();

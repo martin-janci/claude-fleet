@@ -35,6 +35,18 @@ const KILL_MEMORY_SECS: i64 = 2
     * (crate::service::sessions::HOST_PROBE_TIMEOUT.as_secs()
         + crate::service::sessions::PR_PROBE_TIMEOUT.as_secs()) as i64;
 
+/// The one condition both [`PROCESS_DIED_CASE`] and [`PERSON_ENDED`] read
+/// (review 23b w19-3): a row with live hooks and a conversation in an agent
+/// pane. [`PERSON_ENDED`] infers "its person ended it" from a ghost the
+/// case left `missing`, which holds only while the two agree, so they are
+/// built from this one text. A macro, so both stay `const`.
+macro_rules! agent_conversation {
+    () => {
+        "claude_session_id IS NOT NULL AND last_hook_at IS NOT NULL \
+         AND kind NOT IN ('shell', 'bg', 'external') AND agent != 'shell'"
+    };
+}
+
 /// The `lost_reason` [`Store::ghost_and_clean`]'s Phase 1 records for a
 /// tmux row that dropped out of the live set: `process_died` when the row
 /// carries every sign that its agent was killed rather than ended, else
@@ -58,19 +70,17 @@ const KILL_MEMORY_SECS: i64 = 2
 /// auto-restore tick (`service::auto_restore`) — or a person — can bring it
 /// back. A row without hooks is left `missing`: fleet cannot tell how it
 /// ended, and guessing "killed" would resurrect sessions people closed.
-pub(super) const PROCESS_DIED_CASE: &str = "CASE WHEN claude_session_id IS NOT NULL \
-     AND last_hook_at IS NOT NULL \
-     AND COALESCE(claude_status, '') != 'stopped' \
-     AND kind NOT IN ('shell', 'bg', 'external') AND agent != 'shell' \
-     THEN 'process_died' ELSE 'missing' END";
+pub(super) const PROCESS_DIED_CASE: &str = concat!(
+    "CASE WHEN ",
+    agent_conversation!(),
+    " AND COALESCE(claude_status, '') != 'stopped' THEN 'process_died' ELSE 'missing' END"
+);
 
 /// A ghost [`PROCESS_DIED_CASE`] left `missing` although it had live hooks
 /// and a conversation in an agent pane: it said `stopped` (SessionEnd), so
 /// its person ended it. A mass-loss verdict must not relabel it resumable
 /// (`Store::mark_host_sessions_lost`, review w13-1).
-pub(super) const PERSON_ENDED: &str = "claude_session_id IS NOT NULL \
-     AND last_hook_at IS NOT NULL \
-     AND kind NOT IN ('shell', 'bg', 'external') AND agent != 'shell'";
+pub(super) const PERSON_ENDED: &str = agent_conversation!();
 
 /// How much of a failed probe's message the host row keeps.
 const PROBE_ERROR_CHARS: usize = 200;
@@ -1076,6 +1086,7 @@ impl Store {
                 ),
                 params_then(rusqlite::params![now], &pre_ghost_ids).as_slice(),
             )?;
+            Store::release_pr_openers_in(tx, &pre_ghost_ids)?;
             tx.execute(
                 &format!("DELETE FROM sessions WHERE id IN ({phs})"),
                 rusqlite::params_from_iter(&pre_ghost_ids),

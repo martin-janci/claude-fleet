@@ -2380,10 +2380,19 @@
    * expired allow-list entry, most likely) is shown the same way a failed
    * pick is, rather than falling back to an unmeasured attachment.
    */
+  const LEFT_OUT = "Left out what isn't a file: folders can't be attached — zip it first.";
+
   async function describeDroppedPaths(paths: string[]) {
     const r = await invokeCmd<PickedFile[]>('attachment_describe', { paths });
-    if (r.ok) await attach(r.value ?? []);
-    else attachErrors = [errorText(r.error)];
+    if (!r.ok) {
+      attachErrors = [errorText(r.error)];
+      return;
+    }
+    const got = r.value ?? [];
+    await attach(got);
+    // A folder is left out in Rust (review w11-6): say so rather than
+    // dropping it silently.
+    if (got.length < paths.length) attachErrors = [...attachErrors, LEFT_OUT];
   }
 
   function onDroppedPaths(paths: string[]) {

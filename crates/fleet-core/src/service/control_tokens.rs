@@ -133,7 +133,8 @@ pub enum Minter {
     Admin,
     /// The owner's own trusted, full paired device: read or act, never
     /// admin, which would hand a device the fleet-admin tools it is refused.
-    OwnerDevice,
+    /// `person` is the device's, recorded as the token's creator.
+    OwnerDevice { person: Option<i64> },
 }
 
 /// Create a named token. `E_VALIDATE` for a bad name, scope, expiry or host
@@ -199,6 +200,10 @@ pub fn create(
         scope,
         hosts: hosts.as_deref(),
         expires_at,
+        created_by_person: match minter {
+            Minter::OwnerDevice { person } => person,
+            Minter::Admin => None,
+        },
     })?;
     Ok(Created {
         env_line: format!("{ENV_VAR}={token}"),
@@ -263,12 +268,43 @@ mod tests {
         assert!(!json.contains(&c.token), "the list never carries the token");
     }
 
+    /// Round-2 review w11-1: a token a person's device created is revoked
+    /// when that person is disabled; the master's and others' stay.
+    #[test]
+    fn disabling_a_person_revokes_the_tokens_their_device_created() {
+        let st = store();
+        let ada = lock(&st).unwrap().create_person("ada", None).unwrap().id;
+        create(
+            &st,
+            Minter::OwnerDevice { person: Some(ada) },
+            &args("adas", "act"),
+            0,
+        )
+        .unwrap();
+        create(&st, Minter::Admin, &args("ops", "read"), 0).unwrap();
+        lock(&st).unwrap().disable_person(ada).unwrap();
+        let live: Vec<String> = list(&st).unwrap().into_iter().map(|r| r.name).collect();
+        assert_eq!(live, ["ops"]);
+    }
+
     #[test]
     fn a_device_cannot_mint_admin_and_bad_input_is_refused() {
         let st = store();
-        let e = create(&st, Minter::OwnerDevice, &args("root", "admin"), 0).unwrap_err();
+        let e = create(
+            &st,
+            Minter::OwnerDevice { person: None },
+            &args("root", "admin"),
+            0,
+        )
+        .unwrap_err();
         assert_eq!(e.code, codes::E_FORBIDDEN);
-        assert!(create(&st, Minter::OwnerDevice, &args("ci", "act"), 0).is_ok());
+        assert!(create(
+            &st,
+            Minter::OwnerDevice { person: None },
+            &args("ci", "act"),
+            0
+        )
+        .is_ok());
         assert_eq!(
             create(&st, Minter::Admin, &args("x", "write"), 0)
                 .unwrap_err()

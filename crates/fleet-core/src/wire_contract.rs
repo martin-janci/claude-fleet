@@ -369,4 +369,29 @@
 //!   The agent link's `HubFrame::Welcome.host_alias` is new without an
 //!   agent-proto bump; `fleet_proto::identity` says how each end reads its
 //!   absence.
+//!   Also new without a bump since 0.6.5 (reviews w18-4, w20-8), each
+//!   additive. A host login's `conflicted` (`HostLogin`, absent when
+//!   false): a hub without it never sends one, which reads as no login
+//!   conflict. A routine preview's `zoned` (absent when false): a hub
+//!   without it reads only the offset, so a client shows `next_runs` at
+//!   that offset. `add_account {action: "remove"}` and its refusal's
+//!   `details.uses`: a hub without them answers `E_INVALID` (unknown action
+//!   "remove"), which the desktop's Remove profile shows as it is.
+//!   `check_account_headroom`'s `model` and `work {action: "missions",
+//!   waiting}`: a hub without them ignores them, so no model window counts
+//!   in its headroom and it answers every mission, not only the waiting
+//!   ones. `confirm_nonce` on `session_share`, `session_unshare`,
+//!   `session_narrow`, `review_request` and `access_requests`: a hub
+//!   without it ignores it and runs Control's call without a card.
+//!   `remove_host {delete_login_profiles}` and its reply's
+//!   `login_profiles`: a hub without them ignores the flag, keeps the
+//!   profiles and sends no key. `merge_project`'s `review_rules_moved` and
+//!   `routine_filters_moved`: absent from a hub without them, read as none
+//!   moved. The mission event `planner_failed`: a hub without it never
+//!   writes one, and a client drops an event name it does not know. The
+//!   hook bearer of a relay host's hooks (`fhk1_…`, review w10-5, good on
+//!   `/hook` and `/voice/capture` only): a hub without it writes the host
+//!   token instead, and the agent relays either unchanged.
+//!   `queue_prompt {client_msg_id}` (review w17-3): a hub without it
+//!   ignores it, so a retried queue is queued twice there, as before.
 pub const CONTRACT_REVISION: u32 = 18;
