@@ -192,7 +192,9 @@ profile }`, review w11-7). Fleet:
 
 - refuses while a live session runs under the profile (`E_INVALID_STATE`,
   naming them in the message and in `details.sessions`): end or switch them
-  first. A ghost or lost row does not count;
+  first. A ghost or lost row does not count: it lets go of the profile's
+  name (`sessions_reset` in the reply), so a later Resume or Restore of it
+  runs on the host's own login instead of recreating the profile empty;
 - refuses while a routine, a start rule or a live mission grant names the
   profile on that host (`E_INVALID_STATE`, naming each in the message and
   in `details.uses`): point them at another login first, or the next run
@@ -270,7 +272,9 @@ left it is refused (`E_ACCOUNT_FORBIDDEN` naming `suggested_profile`,
 again when a deferred move runs. A session already running on an account
 its project forbade later, whose account the target has a login on, is
 refused rather than moved onto another account. When fleet does not know the session's account,
-the profile name is kept as it was, held to the same refusals.
+the profile name is kept as it was where the target has that login, held to
+the same refusals; where it does not, the move takes the login a start
+nobody chose a login for would take there.
 
 ### Folder trust follows the login
 

@@ -1322,6 +1322,72 @@ fn a_run_goes_to_the_best_host_inside_its_grant() {
     assert_eq!(start.profile, None);
 }
 
+/// Review w06-3: a retry goes to the host of the earlier work under the
+/// grant's login only when that host has the login; else it stays where
+/// the grant's login is, not at `/login` under an empty profile.
+#[test]
+fn a_retry_follows_the_earlier_work_only_to_a_host_with_the_grants_login() {
+    let fx = fixture();
+    let item = member(&fx, "a");
+    let g = grant(
+        &WorkLinkArgs {
+            level: Some(2),
+            hosts: Some(vec!["mac".into(), "htz".into()]),
+            profile: Some("work".into()),
+            ..by_id("mission_grant", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    let s = lock(&fx.deps.store).unwrap();
+    let now = now_unix();
+    let seed = crate::service::account_limits::seed_usage;
+    seed(&s, "mac", Some("work"), "acct-work", 10.0, now);
+    seed(&s, "htz", None, "acct-htz", 10.0, now);
+    crate::service::account_limits::ready_host(&s, "mac");
+    crate::service::account_limits::ready_host(&s, "htz");
+    // The first run was on htz, in a checkout of its own.
+    let pid = s.upsert_project("o", "r", "/src/r").unwrap();
+    let wt = s
+        .upsert_worktree_on(
+            "htz",
+            pid,
+            "task-a",
+            "/src/r/.worktrees/task-a",
+            Some("task-a"),
+        )
+        .unwrap();
+    let worker = s
+        .upsert_session(
+            "dev-task-a",
+            "htz",
+            Some(pid),
+            Some(wt),
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+    crate::service::work::run::record_run(&s, worker, "do it", item, 1, "implement").unwrap();
+    let start = start_for(&s, &fx.m, item, &Actor::Loop, Some(&g)).unwrap();
+    assert_eq!(
+        start.host_alias.as_deref(),
+        Some("mac"),
+        "htz has no `work`"
+    );
+    assert_eq!(start.profile.as_deref(), Some("work"));
+    seed(&s, "htz", Some("work"), "acct-work", 10.0, now);
+    let start = start_for(&s, &fx.m, item, &Actor::Loop, Some(&g)).unwrap();
+    assert_eq!(
+        start.host_alias.as_deref(),
+        Some("htz"),
+        "where the work is"
+    );
+    assert_eq!(start.profile.as_deref(), Some("work"));
+}
+
 /// Accounts review: the planner reads the mission (and, with
 /// `planner_reads`, its repository), so it never runs on a login whose
 /// account the mission's project forbids; with no other login it refuses
