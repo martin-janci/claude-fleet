@@ -62,7 +62,7 @@ fi
 
 # X.Y.Z, or X.Y.Z-<pre> for a release candidate. The pre-release suffix is the
 # review channel that replaced the draft habit: `v0.3.0-rc.1` builds the same
-# eleven assets, is published like any other release, and is marked
+# assets (docs/RELEASING.md counts them), is published like any other release, and is marked
 # `prerelease: true` by release.yml so it never becomes the download users
 # land on and never moves ghcr's `fleet-hub:latest`.
 #

@@ -8,7 +8,7 @@ all of them, **fails the run unless the release is complete** — and then
 **publishes the release itself**. There is no button to press afterwards.
 
 The version is the one decision left to a human. Everything after
-`git push --follow-tags` is automatic, and everything before it is checked:
+`git push --atomic origin main --follow-tags` is automatic, and everything before it is checked:
 the script refuses to tag unless [CI is green on the commit you are
 releasing](#the-ci-gate).
 
@@ -65,15 +65,19 @@ generated from it.
    the version's header, keeps its text, and adds the generated bullets
    after it (without one, it inserts a fresh section as before).
 
-4. Push the release commit and tag:
+4. Push the release commit and tag, with the command the script prints:
 
    ```bash
-   git push origin main --follow-tags
+   git push --atomic origin main --follow-tags
    ```
+
+   `--atomic` is not optional: without it a `main` that moved under you is
+   rejected while the tag still lands, and a pushed tag publishes
+   (see [The CI gate](#the-ci-gate)).
 
 5. Wait for the `release` workflow to finish (it starts on the tag push).
    `verify-release` goes red if anything is missing; when it passes, the
-   `publish` job publishes the release — all 14 assets, including a
+   `publish` job publishes the release — all 16 assets (listed under [The assets](#the-assets)), including a
    `SHA256SUMS` covering every other one, and this version's CHANGELOG
    section as the notes. A green run means the release is live.
 
@@ -121,9 +125,14 @@ and the app reports that version in its Settings screen.
 - **Debug builds** install as a separate app, `dev.claudefleet.mobile.debug`
   ("fleet-mobile debug"), because they carry the building machine's debug key
   and Android will not update a release-signed app with it.
-- **versionCode** is fleet-mobile's release-workflow run number, so it only
-  grows; `versionName` is the tag without the `v`.
-- **iOS** is not released: there is no signing identity for it yet.
+- **versionCode** is the number of minutes since 2026-01-01 00:00 UTC at
+  build time (fleet-mobile `release.yml`, "Compute the versionCode"), so it
+  only grows across tag and dev builds alike; `versionName` is the tag
+  without the `v`.
+- **iOS** goes to TestFlight, not to a store: fleet-mobile's `testflight.yml`
+  archives, signs and uploads the build on every stable `v*` tag (a tag with
+  a pre-release suffix, a dev build or a manual dispatch only proves the
+  signing). It has no part in the update manifest.
 - **Its place in the update manifest** (update design §4, S8; owner's answer
   to §13.2). fleet-mobile's release publishes a versioned
   `fleet-mobile-<v>.apk` with a `SHA256SUMS`, then sends this repository a
@@ -135,7 +144,8 @@ and the app reports that version in its Settings screen.
   every track that carries the release (`scripts/update-channels.sh amend`).
   Hubs then offer the APK to paired phones. The dispatch needs a token that
   can trigger workflows here: the fine-grained token in fleet-mobile's
-  `FLEET_DISPATCH_TOKEN` secret (Actions: write on claude-fleet only). Without
+  `FLEET_DISPATCH_TOKEN` secret (Contents: write on claude-fleet only, which
+  is what `POST /repos/…/dispatches` requires; Actions: write alone gets 403). Without
   it the APK still ships; phones are just not offered it until someone runs
   `android-amendment.yml` by hand with the same fields.
 
@@ -375,7 +385,7 @@ tag and nothing else:
 
 ```bash
 scripts/release.sh 0.3.0-rc.1
-git push origin main --follow-tags
+git push --atomic origin main --follow-tags
 # … test it … then cut the real thing:
 scripts/release.sh auto          # from 0.3.0-rc.1, `auto` gives you 0.3.0
 ```
@@ -410,8 +420,10 @@ that `main` commit, pushes **only the tag** (the commit is on no branch;
 by itself. From there it is an ordinary pre-release: same gate, same
 manifest (its `release.track` says `nightly`, which every hub reads),
 published, and listed by the `channel` job. The newest 15 dev releases are
-kept, plus whatever `nightly.json` still lists; older ones lose their
-release and their tag. `workflow_dispatch` cuts one now from the newest
+kept, plus whatever `nightly.json` and `dev.json` still list; older ones
+lose their release and their tag (a channel file that cannot be read skips
+the pruning for that run). A re-run of the nightly job for a tag that exists
+dispatches whichever of the two workflows has no run at it. `workflow_dispatch` cuts one now from the newest
 green `main`. A version without `.desktop.` (`scripts/release-assets.sh
 has-desktop`) still builds no desktop legs, for a cut by hand.
 
@@ -470,9 +482,15 @@ exist. It reports:
    tagged). Tags with no release on purpose are listed in
    `.github/release-drift-ignore`;
 2. a draft older than six hours — since publication is automatic, a
-   lingering draft means a leg failed and nobody went back to it;
-3. the newest ten releases still carrying every asset, checked by
-   `scripts/verify-release.sh` itself — not a second copy of the rule;
+   lingering draft means a leg failed and nobody went back to it. Zero
+   drafts counts as clean because the workflow states its token lists them
+   (`DRIFT_SEES_DRAFTS=1`, true while it holds `contents: write`); run by
+   hand with a read-only token, the script says "not checked" instead;
+3. the newest ten stable / rc releases and the newest two published dev
+   releases still carrying every asset, checked by
+   `scripts/verify-release.sh` itself — not a second copy of the rule. Dev
+   releases are counted apart because they sort above every stable one; a
+   draft younger than six hours is still being built and is not verified;
 4. a release whose tag no longer resolves;
 5. the hub image pin in `deploy/hub/docker-compose.yml` actually resolving in
    ghcr. This is the only check that looks outside GitHub, and it is the only
