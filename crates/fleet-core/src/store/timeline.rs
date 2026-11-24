@@ -248,6 +248,25 @@ impl Store {
                 rusqlite::params![session_id, at, kind, detail, claude_session_id],
             )?;
             let id = self.conn.last_insert_rowid();
+            // An audit row pushes out only older audit rows
+            // (`SESSION_AUDIT_EVENTS_CAP`), before the shared cap below is
+            // looked at: the session's own history is not an audit flood's
+            // to prune.
+            if kind == AUDIT_EVENT_KIND {
+                let audits: i64 = self.conn.query_row(
+                    "SELECT COUNT(*) FROM session_events WHERE session_id = ?1 AND kind = ?2",
+                    rusqlite::params![session_id, AUDIT_EVENT_KIND],
+                    |row| row.get(0),
+                )?;
+                if audits > SESSION_AUDIT_EVENTS_CAP {
+                    self.conn.execute(
+                        "DELETE FROM session_events WHERE session_id=?1 AND kind=?2 AND id NOT IN (\
+                               SELECT id FROM session_events WHERE session_id=?1 AND kind=?2 \
+                               ORDER BY at DESC, id DESC LIMIT ?3)",
+                        rusqlite::params![session_id, AUDIT_EVENT_KIND, SESSION_AUDIT_EVENTS_CAP],
+                    )?;
+                }
+            }
             // Prune only when actually over the cap: a cheap indexed
             // COUNT(*) (idx_session_events_session covers session_id)
             // instead of unconditionally running the DELETE…NOT IN subquery
@@ -1196,6 +1215,52 @@ mod tests {
         );
         // The other session's timeline is untouched.
         assert_eq!(s.list_session_events(8, 50).unwrap().len(), 1);
+    }
+
+    /// Audit rows have a cap of their own inside the timeline's: a flood of
+    /// them (every mutating tool call that names the session writes one,
+    /// refused calls included) pushes out older audit rows and nothing else.
+    /// Under the one shared cap, 500 refused calls by somebody who may only
+    /// watch the session pruned its whole history.
+    #[test]
+    fn audit_rows_push_out_only_older_audit_rows() {
+        let s = Store::open_in_memory().expect("open");
+        let history = SESSION_EVENTS_CAP - SESSION_AUDIT_EVENTS_CAP;
+        for i in 0..history {
+            s.insert_session_event(7, "prompt_sent", Some(&format!("p{i}")))
+                .unwrap();
+        }
+        for i in 0..(SESSION_EVENTS_CAP * 2) {
+            s.insert_session_event(7, AUDIT_EVENT_KIND, Some(&format!("kill_session by x {i}")))
+                .unwrap();
+        }
+        let count = |kind_is_audit: bool| -> i64 {
+            s.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM session_events \
+                     WHERE session_id=7 AND (kind = ?1) = ?2",
+                    rusqlite::params![AUDIT_EVENT_KIND, kind_is_audit],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(count(false), history, "the session's own history is whole");
+        assert_eq!(count(true), SESSION_AUDIT_EVENTS_CAP);
+        // The newest audit rows are the ones kept.
+        let newest = s.list_session_events(7, 1).unwrap();
+        assert_eq!(
+            newest[0].detail.as_deref(),
+            Some(&*format!(
+                "kill_session by x {}",
+                SESSION_EVENTS_CAP * 2 - 1
+            ))
+        );
+        // The shared cap still holds for everything together.
+        for i in 0..(SESSION_EVENTS_CAP + 5) {
+            s.insert_session_event(7, "prompt_sent", Some(&format!("q{i}")))
+                .unwrap();
+        }
+        assert_eq!(count(false) + count(true), SESSION_EVENTS_CAP);
     }
 
     #[test]

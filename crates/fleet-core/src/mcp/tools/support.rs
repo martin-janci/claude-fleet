@@ -1074,29 +1074,53 @@ pub(super) fn normalize_tags(tags: Vec<String>) -> Result<Vec<String>, McpError>
 /// own addressing arguments; falls back to the registered controller (the
 /// desktop / orchestrating agent). `None` when nothing resolves — the row
 /// is then skipped rather than attached to the wrong session.
-pub(super) fn find_audit_session(store: &Store, args: Option<&JsonObject>) -> Option<i64> {
-    let by_id = |key: &str| args.and_then(|a| a.get(key)).and_then(|v| v.as_i64());
-    if let Some(id) = by_id("session_id").or_else(|| by_id("from_session_id")) {
-        return Some(id);
+///
+/// A session the arguments name takes the row only when it exists and
+/// `caller` may see it ([`ViewScope::sees_session_row`], the base of every
+/// reach a tool asks for). The row is written before any gate, so the id is
+/// whatever the caller typed: an id that names nothing left a row no prune
+/// ever reached, and an id of somebody else's session put this caller's
+/// calls on a timeline it may not read, pushing that session's own events
+/// out past the cap. Such a call is refused by its tool a moment later; it
+/// stays on record on the controller's timeline.
+///
+/// [`ViewScope::sees_session_row`]: crate::service::view_scope::ViewScope::sees_session_row
+pub(super) fn find_audit_session(
+    store: &Store,
+    args: Option<&JsonObject>,
+    caller: &Caller,
+) -> Option<i64> {
+    if let Some(row) = named_session(store, args) {
+        let seen = caller
+            .view_scope(store)
+            .is_ok_and(|scope| scope.sees_session_row(&row).is_visible());
+        if seen {
+            return Some(row.id);
+        }
     }
-    if let Some(id) = by_id("source_session_id") {
-        return Some(id);
+    let (host, name) = store.get_controller().ok().flatten()?;
+    store.get_session(&name, &host).ok().flatten().map(|r| r.id)
+}
+
+/// The session a call's arguments address, when they name one that exists:
+/// by id (`session_id`, `from_session_id`, `source_session_id`), else by
+/// `host_alias` and `tmux_name` / `name`.
+fn named_session(store: &Store, args: Option<&JsonObject>) -> Option<crate::store::SessionRow> {
+    let by_id = |key: &str| args.and_then(|a| a.get(key)).and_then(|v| v.as_i64());
+    if let Some(id) = by_id("session_id")
+        .or_else(|| by_id("from_session_id"))
+        .or_else(|| by_id("source_session_id"))
+    {
+        return store.get_session_by_id(id).ok().flatten();
     }
     let by_str = |key: &str| {
         args.and_then(|a| a.get(key))
             .and_then(|v| v.as_str())
             .map(str::to_string)
     };
-    if let (Some(host), Some(name)) = (
-        by_str("host_alias"),
-        by_str("tmux_name").or_else(|| by_str("name")),
-    ) {
-        if let Ok(Some(row)) = store.get_session(&name, &host) {
-            return Some(row.id);
-        }
-    }
-    let (host, name) = store.get_controller().ok().flatten()?;
-    store.get_session(&name, &host).ok().flatten().map(|r| r.id)
+    let host = by_str("host_alias")?;
+    let name = by_str("tmux_name").or_else(|| by_str("name"))?;
+    store.get_session(&name, &host).ok().flatten()
 }
 
 /// Persist an audit row for a tool call into `session_events` (kind
@@ -1132,6 +1156,13 @@ pub(super) fn persist_audit(
     if caller.mode.is_single_purpose() {
         return;
     }
+    // A name that is no tool leaves no row either. The router refuses it a
+    // moment later, and until then `tool` is the caller's own text, of any
+    // length the body cap admits: it used to be stored whole, and kept in
+    // the event bus's replay ring, for every token that reaches `/mcp`.
+    if guard::policy(tool).is_none() {
+        return;
+    }
     // Task 2: a read-only tool (`guard::READONLY_TOOLS` — the exact set a
     // `readonly` token may call) writes NO audit row at all, not even a
     // quiet one. The tracing `audit()` line above (called separately, from
@@ -1156,7 +1187,7 @@ pub(super) fn persist_audit(
         return;
     }
     let Ok(s) = store.lock() else { return };
-    let Some(session_id) = find_audit_session(&s, args) else {
+    let Some(session_id) = find_audit_session(&s, args, caller) else {
         return;
     };
     let summary = guard::redact_args(args);
@@ -1165,7 +1196,11 @@ pub(super) fn persist_audit(
     } else {
         format!("{tool} by {}: {summary}", caller.label())
     };
-    let _ = s.insert_session_event(session_id, "mcp_call", Some(&guard::scrub_line(&detail)));
+    let _ = s.insert_session_event(
+        session_id,
+        crate::store::AUDIT_EVENT_KIND,
+        Some(&guard::scrub_line(&detail)),
+    );
 }
 
 /// Describe the origin of a delivered prompt for the untrusted-content marker.

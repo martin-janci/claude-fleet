@@ -2236,6 +2236,18 @@ pub struct HostReconcile<'a> {
 /// status-flapping session cannot grow the table without bound.
 pub const SESSION_EVENTS_CAP: i64 = 500;
 
+/// Of those, how many may be `mcp_call` audit rows. An audit row is written
+/// for every mutating tool call that names the session, refused calls
+/// included, by whoever makes it: under the one shared cap, a caller who may
+/// only watch a session could push its whole history (status changes, sent
+/// prompts, kills) out with refused calls. With a cap of their own, audit
+/// rows push out only older audit rows.
+pub const SESSION_AUDIT_EVENTS_CAP: i64 = 200;
+
+/// The `session_events.kind` of a tool call's audit row
+/// (`mcp::tools::support::persist_audit`).
+pub const AUDIT_EVENT_KIND: &str = "mcp_call";
+
 /// Max chars of a prompt kept in `sessions.last_prompt`.
 pub const LAST_PROMPT_CHARS: usize = 200;
 

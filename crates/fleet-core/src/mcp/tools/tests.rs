@@ -1104,11 +1104,13 @@ fn audit_row_lands_on_target_session_with_redacted_args() {
         "tmux_name": "dev-x",
         "prompt": "the secret prompt body"
     });
+    // The host's own agent: the row is unclaimed and on its host, so it may
+    // see it, which is what puts the audit row there.
     persist_audit(
         &store,
         "send_prompt",
         args.as_object(),
-        &host_caller("turanga", TokenMode::Full),
+        &host_caller("mefistos", TokenMode::Full),
     );
     {
         let s = store.lock().unwrap();
@@ -1119,7 +1121,7 @@ fn audit_row_lands_on_target_session_with_redacted_args() {
             .expect("mcp_call event");
         let detail = row.detail.as_deref().unwrap();
         assert!(
-            detail.starts_with("send_prompt by host:turanga:"),
+            detail.starts_with("send_prompt by host:mefistos:"),
             "{detail}"
         );
         assert!(!detail.contains("secret prompt body"), "{detail}");
@@ -1564,6 +1566,121 @@ fn a_refused_peer_call_writes_no_audit_row() {
     assert!(
         !events.iter().any(|e| e.kind == "mcp_call"),
         "a peer caller's refused tool call must not persist an audit row: {events:?}"
+    );
+}
+
+/// The audit row is written before any gate, so the tool's name is the
+/// caller's own text until the router refuses it: a name that is no tool
+/// (here 4 MiB of it) leaves no row, on the controller's timeline or any
+/// other, for every kind of token.
+#[test]
+fn an_invented_tool_name_writes_no_audit_row() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        id
+    };
+    let huge = "x".repeat(4 * 1024 * 1024);
+    let args = serde_json::json!({ "session_id": id });
+    for caller in [
+        Caller::master(),
+        host_caller("local", TokenMode::Full),
+        host_caller("local", TokenMode::Readonly),
+        client_caller("phone", TokenMode::Readonly),
+    ] {
+        for tool in [
+            "no_such_tool",
+            "kill_session ",
+            "Kill_Session",
+            huge.as_str(),
+        ] {
+            assert!(guard::policy(tool).is_none());
+            persist_audit(&store, tool, args.as_object(), &caller);
+            persist_audit(&store, tool, None, &caller);
+        }
+    }
+    // The controller's timeline is where both shapes would have landed: it
+    // is the session the arguments name, and the fallback without them.
+    let s = store.lock().unwrap();
+    assert!(
+        s.list_session_events(id, 50).unwrap().is_empty(),
+        "a name that is no tool must leave no row"
+    );
+}
+
+/// A session the arguments name takes the row only when it exists and the
+/// caller may see it. Before, the id was used as typed: one that names
+/// nothing left rows no prune ever reached, and another host's session took
+/// rows written by an agent that may not read it, which pushed that
+/// session's own events out past the timeline cap. Such a call is still on
+/// record, on the controller's timeline.
+#[test]
+fn an_audit_row_never_lands_on_a_session_the_caller_cannot_see() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let (ctl, theirs) = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_host("mefistos").unwrap();
+        s.upsert_host("turanga").unwrap();
+        let ctl = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        let theirs = s
+            .upsert_session("dev-x", "mefistos", None, None, 0, 0, "running", None)
+            .unwrap();
+        (ctl, theirs)
+    };
+    // An agent on another host: `dev-x` is not its to see (§4.4).
+    let stranger = host_caller("turanga", TokenMode::Full);
+    let missing = 987_654_321_i64;
+    for args in [
+        serde_json::json!({ "session_id": theirs }),
+        serde_json::json!({ "from_session_id": theirs }),
+        serde_json::json!({ "source_session_id": theirs }),
+        serde_json::json!({ "host_alias": "mefistos", "tmux_name": "dev-x" }),
+        serde_json::json!({ "host_alias": "mefistos", "name": "dev-x" }),
+        serde_json::json!({ "session_id": missing }),
+    ] {
+        persist_audit(&store, "kill_session", args.as_object(), &stranger);
+    }
+    let s = store.lock().unwrap();
+    let on = |id: i64| {
+        s.list_session_events(id, 50)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "mcp_call")
+            .count()
+    };
+    assert_eq!(on(theirs), 0, "nothing on a session the caller cannot see");
+    assert_eq!(on(missing), 0, "nothing under an id that names no session");
+    assert_eq!(
+        on(ctl),
+        6,
+        "each refused call is on the controller's timeline"
+    );
+    // The session's own agent names it and the row lands there, as before.
+    drop(s);
+    let args = serde_json::json!({ "session_id": theirs });
+    persist_audit(
+        &store,
+        "kill_session",
+        args.as_object(),
+        &host_caller("mefistos", TokenMode::Full),
+    );
+    let s = store.lock().unwrap();
+    assert_eq!(
+        s.list_session_events(theirs, 50)
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == "mcp_call")
+            .count(),
+        1
     );
 }
 

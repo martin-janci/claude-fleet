@@ -2319,7 +2319,13 @@ automatically on app start.
   a read or polled action of a mixed tool (`guard::is_quiet_call`:
   `routines` `list` / `get` / `failing` / `budget` / `runs`, `debug_devices`
   `list`, `control_auto_continue` `status`, …) and any call of a
-  single-purpose token; the stderr line is their only record.
+  single-purpose token; the stderr line is their only record. The row is
+  written before the call is judged, so a refused call is on the timeline
+  too, within three limits: a name that is no tool leaves no row; the
+  session the arguments name takes the row only when it exists and the
+  caller may see it, and otherwise the row goes to the controller's
+  timeline; and a session keeps its newest 200 `mcp_call` rows inside the
+  500 its timeline holds, so audit rows push out only older audit rows.
 
 ## Verifying it works
 
