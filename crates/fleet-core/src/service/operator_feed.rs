@@ -804,7 +804,9 @@ fn conditions(
         let Ok(Some(mut m)) = s.get_mission(id) else {
             continue;
         };
-        if m.state != "active" {
+        // A paused mission waits while a brake's question is open (review
+        // 23b w09-1).
+        if !matches!(m.state.as_str(), "active" | "paused") {
             continue;
         }
         if crate::service::work::orchestrate::fill_spend(s, &mut m, now).is_err() {

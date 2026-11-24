@@ -1,17 +1,20 @@
 // Today's morning brief (step 9.11): only the newest read lands.
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import MorningBrief from './MorningBrief.svelte';
+import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 
 async function flush() {
   for (let i = 0; i < 10; i++) await tick();
 }
 
 describe('MorningBrief', () => {
+  beforeEach(() => fleetSettings.set({ ...SETTING_DEFAULTS, 'work.draft_morning_brief': 'true' }));
+
   it('the opening read answering after a Draft does not put the old brief back (review r07)', async () => {
     let releaseOpen: (() => void) | null = null;
     vi.mocked(invoke).mockImplementation(async (cmd: string, raw?: unknown) => {

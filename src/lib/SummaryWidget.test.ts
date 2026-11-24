@@ -6,6 +6,7 @@ import { invoke } from '@tauri-apps/api/core';
 import SummaryWidget from './SummaryWidget.svelte';
 import { summaryKey, type Widget } from './dashboards';
 import { expectAccessible } from './a11y_check';
+import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 
 const mock = invoke as ReturnType<typeof vi.fn>;
 const widget: Extract<Widget, { kind: 'summary' }> = {
@@ -18,9 +19,18 @@ const widget: Extract<Widget, { kind: 'summary' }> = {
 beforeEach(() => {
   mock.mockReset();
   localStorage.clear();
+  fleetSettings.set({ ...SETTING_DEFAULTS, 'work.dashboard_summary': 'true' });
 });
 
 describe('SummaryWidget', () => {
+  it('offers no Write while Dashboard summaries is off (review 23b w12-8)', () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS });
+    const r = render(SummaryWidget, { props: { dashId: 'dash.r42', widget } });
+    expect(r.queryByTestId('summary-write')).toBeNull();
+    expect(r.getByTestId('summary-off').textContent).toContain('Dashboard summaries are off');
+    expect(mock).not.toHaveBeenCalled();
+  });
+
   it('writes nothing on open, and writes on Write with the widget’s request and counts', async () => {
     mock.mockResolvedValue({ text: 'Two tasks wait on review.', model: 'haiku', host_alias: 'mercury', from: '5 tasks', at: 1_760_000_000, cost_micros: 1_234 });
     const r = render(SummaryWidget, { props: { dashId: 'dash.r42', widget } });

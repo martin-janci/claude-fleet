@@ -31,10 +31,18 @@ and nothing is sent:
    (Settings → Organisations → *send to Jev*, or `fleet-hub org set <id>
    --jev on`); off by default. A session or item with no org follows
    `decide.jev.unassigned` (off by default). A feature that sends Claude's
-   **reply text** (`turn_outcome`, J2; `routine_run_outcome`, N6) needs a second consent on top
-   (decision D48): the org's *Also allow Claude's reply text* (`fleet-hub
-   org set <id> --jev-reply on`), or `decide.jev.unassigned_reply` for a
-   session with no org. Both off by default; either missing is `org_off`.
+   **own text** needs a second consent on top (decision D48): the org's
+   *Also allow Claude's own text* (`fleet-hub org set <id> --jev-reply on`),
+   or `decide.jev.unassigned_reply` for a session with no org. Both off by
+   default; either missing is `org_off`. It covers `turn_outcome` (J2) and
+   `routine_run_outcome` (N6), the end of a session's screen;
+   `summary_check` (J9), up to 80 KB of a session's transcript (prompts,
+   replies and tool lines); `mission_triage`, which asks without a
+   worker's own summary when it is missing (the rest of its question still
+   goes); and `duplicate` and `quick_answer`, which ask without the agent's
+   `why` (a proposal's reasons, a chat form's reasons) when it is missing.
+   The agent's question line, a title and the options' labels stay under
+   D31. The consent's copy names each (`decide::REPLY_TEXT_USES`).
 5. **A key is configured** (`no_key`): `fleet-hub decide set-key` (on a
    standalone desktop, pointed at the app's data folder — see
    [the key on a standalone desktop](#the-key-on-a-standalone-desktop)).
@@ -446,7 +454,9 @@ empty. *Keep the order* (question) or *Change* (form) puts the options back.
   the card checks the same words again before it moves anything
   (`src/lib/quick_answer.ts`).
 - **What is sent.** The question's text (600 characters at most) and the
-  safe options' labels, redacted. Nothing from the pane or the repository.
+  safe options' labels, redacted. A form's `why` (the agent's own reasons)
+  goes only with the org's reply-text consent (D48); its title and the
+  field's label always do. Nothing from the pane or the repository.
 - **Shadow / assist.** Always asked off the path a person waits on: the
   reconcile tick asks about a new question after its pass, and `ask { form }`
   asks after it opened the form. A proposal appears when it is ready, or not
@@ -776,8 +786,9 @@ telling title word with the proposal, most alike first, at most 10; with
 none, nothing is asked. A proposal accepted at once (a planner card with
 "accept created") is never asked about.
 
-- **What is sent.** The proposal's title and the start of the agent's `why`
-  (600 characters), redacted; each candidate's key and title.
+- **What is sent.** The proposal's title, redacted, and each candidate's
+  key and title. The start of the agent's `why` (600 characters) goes only
+  with the org's reply-text consent (D48): it is the agent's own text.
 - **Shadow.** Asked off the proposing call's path and only recorded, with
   `none` as the baseline (today nothing flags a duplicate).
 - **Assist.** A usable answer (at least 50%, not `none`) stays on the
@@ -1131,9 +1142,12 @@ that the transcript does not show finished. The summary waits for the
 answer.
 
 - **What is sent.** The summary and the newest 80,000 bytes of the
-  excerpt it was written from, redacted. The summary itself runs only for
-  a session whose org consented (`decide.jev.unassigned` for no org);
-  otherwise it is refused with `E_FORBIDDEN` and nothing runs.
+  excerpt it was written from, redacted. The summary itself needs no Jev
+  consent: it runs on the host's own account behind *Catch-up summaries*
+  (review 23b w12-7). Only at `assist` does a session whose check the gate
+  refuses (Jev off, no key, the org's consent to Jev or to Claude's own
+  text missing) get `E_FORBIDDEN` before anything runs, since its summary
+  would always be hidden.
 - **Off.** Nothing is asked; the summary shows, marked unchecked.
 - **Shadow.** Recorded only, with no baseline; the summary shows, marked
   unchecked.
@@ -1177,7 +1191,7 @@ redesign's transition plan.
 | `decide.jev.limit_switch` | `off` | `off` / `shadow` / `assist` | fleet | Asking which login an out-of-credit session should resume under when it is switched automatically. The login with the most headroom is used either way; Jev's pick is recorded beside it so the two can be compared. Experimental. |
 | `decide.jev.restore_timing` | `off` | `off` / `shadow` / `assist` | fleet | Asking whether a killed session due back on a loaded host, or one whose recovery failed, should resume now, wait or move. Off: wait while loaded. Assist follows the answer, never past the low-memory floor; a move is only noted. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | fleet | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
-| `decide.jev.unassigned_reply` | `false` | on / off | fleet | Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all. Experimental. Asks to confirm. |
+| `decide.jev.unassigned_reply` | `false` | on / off | fleet | Also send Claude's own text from sessions that belong to no organisation, on top of sending unassigned sessions at all, for each of these use cases that is on: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines), mission triage (a worker's own summary), the duplicate check (an agent's reasons for a proposed task) and quick answer (an agent's reasons on a chat form). Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | fleet | How long one call may take. A call is never retried. |
 | `decide.jev.breaker_failures` | `5` | 1–100 | fleet | Failed calls in a row that open the circuit breaker. |
 | `decide.jev.breaker_open_secs` | `300` | 10–86400 seconds | fleet | How long an open breaker refuses calls. |

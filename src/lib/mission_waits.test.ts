@@ -19,14 +19,16 @@ const m = (id: number, over: Partial<Mission> = {}): Mission => ({
 });
 
 describe('mission waits', () => {
-  it('keeps the active missions that wait, the longest waiting first', () => {
+  it('keeps the missions that wait, the longest waiting first', () => {
     const list = [
       m(1, { waiting_on: { reason: 'confirm', since: 50, open_cards: 3 } }),
       m(2),
       m(3, { waiting_on: { reason: 'question', since: 20, open_cards: 1 } }),
-      m(4, { state: 'paused', waiting_on: { reason: 'sign_grant', since: 5, open_cards: 0 } }),
+      // Review 23b w09-1: a brake paused it and asks a question.
+      m(4, { state: 'paused', waiting_on: { reason: 'question', since: 5, open_cards: 1 } }),
+      m(5, { state: 'paused' }),
     ];
-    expect(waitingOf(list).map((x) => x.id)).toEqual([3, 1]);
+    expect(waitingOf(list).map((x) => x.id)).toEqual([4, 3, 1]);
   });
 
   it('says why in words', () => {

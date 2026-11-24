@@ -563,7 +563,7 @@ fn prepare_duplicate(input: &Value) -> Result<Prepared, String> {
     let mut options: Vec<String> = found.iter().map(|i| duplicate::option_id(i.id)).collect();
     options.push(duplicate::NONE_OPTION.into());
     Ok(Prepared::Ask {
-        request: duplicate::request(&proposed, &found),
+        request: duplicate::request(&proposed, &found, true),
         options,
         baseline: duplicate::NONE_OPTION.into(),
     })

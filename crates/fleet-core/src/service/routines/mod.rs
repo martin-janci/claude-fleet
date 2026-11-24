@@ -252,7 +252,7 @@ pub struct RoutineInput {
     pub event_host: Option<String>,
     // The guards (G3.8): plain comments, not doc comments, so they stay
     // out of the served schema's budget; docs/control-api.md says them.
-    // The IANA zone shown with the schedule.
+    // The IANA zone the schedule runs in (else `utc_offset_min`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_zone: Option<String>,
     // Stop the turn and fail the run after this many seconds.

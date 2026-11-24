@@ -884,13 +884,21 @@ const ORG: ResourceType = ResourceType {
         .confirm("This org's redacted prompts and ticket titles will be sent to TypeSafe when Decisions (Jev) is on."),
         FieldSpec::new(
             "jev_reply_allowed",
-            "Also allow Claude's reply text (turn outcome)",
-            "On top of Jev above: let the end of this org's sessions' screens — Claude's last reply, redacted, code replaced by placeholders, a few lines — go to TypeSafe's decision model, so Jev can tell a finished turn from a question when hooks say nothing. Off by default (D48).",
+            "Also allow Claude's own text (outcomes, checks, triage, agents' reasons)",
+            concat!(
+                "On top of Jev above: let Claude's text from this org's sessions, redacted and with code replaced by placeholders, go to TypeSafe's decision model for each of these use cases that is on: ",
+                crate::service::decide::reply_text_uses!(),
+                ". Off by default (D48)."
+            ),
             FieldKind::Bool { on_off: true, default: false },
         )
         .edit("jev_reply")
         .badge(Badge::True { text: "sends replies to Jev" })
-        .confirm("The end of this org's sessions' screens (Claude's reply text, redacted) will be sent to TypeSafe when Decisions (Jev) and its turn outcome use case are on."),
+        .confirm(concat!(
+            "Claude's text from this org's sessions (redacted) will be sent to TypeSafe when Decisions (Jev) is on, for each of these use cases that is on: ",
+            crate::service::decide::reply_text_uses!(),
+            "."
+        )),
         FieldSpec::new(
             "bound_sees_unassigned",
             "Bound devices see unassigned",

@@ -8551,12 +8551,7 @@ fn a_codex_row_is_not_paired_with_a_claude_agent_in_its_checkout() {
     let mut s = Store::open_in_memory().unwrap();
     s.upsert_host("vps").unwrap();
     let live = || vec![tmux_session("dev-cx")];
-    let first = vps_probe(&s, live(), None, vec![], PrInfoMap::new());
-    reconcile_write_one_host(&mut s, &first, &[]).unwrap();
-    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
-    s.set_session_agent(cx.id, crate::store::AGENT_CODEX)
-        .unwrap();
-    let terminal = crate::claude_agents::ClaudeAgentRow {
+    let terminal = || crate::claude_agents::ClaudeAgentRow {
         session_id: Some(CLAUDE_ID.to_string()),
         name: None,
         status: Some("working".into()),
@@ -8565,7 +8560,18 @@ fn a_codex_row_is_not_paired_with_a_claude_agent_in_its_checkout() {
         job_id: None,
         started_at: None,
     };
-    let probe = vps_probe(&s, live(), None, vec![terminal], PrInfoMap::new());
+    // The creating pass runs while the row still says Claude, so it may
+    // pair the person's terminal conversation (review 23b w01-2).
+    let first = vps_probe(&s, live(), None, vec![terminal()], PrInfoMap::new());
+    reconcile_write_one_host(&mut s, &first, &[]).unwrap();
+    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
+    // What `new_session` does right after that pass.
+    s.set_new_session_agent(cx.id, crate::store::AGENT_CODEX)
+        .unwrap();
+    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
+    assert_eq!(cx.claude_session_id, None);
+    assert_eq!(s.session_transcript_path(cx.id).unwrap(), None);
+    let probe = vps_probe(&s, live(), None, vec![terminal()], PrInfoMap::new());
     reconcile_write_one_host(&mut s, &probe, &[]).unwrap();
     let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
     assert_eq!(cx.claude_session_id, None);

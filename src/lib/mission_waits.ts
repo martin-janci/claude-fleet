@@ -12,10 +12,12 @@ import { ALL_SCOPES, effectiveScope, type ScopeId } from './orgs';
 /** How often the list is read while the app shows (as failed routines). */
 export const MISSION_WAITS_EVERY_MS = 60_000;
 
-/** The missions that wait on a person, the longest waiting first. */
+/** The missions that wait on a person, the longest waiting first. The hub
+ *  decides which: an active one, or a paused one a brake asked a question
+ *  on (review 23b w09-1), so the state is not tested here. */
 export function waitingOf(missions: readonly Mission[]): (Mission & { waiting_on: MissionWait })[] {
   return missions
-    .filter((m): m is Mission & { waiting_on: MissionWait } => m.state === 'active' && m.waiting_on != null)
+    .filter((m): m is Mission & { waiting_on: MissionWait } => m.waiting_on != null)
     .sort((a, b) => a.waiting_on.since - b.waiting_on.since || a.id - b.id);
 }
 

@@ -1052,6 +1052,25 @@ fn interval_of(raw: Option<&str>) -> Option<Duration> {
 
 /// Spawn the tick. `None` (nothing spawned) when the interval is `0`. The
 /// token is observed between passes only, like the reconcile tick's.
+/// Whether this process runs the tracker sync: [`SYNC_UNKNOWN`] until
+/// [`spawn_tracker_sync`] decided (a process that never runs it, a test),
+/// then [`SYNC_RUNNING`] or [`SYNC_OFF`]. The setting is read once, at
+/// start (`Restart::App`), so a write's check reads this, not the live
+/// setting (review 23b w02-8).
+static SYNC_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(SYNC_UNKNOWN);
+pub(crate) const SYNC_UNKNOWN: u8 = 0;
+pub(crate) const SYNC_RUNNING: u8 = 1;
+pub(crate) const SYNC_OFF: u8 = 2;
+
+/// [`SYNC_STATE`] now.
+pub(crate) fn sync_state() -> u8 {
+    SYNC_STATE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn set_sync_state(state: u8) {
+    SYNC_STATE.store(state, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub fn spawn_tracker_sync(
     store: Arc<Mutex<Store>>,
     net: TrackerNet,
@@ -1059,8 +1078,10 @@ pub fn spawn_tracker_sync(
 ) -> Option<tokio::task::JoinHandle<()>> {
     let Some(period) = interval(&store) else {
         tracing::info!("tracker sync disabled (work.sync_interval_secs=0)");
+        set_sync_state(SYNC_OFF);
         return None;
     };
+    set_sync_state(SYNC_RUNNING);
     tracing::info!("tracker sync every {}s", period.as_secs());
     let sync = Arc::new(TrackerSync::new(net).with_metrics(process_metrics()));
     // J3 (docs/decisions.md): after a clean pass, an Asana tracker's
@@ -1106,6 +1127,7 @@ pub fn spawn_tracker_sync(
             .await;
             crate::service::loops::report("trackers", outcome, Some(period));
         }
+        set_sync_state(SYNC_OFF);
     }))
 }
 

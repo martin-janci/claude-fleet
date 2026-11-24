@@ -10,6 +10,7 @@
 //! Enter typed into the trust dialog answers it — its default is "No, exit".
 
 use super::prompt::{send_prompt_inner, Origin};
+use crate::agent_adapter::AgentAdapter;
 use crate::ipc_error::IpcError;
 use crate::service::pane_intel::{ClaudeStatus, StuckKind};
 use crate::ssh::SshClient;
@@ -31,9 +32,15 @@ pub enum PromptGate {
     NotYet,
 }
 
-/// PURE: decide from a captured pane.
+/// PURE: decide from a captured pane of Claude Code.
 pub fn prompt_gate(pane: &str) -> PromptGate {
-    let intel = crate::agent_adapter::claude().analyze_pane(pane);
+    prompt_gate_with(crate::agent_adapter::claude(), pane)
+}
+
+/// PURE: [`prompt_gate`] for a pane running `agent`, read with its own
+/// adapter (a Codex dialog is not Claude's, review 23b w01-1).
+pub fn prompt_gate_with(agent: &dyn AgentAdapter, pane: &str) -> PromptGate {
+    let intel = agent.analyze_pane(pane);
     match intel.stuck {
         Some(StuckKind::TrustPrompt) => return PromptGate::TrustDialog,
         Some(_) => return PromptGate::Blocked,
@@ -147,6 +154,27 @@ pub(crate) trait SeedPane: Send + Sync {
     fn event(&self, started: bool, detail: Option<&str>);
     /// The REPL has settled and the prompt is about to be typed.
     fn ready(&self) {}
+    /// The agent in the pane: whose pane cues and dialogs are read.
+    fn agent(&self) -> &'static dyn AgentAdapter {
+        crate::agent_adapter::claude()
+    }
+}
+
+/// Whether `agent` acknowledges a typed prompt (Claude Code's
+/// UserPromptSubmit hook bumps `prompt_submit_seq`). Codex, Hermes and agy
+/// run no fleet hook, so waiting for an ack only costs the whole window
+/// and then reports a false failure (review 23b w01-1).
+fn acknowledges(agent: &dyn AgentAdapter) -> bool {
+    agent.id() == crate::store::AGENT_CLAUDE
+}
+
+/// The agent's name in copy: "Claude" for Claude Code, else its label.
+fn agent_name(agent: &dyn AgentAdapter) -> &'static str {
+    if agent.id() == crate::store::AGENT_CLAUDE {
+        "Claude"
+    } else {
+        agent.label()
+    }
 }
 
 /// The production [`SeedPane`]: the session's tmux pane and its row.
@@ -162,6 +190,7 @@ pub(super) struct LivePane<'a> {
     /// once the REPL is ready, so the UserPromptSubmit hook the prompt
     /// fires does not hand them to Claude a second time.
     carries: Vec<i64>,
+    agent: &'static dyn AgentAdapter,
     tmux: Box<dyn crate::tmux::TmuxExec>,
 }
 
@@ -190,6 +219,8 @@ impl<'a> LivePane<'a> {
             origin,
             events,
             carries: Vec::new(),
+            agent: crate::agent_adapter::for_session(&row.kind, Some(&row.agent))
+                .unwrap_or_else(crate::agent_adapter::claude),
             tmux,
         }
     }
@@ -261,6 +292,9 @@ impl SeedPane for LivePane<'_> {
         if let Some(kind) = kind {
             let _ = s.insert_session_event(self.session_id, kind, None);
         }
+    }
+    fn agent(&self) -> &'static dyn AgentAdapter {
+        self.agent
     }
 }
 
@@ -381,7 +415,10 @@ pub(crate) async fn seed_outcome(
         ReplWait::Ready => {}
         ReplWait::Dialog(why) => return Err(format!("a dialog is up in its session ({why})")),
         ReplWait::NotReady => {
-            return Err("Claude's prompt did not come up in its session".to_string())
+            return Err(format!(
+                "{}'s prompt did not come up in its session",
+                agent_name(pane.agent())
+            ))
         }
     }
     pane.ready();
@@ -389,6 +426,11 @@ pub(crate) async fn seed_outcome(
     if let Err(e) = pane.type_prompt(prompt).await {
         pane.event(false, Some(&format!("send failed: {}", e.code)));
         return Err(format!("typing it failed: {}", e.message));
+    }
+    if !acknowledges(pane.agent()) {
+        // Typed, and nothing will ever acknowledge it: that is delivered.
+        pane.event(true, None);
+        return Ok(());
     }
     await_ack(pane, prompt, before, t).await;
     Ok(())
@@ -404,7 +446,7 @@ pub(crate) async fn await_repl(pane: &dyn SeedPane, t: &SeedTimings) -> ReplWait
     let mut reported: Option<&'static str> = None;
     loop {
         let gate = match pane.capture().await {
-            Some(text) => prompt_gate(&text),
+            Some(text) => prompt_gate_with(pane.agent(), &text),
             None => PromptGate::NotYet,
         };
         match gate {
@@ -475,7 +517,7 @@ async fn await_ack(
         if now >= next_look && retries < t.retries {
             next_look = now + t.nudge;
             let step = match pane.capture().await {
-                Some(text) => unacked_step(&text, prompt, may_retype),
+                Some(text) => unacked_step(pane.agent(), &text, prompt, may_retype),
                 None => Nudge::Wait,
             };
             let sent = match step {
@@ -510,11 +552,11 @@ enum Nudge {
 /// PURE: decide from the pane what an unacknowledged prompt needs.
 /// `may_retype` is whether the session's hooks report at all: without them
 /// there is never an acknowledgement, and a retype would risk a second copy.
-fn unacked_step(pane: &str, prompt: &str, may_retype: bool) -> Nudge {
-    if prompt_gate(pane) != PromptGate::Ready {
+fn unacked_step(agent: &dyn AgentAdapter, pane: &str, prompt: &str, may_retype: bool) -> Nudge {
+    if prompt_gate_with(agent, pane) != PromptGate::Ready {
         return Nudge::Wait;
     }
-    let intel = crate::agent_adapter::claude().analyze_pane(pane);
+    let intel = agent.analyze_pane(pane);
     if intel.derived_status == Some(ClaudeStatus::Working) {
         return Nudge::Wait;
     }
@@ -594,6 +636,7 @@ mod tests {
         after: Vec<&'static str>,
         acks: Vec<usize>,
         hooks_seen: bool,
+        agent: &'static dyn AgentAdapter,
         sends: Mutex<Vec<&'static str>>,
         captures: Mutex<usize>,
         captures_at_type: Mutex<Option<usize>>,
@@ -610,6 +653,7 @@ mod tests {
                 after: after.to_vec(),
                 acks: acks.to_vec(),
                 hooks_seen: true,
+                agent: crate::agent_adapter::claude(),
                 sends: Mutex::new(Vec::new()),
                 captures: Mutex::new(0),
                 captures_at_type: Mutex::new(None),
@@ -682,6 +726,9 @@ mod tests {
         fn ready(&self) {
             let sent = self.sends.lock().unwrap().len();
             self.readies.lock().unwrap().push(sent);
+        }
+        fn agent(&self) -> &'static dyn AgentAdapter {
+            self.agent
         }
     }
 
@@ -787,10 +834,11 @@ mod tests {
             Some("hi there")
         );
         assert_eq!(input_box("Loading…"), None);
-        assert_eq!(unacked_step(QUEUED, PROMPT, true), Nudge::Wait);
-        assert_eq!(unacked_step(IN_INPUT, PROMPT, false), Nudge::Submit);
-        assert_eq!(unacked_step(READY, PROMPT, true), Nudge::Retype);
-        assert_eq!(unacked_step(TRUST, PROMPT, true), Nudge::Wait);
+        let claude = crate::agent_adapter::claude();
+        assert_eq!(unacked_step(claude, QUEUED, PROMPT, true), Nudge::Wait);
+        assert_eq!(unacked_step(claude, IN_INPUT, PROMPT, false), Nudge::Submit);
+        assert_eq!(unacked_step(claude, READY, PROMPT, true), Nudge::Retype);
+        assert_eq!(unacked_step(claude, TRUST, PROMPT, true), Nudge::Wait);
     }
 
     /// A caller that cannot wait for a person stops at the dialog — and
@@ -834,5 +882,49 @@ mod tests {
         assert!(seed(&pane, PROMPT, &FOREGROUND).await);
         assert_eq!(pane.sends(), ["type", "enter"]);
         assert_eq!(pane.events(), ["handover_started"]);
+    }
+
+    const CODEX_READY: &str = "• Done.\n\n› Ask Codex to do anything\n\n  mock-model default · /home/dev/repo\n  ← for agents · ? for shortcuts";
+    const CODEX_TRUST: &str = "  Trust this folder? Codex can read, edit, and run files here.\n\n› 1. Trust and continue\n  2. Back to Agent Command Center\n\n  enter continue · esc back";
+
+    /// Review 23b w01-1 / w19-1: a Codex background agent's prompt is typed
+    /// once and stamped started at once. Codex runs no hook, so there is no
+    /// ack to wait for: no 8 s wait, no false "not acknowledged".
+    #[tokio::test(start_paused = true)]
+    async fn a_codex_prompt_is_typed_once_and_not_waited_on_for_an_ack() {
+        let codex = crate::agent_adapter::by_id(crate::store::AGENT_CODEX).unwrap();
+        let mut pane = Scripted::new(&["", CODEX_READY], &[CODEX_READY], &[]);
+        pane.agent = codex;
+        let started = tokio::time::Instant::now();
+        assert_eq!(seed_outcome(&pane, PROMPT, &FOREGROUND).await, Ok(()));
+        assert!(
+            started.elapsed() < FOREGROUND.ack,
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(pane.sends(), ["type"]);
+        assert_eq!(pane.events(), ["handover_started"]);
+        assert_eq!(*pane.readies.lock().unwrap(), [0]);
+
+        // Codex's own trust screen holds the prompt back.
+        assert_eq!(
+            prompt_gate_with(codex, CODEX_TRUST),
+            PromptGate::TrustDialog
+        );
+        let mut trust = Scripted::new(&[CODEX_TRUST], &[], &[]);
+        trust.agent = codex;
+        assert_eq!(
+            seed_outcome(&trust, PROMPT, &FOREGROUND).await,
+            Err("a dialog is up in its session (trust_prompt)".to_string())
+        );
+        assert!(trust.sends().is_empty());
+
+        // A pane that never gets ready says why, naming the agent.
+        let mut never = Scripted::new(&[""], &[], &[]);
+        never.agent = codex;
+        assert_eq!(
+            seed_outcome(&never, PROMPT, &FOREGROUND).await,
+            Err("Codex's prompt did not come up in its session".to_string())
+        );
     }
 }

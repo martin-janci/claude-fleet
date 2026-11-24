@@ -18,7 +18,9 @@
 //!   the session row carries it (`proposals`, step 2.8), a form's view
 //!   carries it as `proposal`.
 //! * **What is sent.** The question's text and the options' labels, through
-//!   the envelope's redaction. Nothing from the pane or the repository.
+//!   the envelope's redaction; a form's `why` (the agent's own reasons) only
+//!   with the org's reply-text consent (D48, [`form_why`]). Nothing from the
+//!   pane or the repository.
 //! * **What is recorded.** A run about subject `session` `<id>` (an agent's
 //!   question) or `form` `<form_id>` (a form's first choice); the options are
 //!   `o<n>` (the option's number as the card shows it, from 1) and `unsure`.
@@ -565,6 +567,13 @@ pub struct FormProposal {
     pub run_id: Option<i64>,
 }
 
+/// The form's `why` that may be sent: it is the agent's own text, so it
+/// goes only with the org's reply-text consent (D48); the title and the
+/// options' labels stay under D31.
+pub fn form_why<'a>(s: &Store, org_id: Option<i64>, why: Option<&'a str>) -> Option<&'a str> {
+    why.filter(|_| super::reply_text_allowed(s, org_id))
+}
+
 /// After `ask { form }` opened a form: ask about its choice in a task of its
 /// own when the feature is on. Never on the form's path, never failing it.
 pub fn spawn_for_form(
@@ -575,11 +584,12 @@ pub fn spawn_for_form(
     why: Option<&str>,
     spec: &Value,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    let fc = form_choice(form_id, org_id, title, why, spec)?;
-    {
+    let why = {
         let s = lock(&ctx.store).ok()?;
         gate_at(&s, Feature::QuickAnswer, org_id, ctx.now()).ok()?;
-    }
+        form_why(&s, org_id, why)
+    };
+    let fc = form_choice(form_id, org_id, title, why, spec)?;
     Some(crate::rt::spawn(async move {
         ask(&ctx, &fc.input).await;
     }))

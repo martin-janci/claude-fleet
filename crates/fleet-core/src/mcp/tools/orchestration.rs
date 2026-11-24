@@ -356,10 +356,11 @@ impl FleetTools {
         did since a time (unix seconds), for whoever may read it: { text | \
         null, check: off | shadow | passed | failed | unchecked, since, turns, \
         model, host_alias, at }. Runs one claude -p on the session's host \
-        under its account (booked as watch_summary); only with the session \
-        org's consent; text is null when nothing happened since or when the \
-        Jev check hid it. Errors: E_FORBIDDEN (no consent), E_CLAUDE_CLI, \
-        E_TIMEOUT, as session_conversation.")]
+        under its account (booked as watch_summary); text is null when \
+        nothing happened since or when the Jev check hid it. Errors: \
+        E_FORBIDDEN (the summary check is at assist and could not pass it: \
+        Jev off, no key, or no org consent), E_CLAUDE_CLI, E_TIMEOUT, as \
+        session_conversation.")]
     pub(super) async fn session_summary_since(
         &self,
         Extension(caller): Extension<Caller>,

@@ -110,6 +110,7 @@ pub async fn triage_with(
         let (login, model) = {
             let s = lock(&deps.store)?;
             changeable(&s, scope, id)?;
+            settings::require_writing_help(&s, settings::WORK_DRAFT_RELEASE_NOTES)?;
             (
                 // The planner's chooser: never a login on an account the
                 // mission's projects forbid (`limit::draft_login`).

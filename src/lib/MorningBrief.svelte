@@ -9,8 +9,11 @@
   import { onMount } from 'svelte';
   import DraftField from './DraftField.svelte';
   import { HUB_HAS_NO_DRAFTS, draftedAt, todayBrief, type Draft } from './drafts';
+  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
 
   let draft = $state<Draft | null>(null);
+  /** Writing help's "Draft the morning brief" (review 23b w12-8), off by default. */
+  const on = $derived(settingBool($fleetSettings, SETTING_KEYS.workDraftMorningBrief));
   let text = $state('');
   let busy = $state(false);
   let error = $state<string | null>(null);
@@ -48,7 +51,8 @@
   onMount(() => void load(false));
 </script>
 
-{#if served}
+<!-- Off with nothing drafted: the block stays away (review 23b w12-8). -->
+{#if served && (on || draft || refused)}
   <section class="brief" data-testid="morning-brief" aria-label="Morning brief">
     <h3>
       Morning brief
@@ -67,11 +71,11 @@
         from={draft ? `from ${draft.from}` : null}
         {busy}
         rows={6}
-        onregenerate={() => void load(true)}
+        onregenerate={on ? () => void load(true) : undefined}
         onclear={() => show(null)}
         testid="morning-brief-draft"
       />
-    {:else}
+    {:else if on}
       <button class="btn btn--quiet" type="button" data-testid="morning-brief-draft-btn" onclick={() => void load(true)}
         >Draft the brief</button
       >

@@ -169,7 +169,7 @@ pub async fn spawn_review(
         // Not soft, as in `new_session`: a Codex pane on a row that says
         // Claude would be resumed, read and answered as Claude's.
         if agent.id() != crate::store::AGENT_CLAUDE {
-            s.set_session_agent(row.id, agent.id())?;
+            s.set_new_session_agent(row.id, agent.id())?;
         }
         // The login the pane runs under, so a later restart or recreate
         // keeps it instead of falling back to the host's own.

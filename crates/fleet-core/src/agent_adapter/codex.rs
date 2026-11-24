@@ -798,9 +798,13 @@ pub(crate) struct PaneRollout {
 /// Codex allots a conversation's id itself and writes its rollout on the
 /// first prompt, so this is how fleet learns the id. Until that prompt the
 /// newest match is an older conversation (a killed session's on the same
-/// worktree, a `codex` the person ran there): a rollout last written before
-/// the pane's tmux session was created is not its own (review w20-3), and
-/// the files are newest first, so the lookup stops there. Prints
+/// worktree, a `codex` the person ran there): a rollout STARTED before the
+/// pane's tmux session was created is not its own (review w20-3), however
+/// recently it was written — a `codex` the person keeps using in the same
+/// checkout writes on (review 23b w01-3). The start is the local time in the
+/// file name (`rollout-YYYY-MM-DDTHH-MM-SS-<id>`, as Codex names it), the
+/// file's mtime when the name does not parse; such a rollout is skipped and
+/// the scan goes on. Prints
 /// `cdx<TAB>name<TAB>path` per pane found; `None` for no panes.
 pub(crate) fn rollouts_script(panes: &[&str]) -> Option<String> {
     if panes.is_empty() {
@@ -822,9 +826,14 @@ case "$t" in ''|*[!0-9]*) t=0;; esac
 if [ -n "$c" ]; then
   printf '%s\n' "$files" | while IFS= read -r f; do
     if head -n 1 "$f" | grep -qF "\"cwd\":\"$c\""; then
-      m=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)
-      case "$m" in ''|*[!0-9]*) m=0;; esac
-      [ "$t" -gt 0 ] && [ "$m" -gt 0 ] && [ "$m" -lt "$t" ] && break
+      if [ "$t" -gt 0 ]; then
+        b=${{f##*/}}; b=${{b#rollout-}}; day=${{b%%T*}}; tm=${{b#*T}}
+        tm=$(printf '%s' "${{tm%"${{tm#????????}}"}}" | tr - :)
+        s=$(date -d "$day $tm" +%s 2>/dev/null || date -j -f '%Y-%m-%d %H:%M:%S' "$day $tm" +%s 2>/dev/null)
+        case "$s" in ''|*[!0-9]*) s=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null);; esac
+        case "$s" in ''|*[!0-9]*) s=0;; esac
+        [ "$s" -gt 0 ] && [ "$s" -lt "$t" ] && continue
+      fi
       printf 'cdx\t%s\t%s\n' {name} "$f"; break
     fi
   done

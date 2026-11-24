@@ -67,6 +67,8 @@ describe('sessionActionBlocked', () => {
     'session_unshare',
     'session_narrow',
     'restore_host_sessions',
+    // Round 2 w08-7: as the hub's SESSION_REACH has it.
+    'delete_worktree',
   ];
   const DRIVE: SessionAction[] = [
     'send_prompt',

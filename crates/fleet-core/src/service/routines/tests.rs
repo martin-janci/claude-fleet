@@ -5371,3 +5371,64 @@ async fn a_run_does_not_adopt_a_session_that_reused_its_sessions_id() {
     memory::read_finished(&f.store, &reader, OCT8 + 120).await;
     assert_eq!(reader.reads.load(Ordering::SeqCst), 0);
 }
+/// Review 23b w02-2: a failed run's session is closed too, after a day
+/// idle rather than twelve hours, so a routine whose runs keep failing does
+/// not leave a live Claude per run.
+#[tokio::test]
+async fn a_failed_runs_idle_session_is_closed_after_a_day() {
+    use super::tick::RUN_SESSION_IDLE_SECS;
+    use crate::store::FAILED_RUN_EXTRA_IDLE_SECS;
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    let mut sids = Vec::new();
+    for n in 0..4 {
+        let at = OCT8 + n * 600;
+        let run = run_now(&f.deps, &ana, r.id, at).await.unwrap();
+        let sid = run.session_id.unwrap();
+        let s = lock(&f.store).unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE routine_runs SET state = 'failed', finished_at = ?1, \
+                 error_code = 'E_RUN_TIME_CAP' WHERE id = ?2",
+                rusqlite::params![at + 300, run.id],
+            )
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'idle', idle_since = ?1, \
+                 last_activity_at = ?1 WHERE id = ?2",
+                rusqlite::params![at + 300, sid],
+            )
+            .unwrap();
+        sids.push(sid);
+    }
+    lock(&f.store)
+        .unwrap()
+        .conn_ref()
+        .execute("UPDATE hosts SET reachable = 1 WHERE alias = 'mac'", [])
+        .unwrap();
+    // Twelve hours idle closes a done run's session, not a failed one's.
+    tick_once(&f.deps, OCT8 + 300 + RUN_SESSION_IDLE_SECS + 60).await;
+    assert!(f.fake.closed.lock().unwrap().is_empty());
+    tick_once(
+        &f.deps,
+        OCT8 + 300 + RUN_SESSION_IDLE_SECS + FAILED_RUN_EXTRA_IDLE_SECS + 60,
+    )
+    .await;
+    let closed: Vec<String> = f
+        .fake
+        .closed
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, t)| t.clone())
+        .collect();
+    let name = lock(&f.store)
+        .unwrap()
+        .get_session_by_id(sids[0])
+        .unwrap()
+        .unwrap()
+        .tmux_name;
+    assert_eq!(closed, vec![name], "the oldest goes; the three newest stay");
+}

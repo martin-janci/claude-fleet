@@ -1061,12 +1061,12 @@
             "text": "sends replies to Jev",
             "when": "true"
           },
-          "confirm": "The end of this org's sessions' screens (Claude's reply text, redacted) will be sent to TypeSafe when Decisions (Jev) and its turn outcome use case are on.",
+          "confirm": "Claude's text from this org's sessions (redacted) will be sent to TypeSafe when Decisions (Jev) is on, for each of these use cases that is on: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines), mission triage (a worker's own summary), the duplicate check (an agent's reasons for a proposed task) and quick answer (an agent's reasons on a chat form).",
           "default": false,
           "edit": "jev_reply",
-          "help": "On top of Jev above: let the end of this org's sessions' screens — Claude's last reply, redacted, code replaced by placeholders, a few lines — go to TypeSafe's decision model, so Jev can tell a finished turn from a question when hooks say nothing. Off by default (D48).",
+          "help": "On top of Jev above: let Claude's text from this org's sessions, redacted and with code replaced by placeholders, go to TypeSafe's decision model for each of these use cases that is on: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines), mission triage (a worker's own summary), the duplicate check (an agent's reasons for a proposed task) and quick answer (an agent's reasons on a chat form). Off by default (D48).",
           "id": "jev_reply_allowed",
-          "label": "Also allow Claude's reply text (turn outcome)",
+          "label": "Also allow Claude's own text (outcomes, checks, triage, agents' reasons)",
           "on_off": true,
           "type": "bool"
         },
@@ -4584,6 +4584,30 @@
         "type": "bool"
       },
       "label": "Draft release notes",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "work.draft_morning_brief",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Draft the morning brief",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "work.dashboard_summary",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Dashboard summaries",
       "widgets": [
         "switch",
         "readonly"

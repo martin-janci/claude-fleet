@@ -193,6 +193,10 @@ profile }`, review w11-7). Fleet:
 - refuses while a live session runs under the profile (`E_INVALID_STATE`,
   naming them in the message and in `details.sessions`): end or switch them
   first. A ghost or lost row does not count;
+- refuses while a routine, a start rule or a live mission grant names the
+  profile on that host (`E_INVALID_STATE`, naming each in the message and
+  in `details.uses`): point them at another login first, or the next run
+  or start would recreate the profile empty and sit at `/login`;
 - closes any login pane for it (`fleet-login--<name>`);
 - deletes its own files there (`.fleet-oauth-token`, `.fleet-api-key`,
   `.fleet-account.json`), then the profile directory

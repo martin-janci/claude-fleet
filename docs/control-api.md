@@ -1138,24 +1138,32 @@ Index by area (names only; see the reference for details):
   handover, typed into the session once Claude's REPL is ready (a run
   whose prompt could not be typed fails with `E_PROMPT_NOT_DELIVERED`,
   fix: open its session). Once a `done` run's session (outcome other than
-  `needs_person`) has idled 12 hours the scheduler closes it (a plain
-  kill, timeline `gc_killed`), except its routine's three newest live
-  sessions and any a person pinned, prompted, attached to or opened.
+  `needs_person`) has idled 12 hours, or a `failed` run's 24 hours, the
+  scheduler closes it (a plain kill, timeline `gc_killed`), except its
+  routine's three newest live sessions and any a person pinned, prompted,
+  attached to or opened.
   A run is `done` when its session's first turn finishes,
-  `failed` on an error, a lost or removed session, six quiet hours, or a
+  `failed` on an error, a lost or removed session, six hours after it
+  started while its session is not working (a `working` status counts only
+  while a reconcile pass saw it in the last 10 minutes, and never past 24
+  hours, when its turn is stopped), or a
   session past the run budget (which also stops its turn and turns the
   routine off with `paused_reason`), and `skipped` when the last run is still going under
   `overlap: skip`, today's budget is spent, the account its login bills
   is at or past `accounts.pause_at` (Orbit Fleet 8.7, read from the stored
   usage readings), or a person skipped it.
   Guards (gap plan G3.8, migration 159), all optional in `save`:
-  `time_zone` (the IANA zone shown with the schedule; `utc_offset_min`
-  still drives it), `run_max_secs` (60 to 21600: a run still going after
+  `time_zone` (the IANA zone the cron line is read in: the schedule runs
+  in it, daylight saving included, when the bundled tz database knows it,
+  else at `utc_offset_min`; a `save` without it clears it, since `save`
+  replaces every field), `run_max_secs` (60 to 21600: a run still going after
   it has its turn stopped with Escape and fails), `fallback_host` (a host
   of the same org that takes a run when its host is unreachable, its login
   is past `accounts.pause_at`, or its start failed; the run's `host_alias`
   says where it ran), `retry_once` (a failed run starts again once on the
-  next pass, `trigger_ref` `retry:<run id>`, never while paused) and
+  next pass, `trigger_ref` `retry:<run id>`, never while paused, and not
+  after the time cap, the budget, a signed-out login or a forbidden
+  account; the window counts from when the run failed) and
   `autonomy` (0 report only, 1 ask before push, 2 or absent push: a line
   under the prompt, not a sandbox). `automation.daily_budget` (whole USD,
   0 none) skips every routine's runs, `run_now` included, once all of them
@@ -2244,7 +2252,15 @@ automatically on app start.
   (`control.session_care`, on by default) `restart_session` of a session
   the operator started itself (not one it only briefed) goes without a card
   at "Within your brief" and "Autopilot", and `safe_kill_session` of one at
-  "Autopilot". Every other call above asks at every position —
+  "Autopilot". Who may read and drive the owner's sessions is always a
+  card too (sec-access-5, decision D3=b): `session_share`,
+  `session_unshare`, `session_narrow`, `review_request` `ask` (an ask
+  shares the session) and `access_requests` `grant` each return
+  `E_CONFIRM_REQUIRED` with a `confirm_nonce` until a person approves.
+  The operator's `agents` `run` starts only a rule of the `self-debug` or
+  `proposer` definition (`/debug`, `/propose`; w15-5, `OPERATOR_RUNS`):
+  any other rule is a person's to start, and the call answers
+  `E_FORBIDDEN`. Every other call above asks at every position —
   `guard::operator_must_confirm_with`; `docs/status.md` has the rule),
   and every tool above return
   `E_CONFIRM_REQUIRED` until a person approves them: on the desktop in its
@@ -2295,10 +2311,15 @@ automatically on app start.
   are written `0600` on every host; `state.db` is `0600` on the central
   machine.
 - **Audited.** Every tool call is logged to the app's stderr (tool name +
-  identifying arguments; prompt bodies are never logged) and recorded as an
-  `mcp_call` row in the target session's timeline (`session_history`), with
-  the caller (`master` or `host:<alias>`) and free-text arguments redacted to
-  their length.
+  identifying arguments; prompt bodies are never logged). A call that can
+  change something also leaves an `mcp_call` row in the target session's
+  timeline (`session_history`), with the caller (`master`, `host:<alias>`,
+  a device or a named token) and free-text arguments redacted to their
+  length. A read leaves no row: a read-only tool (`guard::READONLY_TOOLS`),
+  a read or polled action of a mixed tool (`guard::is_quiet_call`:
+  `routines` `list` / `get` / `failing` / `budget` / `runs`, `debug_devices`
+  `list`, `control_auto_continue` `status`, …) and any call of a
+  single-purpose token; the stderr line is their only record.
 
 ## Verifying it works
 

@@ -11,6 +11,7 @@ import { invoke } from '@tauri-apps/api/core';
 import MissionTriage from './MissionTriage.svelte';
 import MissionNudge from './MissionNudge.svelte';
 import { ALL_SCOPES, orgs, scopeFilter, type OrgDetail } from './orgs';
+import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import { asProposal, countsLine, outcomeLabel, resetTriageCacheForTests, stepLabel, type Triage } from './mission_triage';
 
 const stuck: Triage = {
@@ -52,7 +53,19 @@ describe('mission triage helpers', () => {
 });
 
 describe('MissionTriage', () => {
-  beforeEach(() => vi.mocked(invoke).mockReset());
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'work.draft_release_notes': 'true' });
+  });
+
+  it('offers no Draft while Draft release notes is off (review 23b w12-8)', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS });
+    vi.mocked(invoke).mockImplementation(async (c) => (c === 'mission_triage' ? stuck : null));
+    render(MissionTriage, { missionId: 4, onstep: vi.fn() });
+    await flush();
+    expect(screen.getByTestId('mission-triage')).toBeTruthy();
+    expect(screen.queryByTestId('mission-triage-draft')).toBeNull();
+  });
 
   it('shows no card for a mission that is not stuck', async () => {
     vi.mocked(invoke).mockImplementation(async (c) => (c === 'mission_triage' ? { may_change: true } : null));

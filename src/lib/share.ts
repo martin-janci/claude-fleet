@@ -166,7 +166,10 @@ const SESSION_TIER = {
   dismiss_ghost_session: 'drive',
   adopt_session: 'own',
   dismiss_agent_session: 'drive',
-  delete_worktree: 'drive',
+  // It removes the checkout a session runs in (`force: true` even while it
+  // is alive): destruction, the owner's tier, as the hub's `SESSION_REACH`
+  // has it (round 2 w08-7). A driver is not offered it.
+  delete_worktree: 'own',
   // It types a prompt into the pane and waits for the reply, exactly like
   // `send_message { deliver, submit }` above.
   request_work_handover: 'drive',

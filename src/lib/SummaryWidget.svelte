@@ -14,6 +14,7 @@
   import { exactTime, timeAgo } from './session_status';
   import { dashboardFeeds, summaryKey, type Widget } from './dashboards';
   import { summaryContext, type FleetData } from './dashboard_sources';
+  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
 
   let {
     dashId,
@@ -50,6 +51,9 @@
   /** A run costs cents or less: show what it cost, not $0.00. */
   const cost = (micros: number) => '$' + (micros / 1_000_000).toFixed(micros < 10_000 ? 4 : 2);
 
+  /** Writing help's "Dashboard summaries" (review 23b w12-8), off by default. */
+  const on = $derived(settingBool($fleetSettings, SETTING_KEYS.workDashboardSummary));
+
   let busy = $state(false);
   let error = $state<string | null>(null);
 
@@ -80,16 +84,20 @@
     AI · <span title={exactTime(kept.draft.at)}>written {timeAgo(kept.draft.at)}</span> · {kept.draft.model} on {kept.draft.host_alias} · from {kept.draft.from}{#if kept.draft.cost_micros != null}
       · {cost(kept.draft.cost_micros)}{/if}{#if kept.draft.truncated} · cut short{/if}
   </p>
+{:else if !on}
+  <p class="none" data-testid="summary-off">Dashboard summaries are off (Settings › Work &amp; trackers › Writing help).</p>
 {:else if !busy}
   <p class="none">Not written yet. Write runs a model over these counts.</p>
 {/if}
 {#if error}<p class="err" role="alert" data-testid="summary-error">Not written: {error}</p>{/if}
-<div class="act">
-  {#if busy}<Loader />{/if}
-  <button type="button" class="link" onclick={write} disabled={busy} data-testid="summary-write">
-    {kept ? 'Refresh' : 'Write'}
-  </button>
-</div>
+{#if on}
+  <div class="act">
+    {#if busy}<Loader />{/if}
+    <button type="button" class="link" onclick={write} disabled={busy} data-testid="summary-write">
+      {kept ? 'Refresh' : 'Write'}
+    </button>
+  </div>
+{/if}
 
 <style>
   .title { margin: 0 0 var(--space-2); font-size: var(--text-sm); font-weight: 600; }

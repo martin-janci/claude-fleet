@@ -326,6 +326,38 @@ async fn an_unconsenting_orgs_mission_is_never_sent() {
     assert!(sent.contains(&w.m()));
 }
 
+/// Review 23b w12-5: a Control message is gated as the operator's org's,
+/// not as unassigned: with that org consented and `unassigned` off (the
+/// default), the message is asked about.
+#[tokio::test]
+async fn a_message_is_gated_as_the_operators_org() {
+    let w = world();
+    w.on("assist");
+    {
+        let s = w.store.lock().unwrap();
+        settings::set(&s, settings::DECIDE_JEV_UNASSIGNED, "false").unwrap();
+        let org = s.add_org("Acme", None, false).unwrap().id;
+        s.set_org_jev_allowed(org, true).unwrap();
+        s.set_host_org("hosta", Some(org)).unwrap();
+        s.upsert_session("ctl", "hosta", None, None, 0, 10, "running", None)
+            .unwrap();
+        crate::service::operator::set_operator_ref(
+            &s,
+            &crate::service::operator::OperatorRef {
+                host_alias: "hosta".into(),
+                tmux_name: "ctl".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(message_org(&s), Some(org));
+    }
+    let fake = Fake::answering(vec![says(&w.s(), 0.9)]);
+    let r = propose(&w.ctx(&fake), &scope(), MESSAGE).await;
+    assert_eq!(fake.calls(), 1, "{r:?}");
+    let runs = w.runs();
+    assert!(runs[0].org_id.is_some());
+}
+
 /// Review r15: only targets whose org consented are asked about; a target
 /// with no org rides the message's own `unassigned` gate.
 #[test]

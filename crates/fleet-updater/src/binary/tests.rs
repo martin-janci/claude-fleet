@@ -707,3 +707,54 @@ fn a_restore_is_needed_unless_the_schema_did_not_move() {
         Some(140)
     ));
 }
+
+/// Review w09-2 (its pre-config half): a candidate that dies before its
+/// pass ever resumes (here: never reaching the pass at all) is rolled back
+/// by the start count `early_rollback` keeps, run before anything it could
+/// die on. The exec into it and `MAX_RESUMES` restarts are allowed.
+#[test]
+fn a_candidate_that_dies_before_its_pass_is_rolled_back_on_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let (root, state_dir) = (dir.path().join("root"), dir.path().join("state"));
+    let (old, new) = (
+        Version::parse("1.0.0").unwrap(),
+        Version::parse("1.1.0").unwrap(),
+    );
+    std::fs::create_dir_all(&root).unwrap();
+    point(&root.join("current"), Path::new(&safe(&new.to_string()))).unwrap();
+    let st = BinState {
+        phase: UpdatePhase::Validating,
+        candidate: Some(Candidate {
+            version: new.clone(),
+            sha256: "ab".repeat(32),
+            schema_to: None,
+        }),
+        previous: Some(Before {
+            version: old.clone(),
+            schema: None,
+            backup: None,
+        }),
+        ..BinState::default()
+    };
+    st.save(&state_dir).unwrap();
+    for _ in 0..MAX_STARTS {
+        assert_eq!(early_rollback(&root, &state_dir).unwrap(), None);
+    }
+    let why = early_rollback(&root, &state_dir)
+        .unwrap()
+        .expect("rolled back");
+    assert!(why.contains("never came up"), "{why}");
+    assert_eq!(
+        std::fs::read_link(root.join("current")).unwrap(),
+        Path::new(&safe(&old.to_string()))
+    );
+    let st = BinState::load(&state_dir).unwrap();
+    assert_eq!(
+        st.phase,
+        UpdatePhase::Failed,
+        "the pass finishes the rollback"
+    );
+    assert!(st.bad.is_bad(&new, Some(&"ab".repeat(32))));
+    // The previous build now runs: its starts are not counted.
+    assert_eq!(early_rollback(&root, &state_dir).unwrap(), None);
+}

@@ -2315,7 +2315,7 @@
         "level": "none"
       },
       "default": "false",
-      "help": "Finish: Draft writes a finished mission's release note from its merged PRs, on the mission's planner host.",
+      "help": "Missions: Draft writes a finished mission's release note from its merged PRs, and a stuck mission's triage card, on the mission's planner host.",
       "key": "work.draft_release_notes",
       "kind": {
         "type": "bool"
@@ -2336,7 +2336,49 @@
         "level": "none"
       },
       "default": "false",
-      "help": "A watched session offers \"Since 13:20\": what it did since you last looked, summarised on its own host and account.",
+      "help": "Today: Draft the brief writes the morning brief from today's digest with claude -p on the host of one of today's sessions.",
+      "key": "work.draft_morning_brief",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Draft the morning brief",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Dashboards: a summary widget writes its paragraph from the page's counts with claude -p on the host of one of your sessions running today.",
+      "key": "work.dashboard_summary",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Dashboard summaries",
+      "modified": false,
+      "restart": "none",
+      "scope": "fleet",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "A watched session offers \"Since 13:20\": what it did since you last looked, summarised on its own host and account. It needs no organisation's consent to Jev: only the summary check (decide.jev.summary_check) sends the excerpt there.",
       "key": "work.catch_up_summaries",
       "kind": {
         "type": "bool"
@@ -3647,10 +3689,10 @@
       "ai": "never",
       "danger": {
         "level": "confirm",
-        "message": "Claude's reply text from sessions outside every organisation will be sent to TypeSafe too."
+        "message": "Claude's own text from sessions outside every organisation will be sent to TypeSafe too: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines), mission triage (a worker's own summary), the duplicate check (an agent's reasons for a proposed task) and quick answer (an agent's reasons on a chat form)."
       },
       "default": "false",
-      "help": "Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all.",
+      "help": "Also send Claude's own text from sessions that belong to no organisation, on top of sending unassigned sessions at all, for each of these use cases that is on: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines), mission triage (a worker's own summary), the duplicate check (an agent's reasons for a proposed task) and quick answer (an agent's reasons on a chat form).",
       "key": "decide.jev.unassigned_reply",
       "kind": {
         "type": "bool"
@@ -5242,6 +5284,14 @@
                 },
                 {
                   "key": "work.draft_release_notes",
+                  "type": "field"
+                },
+                {
+                  "key": "work.draft_morning_brief",
+                  "type": "field"
+                },
+                {
+                  "key": "work.dashboard_summary",
                   "type": "field"
                 },
                 {
@@ -7976,12 +8026,12 @@
             "text": "sends replies to Jev",
             "when": "true"
           },
-          "confirm": "The end of this org's sessions' screens (Claude's reply text, redacted) will be sent to TypeSafe when Decisions (Jev) and its turn outcome use case are on.",
+          "confirm": "Claude's text from this org's sessions (redacted) will be sent to TypeSafe when Decisions (Jev) is on, for each of these use cases that is on: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines), mission triage (a worker's own summary), the duplicate check (an agent's reasons for a proposed task) and quick answer (an agent's reasons on a chat form).",
           "default": false,
           "edit": "jev_reply",
-          "help": "On top of Jev above: let the end of this org's sessions' screens — Claude's last reply, redacted, code replaced by placeholders, a few lines — go to TypeSafe's decision model, so Jev can tell a finished turn from a question when hooks say nothing. Off by default (D48).",
+          "help": "On top of Jev above: let Claude's text from this org's sessions, redacted and with code replaced by placeholders, go to TypeSafe's decision model for each of these use cases that is on: the turn outcome and a routine run's outcome (the end of a session's screen, a few lines), the summary check (up to 80 KB of a session's transcript: prompts, replies and tool lines), mission triage (a worker's own summary), the duplicate check (an agent's reasons for a proposed task) and quick answer (an agent's reasons on a chat form). Off by default (D48).",
           "id": "jev_reply_allowed",
-          "label": "Also allow Claude's reply text (turn outcome)",
+          "label": "Also allow Claude's own text (outcomes, checks, triage, agents' reasons)",
           "on_off": true,
           "type": "bool"
         },
