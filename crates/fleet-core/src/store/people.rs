@@ -642,6 +642,16 @@ impl Store {
             .optional()?)
     }
 
+    /// Whether any session row is `person`'s own: what a device of theirs
+    /// would read (review w01-1).
+    pub fn person_owns_a_session(&self, person: i64) -> Result<bool, IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE owner_person_id = ?1)",
+            [person],
+            |r| r.get(0),
+        )?)
+    }
+
     /// The ONE live person on this hub, when there is exactly one.
     ///
     /// `Some(id)` only when `people` holds exactly one row with no
