@@ -66,7 +66,17 @@ fn update_cmd(args: cli::UpdateArgs) -> Result<bool, String> {
     ))
 }
 
-/// `uninstall`: the scope's unit (or LaunchAgent), config and update state.
+/// The agent's own state directory under `home`: the identity file the
+/// desktop app on this machine reads, and the status line.
+fn agent_state_dir(home: &std::path::Path) -> PathBuf {
+    home.join(fleet_proto::identity::RELATIVE_PATH)
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/state/fleet-agent"))
+}
+
+/// `uninstall`: the scope's unit (or LaunchAgent), config, update state and
+/// the agent's own state files.
 fn uninstall_cmd(args: cli::UninstallArgs) -> Result<(), String> {
     let mut out = std::io::stdout();
     if cfg!(target_os = "macos") {
@@ -80,21 +90,24 @@ fn uninstall_cmd(args: cli::UninstallArgs) -> Result<(), String> {
         fleet_agent::launchd::uninstall(
             uid(),
             &layout,
-            &paths.state_dir,
+            &[paths.state_dir.clone(), agent_state_dir(&home)],
             &mut fleet_agent::launchd::RealLaunchctl,
             &mut out,
         )?;
         binaries_note(&paths);
         return Ok(());
     }
-    let (scope, mut layout, paths) = if args.user {
+    // Every update layout whose binaries stay, and every state directory
+    // that goes.
+    let mut kept = Vec::new();
+    let mut state_dirs = Vec::new();
+    let (scope, mut layout) = if args.user {
         let home = home().ok_or("--user needs $HOME")?;
         let config_home = config_home().ok_or("--user needs $XDG_CONFIG_HOME or $HOME")?;
-        (
-            install::Scope::User,
-            Layout::user(&config_home),
-            fleet_agent::update::UpdatePaths::user(&home),
-        )
+        let paths = fleet_agent::update::UpdatePaths::user(&home);
+        state_dirs.extend([paths.state_dir.clone(), agent_state_dir(&home)]);
+        kept.push(paths);
+        (install::Scope::User, Layout::user(&config_home))
     } else {
         if !is_root() {
             return Err(
@@ -103,25 +116,44 @@ fn uninstall_cmd(args: cli::UninstallArgs) -> Result<(), String> {
                     .into(),
             );
         }
+        let layout = Layout::system();
+        let paths = fleet_agent::update::UpdatePaths::system();
+        state_dirs.push(paths.state_dir.clone());
+        kept.push(paths);
+        // A system unit runs as `User=`: its identity and status files are
+        // in THAT user's home, and with no update timer installed so are
+        // the in-process updater's state and releases (review w01-6). Read
+        // before the unit file goes.
+        let run_home = std::fs::read_to_string(&layout.unit_path)
+            .ok()
+            .and_then(|u| install::unit_user(&u))
+            .and_then(|u| install::lookup_home(&u).ok())
+            .filter(|h| h.is_absolute());
+        if let Some(home) = run_home {
+            state_dirs.push(agent_state_dir(&home));
+            let timer = layout
+                .unit_path
+                .with_file_name(fleet_agent::update::UPDATE_TIMER);
+            if !timer.exists() {
+                let paths = fleet_agent::update::UpdatePaths::user(&home);
+                state_dirs.push(paths.state_dir.clone());
+                kept.push(paths);
+            }
+        }
         (
             install::Scope::System {
                 run_as: String::new(),
             },
-            Layout::system(),
-            fleet_agent::update::UpdatePaths::system(),
+            layout,
         )
     };
     if let Some(c) = args.config {
         layout.config_path = c;
     }
-    install::uninstall(
-        &scope,
-        &layout,
-        &paths.state_dir,
-        &mut RealSystemctl,
-        &mut out,
-    )?;
-    binaries_note(&paths);
+    install::uninstall(&scope, &layout, &state_dirs, &mut RealSystemctl, &mut out)?;
+    for paths in &kept {
+        binaries_note(paths);
+    }
     Ok(())
 }
 

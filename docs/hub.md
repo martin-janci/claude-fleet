@@ -1007,10 +1007,16 @@ fleet-agent uninstall --user        # Linux, --user unit; macOS (no flag needed)
 
 It stops and disables the unit and the update timer (on macOS it boots the
 LaunchAgent out), removes them, the config (it holds the host's token; pass
-`--config` if `install --config` put it elsewhere) and the updater's state,
-and reloads systemd. The sessions the agent started keep running, and the
-binaries stay: it prints where they are. An agent older than `uninstall`
-is removed by hand:
+`--config` if `install --config` put it elsewhere), the updater's state and
+the agent's own state (`~/.local/state/fleet-agent`: the identity file the
+desktop app on that machine reads, and the status line; for a system unit,
+in the home of the user it runs as), and reloads systemd. The sessions the
+agent started keep running, and the binaries stay: it prints where they are.
+It exits non-zero, and does not say "uninstalled", when it finds no agent in
+that scope (it names the other one to try) and when the unit was there but
+could not be stopped (for example `--user` with no user session bus): the
+files are removed, the process may still be running, and it prints how to
+stop it. An agent older than `uninstall` is removed by hand:
 
 ```bash
 # Linux, system unit (installed with sudo)
