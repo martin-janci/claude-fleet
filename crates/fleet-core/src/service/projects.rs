@@ -151,7 +151,11 @@ pub fn merge_project(
         HashSet::new()
     };
     let s = lock(store)?;
-    s.merge_project_checked(args.from, args.into, args.dry_run, &gone)
+    let report = s.merge_project_checked(args.from, args.into, args.dry_run, &gone)?;
+    if !args.dry_run {
+        crate::service::work::detect::forget_project_trust(&s, args.from, Some(args.into));
+    }
+    Ok(report)
 }
 
 /// The configured `projects.layout`.
@@ -401,6 +405,7 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
                 && owned_elsewhere(&p.project.base_path)
                 && s.delete_project_if_unused(id, &fp_keys)?
             {
+                crate::service::work::detect::forget_project_trust(&s, id, None);
                 removed.insert(id);
                 tracing::info!(
                     owner = %p.project.owner,
@@ -439,6 +444,7 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
             let inside = strip_root(&row.base_path, &root_raw).is_some()
                 || strip_root(&canon(&row.base_path), &root_canon).is_some();
             if !inside && s.delete_project_if_unused(row.id, &fp_keys)? {
+                crate::service::work::detect::forget_project_trust(&s, row.id, None);
                 tracing::info!(
                     owner = %row.owner,
                     repo = %row.repo,
@@ -496,6 +502,7 @@ pub fn forget_project(store: &Mutex<Store>, project_id: i64) -> Result<ProjectRo
             "the project is still referenced",
         ));
     }
+    crate::service::work::detect::forget_project_trust(&s, project_id, None);
     tracing::info!(
         project_id,
         owner = %row.owner,
@@ -714,11 +721,31 @@ mod tests {
             .conn_for_test()
             .execute("UPDATE sessions SET status='ghost' WHERE id=?1", [sid])
             .unwrap();
+        // Review w13-4: a trusted project takes its trust with it, so the
+        // next project to get its (reused) id is not trusted by inheritance.
+        {
+            let s = store.lock().unwrap();
+            crate::service::work::detect::set_project_trust(&s, pid, true).unwrap();
+        }
         let row = forget_project(&store, pid).unwrap();
         assert_eq!(row.id, pid);
         let s = store.lock().unwrap();
         assert!(s.get_project(pid).unwrap().is_none());
         assert!(s.get_session_by_id(sid).unwrap().is_none());
+        assert!(crate::service::work::detect::trusted_projects(&s).is_empty());
+        // And a merged project hands its trust to the one it went into.
+        let from = s.upsert_project("o", "from", "/p/o/from").unwrap();
+        let into = s.upsert_project("o", "into", "/p/o/into").unwrap();
+        crate::service::work::detect::set_project_trust(&s, from, true).unwrap();
+        crate::service::work::detect::forget_project_trust(&s, from, Some(into));
+        assert_eq!(
+            crate::service::work::detect::trusted_projects(&s)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![into]
+        );
+        s.set_setting(settings::WORK_TRUSTED_BRANCH_PROJECTS, "[]")
+            .unwrap();
         drop(s);
         assert_eq!(
             forget_project(&store, pid).unwrap_err().code,

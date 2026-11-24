@@ -747,6 +747,70 @@ pub fn login_with_headroom_on(
     .map_or_else(|| profile.map(str::to_string), |l| l.profile))
 }
 
+/// The login on `host` that stands for the login `profile`, which a rule or
+/// a grant named for the host `named_for`, when the start lands on `host`
+/// instead (a fallback host, the caller's host, the host of earlier work;
+/// review w06-2 / w06-3). The login there on the same account, the same name
+/// first; with the account not known at `named_for`, the same name when it
+/// is signed in to a known account on `host`; else the login nobody named
+/// would take ([`login_with_headroom_for`] from the host's own). Never a
+/// name `host` does not list: `PROFILE_LINKS` would create it empty and the
+/// session would wait at `/login`. Kept as named on the host it was named
+/// for, and on a host whose logins fleet has not read yet.
+pub fn login_carried_to(
+    s: &Store,
+    project_id: Option<i64>,
+    named_for: &str,
+    host: &str,
+    profile: &str,
+    now: i64,
+) -> Result<Option<String>, IpcError> {
+    let keep = || Ok(Some(profile.to_string()));
+    if named_for == host {
+        return keep();
+    }
+    let Some(row) = s.get_host_row(host)? else {
+        return keep();
+    };
+    if row.claude_profiles.is_none() && row.account_uuid.is_none() {
+        return keep();
+    }
+    let there: Vec<HostLogin> = login_accounts(s, host, now)?
+        .into_iter()
+        .map(|l| l.login)
+        .filter(|l| !l.signed_out)
+        .collect();
+    let same_name = |l: &&HostLogin| l.profile.as_deref() == Some(profile);
+    match login_account(s, named_for, Some(profile), now)?.map(|a| a.login.account_uuid) {
+        Some(account) => {
+            let mut on = there.iter().filter(|l| l.account_uuid == account);
+            let first = on.clone().find(same_name).or_else(|| on.next());
+            if let Some(l) = first {
+                return Ok(l.profile.clone());
+            }
+        }
+        None => {
+            if there.iter().any(|l| same_name(&l)) {
+                return keep();
+            }
+        }
+    }
+    login_with_headroom_for(s, project_id, host, None, now)
+}
+
+/// Whether a start may name the login `profile` on `host`: it is signed in
+/// to a known account there. `true` as well for a host fleet has not read
+/// the logins of (or does not know), where nothing can be judged.
+pub fn login_listed_on(s: &Store, host: &str, profile: &str, now: i64) -> Result<bool, IpcError> {
+    let Some(row) = s.get_host_row(host)? else {
+        return Ok(true);
+    };
+    if row.claude_profiles.is_none() && row.account_uuid.is_none() {
+        return Ok(true);
+    }
+    Ok(login_account(s, host, Some(profile), now)?.is_some_and(|l| !l.login.signed_out))
+}
+
 /// Step 4.4 on a start that did not come through the desktop's own dialog
 /// (an MCP or hub `new_session`): refuse a login at or past
 /// `accounts.pause_at` with `E_ACCOUNT_LIMIT`, naming its account and the

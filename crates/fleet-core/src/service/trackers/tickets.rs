@@ -1212,7 +1212,10 @@ pub fn plan_resolved(
         (None, None) => match match seen_host(&s, seen, project_id)? {
             // An org-bound client keeps the host it saw: placement does not
             // judge orgs.
-            seen if scope.bound_org().is_some() => seen.map(|h| (h, None)),
+            // A start rule's host is the host, not a preference placement
+            // may rank below another one: the rule's login is named for it
+            // (review w06-1).
+            seen if scope.bound_org().is_some() || rule_names_host => seen.map(|h| (h, None)),
             seen => placed_host(&s, project_id, seen),
         } {
             Some((h, profile)) => {
@@ -1370,8 +1373,30 @@ pub fn plan_resolved(
                 .and_then(|w| w.profile.clone())
                 .filter(|_| !own_login)
         });
+    // The host a rule named its login for, when the caller named none: a
+    // start that lands elsewhere (the fallback host, the caller's host, a
+    // start rule's host under a placement rule's login) takes the login
+    // there on the same account, never a name that host does not have
+    // (review w06-2).
+    let named_for = if args.profile.is_some() {
+        None
+    } else if let Some(r) = rule.as_ref().filter(|r| r.profile.is_some()) {
+        r.host_alias.clone()
+    } else {
+        placement.as_ref().and_then(|w| w.host_alias.clone())
+    };
     let profile = match named_profile {
-        Some(p) => Some(p),
+        Some(p) => match named_for.filter(|h| h != &host_alias) {
+            Some(from) => crate::service::account_limits::login_carried_to(
+                &s,
+                Some(project_id),
+                &from,
+                &host_alias,
+                &p,
+                crate::store::now_unix(),
+            )?,
+            None => Some(p),
+        },
         // Nobody named a login: the one placement picked, else the host's
         // own, gives way to a login on the host with headroom when its
         // account is past `accounts.pause_at` (a named host skips

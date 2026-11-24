@@ -488,7 +488,19 @@ fn start_for(
                 && host_alias.as_deref() != Some(p.host_alias.as_str())
                 && grant
                     .and_then(|g| g.hosts.as_ref())
-                    .is_some_and(|h| h.contains(&p.host_alias)) =>
+                    .is_some_and(|h| h.contains(&p.host_alias))
+                // The grant's login goes by name: only to a host that has
+                // it, or the run would wait at `/login` there and no hold
+                // would say why (review w06-3).
+                && match grant.and_then(|g| g.profile.as_deref()) {
+                    Some(login) => crate::service::account_limits::login_listed_on(
+                        s,
+                        &p.host_alias,
+                        login,
+                        now_unix(),
+                    )?,
+                    None => true,
+                } =>
         {
             (Some(p.host_alias), grant.and_then(|g| g.profile.clone()))
         }

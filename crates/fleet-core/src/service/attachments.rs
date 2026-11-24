@@ -106,7 +106,8 @@ pub fn stage_script(root: &str) -> String {
          mkdir -p {dir} && \
          {{ [ \"$(cd {dir} && pwd -P)\" = \"$(cd {root_q} && pwd -P)/\"{name} ] || \
             {{ echo {refused} >&2; exit 8; }}; }} && \
-         g=$(git -C {root_q} rev-parse --path-format=absolute --git-common-dir) && \
+         g=$(CDPATH= cd -- {root_q} && \
+             CDPATH= cd -- \"$(git rev-parse --git-common-dir)\" && pwd -P) && \
          mkdir -p \"$g/info\" && \
          {{ grep -qxF {line} \"$g/info/exclude\" 2>/dev/null || \
             printf '%s\\n' {line} >> \"$g/info/exclude\"; }}"

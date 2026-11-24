@@ -1359,14 +1359,26 @@ pub async fn provision_host_with_token(
         // converges every file on the committed token.
         if minted && landed {
             commit_host_token(store, host, &token, minted)?;
-            return Err(IpcError::new(
-                &e.code,
-                format!(
-                    "{host} was partly provisioned with its new token, which is now the one \
-                     in use; provision {host} again to finish: {}",
-                    e.message
-                ),
-            ));
+            let message = format!(
+                "{host} was partly provisioned with its new token, which is now the one \
+                 in use; provision {host} again to finish: {}",
+                e.message
+            );
+            // The files the run did not reach (hook headers, the login
+            // profiles' MCP entries) still carry the revoked token, so the
+            // host's hooks are refused. The row says so and owes a retry:
+            // the stale pass rewrites them with the committed token, and
+            // Host detail shows why (reviews w01-2 / w03-4). Best effort:
+            // the error below is returned either way.
+            if let Err(err) = lock(store)?.record_host_provision_outcome(host, Some(&message), true)
+            {
+                tracing::warn!(
+                    host,
+                    error = %err,
+                    "[provision] could not mark a partly rotated host as owing a retry"
+                );
+            }
+            return Err(IpcError::new(&e.code, message));
         }
         return Err(e);
     }
@@ -5122,6 +5134,18 @@ mod tests {
             .filter_map(Call::stdin_str)
             .any(|u| u.contains(&committed)));
         let first = committed;
+        // Reviews w01-2 / w03-4: the row owes a retry and says why, so the
+        // stale pass rewrites the hooks with the committed token.
+        {
+            let row = store.lock().unwrap().get_host_row("h").unwrap().unwrap();
+            assert!(row.provisioned && row.provision_stale, "{row:?}");
+            assert!(
+                row.provision_warning
+                    .as_deref()
+                    .is_some_and(|w| w.contains("partly provisioned")),
+                "{row:?}"
+            );
+        }
 
         // Rotation that succeeds persists the new token the host received.
         let ok = provisioned_host();

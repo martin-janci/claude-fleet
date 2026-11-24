@@ -362,21 +362,46 @@ pub fn uninstall_calls(scope: &Scope) -> Vec<Vec<String>> {
     .collect()
 }
 
+/// The user a system unit runs as (`User=`), for `uninstall`: its home
+/// holds the agent's identity and status files.
+pub fn unit_user(unit: &str) -> Option<String> {
+    unit.lines()
+        .find_map(|l| l.trim().strip_prefix("User="))
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(str::to_string)
+}
+
 /// `fleet-agent uninstall`: stop and disable the units, then remove them,
-/// the config (this host's token) and the updater's state, and reload
-/// systemd. What the agent started (tmux servers, Claude sessions) keeps
-/// running (`KillMode=process`); the binaries under the update layout stay,
-/// and `out` names them. A file already gone is not an error.
+/// the config (this host's token) and `state_dirs` (the updater's state,
+/// and the agent's own `~/.local/state/fleet-agent`: its identity file
+/// would keep telling the desktop app on this machine that it is the host,
+/// and `status` would keep printing the last connection, review w01-6),
+/// and reload systemd. What the agent started (tmux servers, Claude
+/// sessions) keeps running (`KillMode=process`); the binaries under the
+/// update layout stay, and `out` names them.
+///
+/// It does not say "uninstalled" for what it did not do (review w01-7):
+/// with nothing of the agent in this scope it is an error that names the
+/// other scope, and a unit that was there but could not be stopped is an
+/// error after the files are removed, saying the agent may still run.
 pub fn uninstall(
     scope: &Scope,
     layout: &Layout,
-    state_dir: &Path,
+    state_dirs: &[PathBuf],
     systemctl: &mut dyn Systemctl,
     out: &mut dyn Write,
 ) -> Result<(), String> {
+    let user = *scope == Scope::User;
+    let unit_there = layout.unit_path.exists();
+    let mut stop_failed = None;
     for call in uninstall_calls(scope) {
         let _ = writeln!(out, "systemctl {}", call.join(" "));
-        let _ = systemctl.run(&call);
+        if let Err(e) = systemctl.run(&call) {
+            if unit_there && call.last().map(String::as_str) == Some(UNIT_NAME) {
+                stop_failed = Some(e);
+            }
+        }
     }
     let unit_dir = layout.unit_path.parent().unwrap_or(Path::new("/"));
     let mut paths = vec![layout.unit_path.clone()];
@@ -388,23 +413,47 @@ pub fn uninstall(
         paths.push(unit_dir.join(name));
     }
     paths.push(layout.config_path.clone());
-    paths.push(state_dir.to_path_buf());
+    paths.extend(state_dirs.iter().cloned());
+    let mut removed = 0;
     for p in &paths {
         if remove_if_there(p)? {
+            removed += 1;
             let _ = writeln!(out, "removed {}", p.display());
         }
+    }
+    if removed == 0 {
+        return Err(format!(
+            "no agent is installed in this scope (nothing at {} or {}): {}",
+            layout.unit_path.display(),
+            layout.config_path.display(),
+            if user {
+                "for an agent installed with sudo, run `sudo fleet-agent uninstall`"
+            } else {
+                "for an agent installed with `install --user`, run `fleet-agent uninstall --user` \
+                 as that user"
+            }
+        ));
     }
     // The config's own directory, when nothing else is in it.
     if let Some(dir) = layout.config_path.parent() {
         let _ = std::fs::remove_dir(dir);
     }
     let mut reload = Vec::new();
-    if *scope == Scope::User {
+    if user {
         reload.push("--user".to_string());
     }
     reload.push("daemon-reload".to_string());
     let _ = writeln!(out, "systemctl {}", reload.join(" "));
     let _ = systemctl.run(&reload);
+    if let Some(e) = stop_failed {
+        return Err(format!(
+            "the agent's files are removed, but stopping it failed ({e}): it may still be \
+             running, connected with the token it holds in memory. Stop it with `systemctl{} \
+             stop {UNIT_NAME}` (from the user's own login session for --user), or end the \
+             fleet-agent process",
+            if user { " --user" } else { "" }
+        ));
+    }
     let _ = writeln!(
         out,
         "the agent is uninstalled; the sessions it started keep running. \
@@ -473,6 +522,17 @@ pub fn show_args(scope_user: bool) -> Vec<String> {
 /// friends count, not only `/etc/passwd`).
 #[cfg(unix)]
 pub fn lookup_user(user: &str) -> Result<(u32, u32), String> {
+    lookup_passwd(user).map(|(uid, gid, _)| (uid, gid))
+}
+
+/// `user`'s home directory, from the same database.
+#[cfg(unix)]
+pub fn lookup_home(user: &str) -> Result<PathBuf, String> {
+    lookup_passwd(user).map(|(_, _, home)| home)
+}
+
+#[cfg(unix)]
+fn lookup_passwd(user: &str) -> Result<(u32, u32, PathBuf), String> {
     let name = std::ffi::CString::new(user).map_err(|_| format!("{user:?} is not a user name"))?;
     let mut buf = vec![0u8; 16 * 1024];
     // SAFETY: every pointer is to a local that outlives the call, and `buf`'s
@@ -491,7 +551,16 @@ pub fn lookup_user(user: &str) -> Result<(u32, u32), String> {
     if rc != 0 || found.is_null() {
         return Err(format!("no such user: {user}"));
     }
-    Ok((pwd.pw_uid, pwd.pw_gid))
+    let home = if pwd.pw_dir.is_null() {
+        PathBuf::new()
+    } else {
+        use std::os::unix::ffi::OsStrExt;
+        // SAFETY: `pw_dir` points into `buf`, which is alive here, and the
+        // call above NUL-terminated it.
+        let dir = unsafe { std::ffi::CStr::from_ptr(pwd.pw_dir) };
+        PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes()))
+    };
+    Ok((pwd.pw_uid, pwd.pw_gid, home))
 }
 
 #[cfg(test)]
@@ -516,12 +585,19 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         calls: Vec<Vec<String>>,
+        /// Every call that names this unit fails.
+        fail_on: Option<&'static str>,
     }
 
     impl Systemctl for Recorder {
         fn run(&mut self, args: &[String]) -> Result<(), String> {
             self.calls.push(args.to_vec());
-            Ok(())
+            match self.fail_on {
+                Some(unit) if args.iter().any(|a| a == unit) => {
+                    Err("Failed to connect to bus".into())
+                }
+                _ => Ok(()),
+            }
         }
     }
 
@@ -686,6 +762,11 @@ mod tests {
         let state_dir = dir.path().join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::write(state_dir.join("state.json"), "{}").unwrap();
+        // Review w01-6: the agent's own state (identity, status line) goes.
+        let agent_state = dir.path().join("agent-state");
+        std::fs::create_dir_all(&agent_state).unwrap();
+        std::fs::write(agent_state.join("identity.json"), "{}").unwrap();
+        let state_dirs = [state_dir.clone(), agent_state.clone()];
         let unit_dir = plan.layout.unit_path.parent().unwrap().to_path_buf();
         assert!(unit_dir.join(crate::update::UPDATE_TIMER).exists());
 
@@ -694,7 +775,7 @@ mod tests {
         uninstall(
             &Scope::User,
             &plan.layout,
-            &state_dir,
+            &state_dirs,
             &mut systemctl,
             &mut out,
         )
@@ -706,6 +787,7 @@ mod tests {
             unit_dir.join(crate::update::UPDATE_TIMER),
             unit_dir.join(crate::update::UPDATE_PATH),
             state_dir.clone(),
+            agent_state.clone(),
         ] {
             assert!(!gone.exists(), "{} is still there", gone.display());
         }
@@ -715,16 +797,51 @@ mod tests {
         assert!(want.iter().all(|c| c[0] == "--user"));
         let said = String::from_utf8(out).unwrap();
         assert!(!said.contains(TOKEN), "{said}");
+        assert!(said.contains("the agent is uninstalled"), "{said}");
 
-        // Again, with nothing left: not an error.
-        uninstall(
+        // Review w01-7: again, with nothing left, it does not claim to have
+        // uninstalled anything; it names the other scope.
+        let mut out = Vec::new();
+        let err = uninstall(
             &Scope::User,
             &plan.layout,
-            &state_dir,
+            &state_dirs,
             &mut Recorder::default(),
-            &mut Vec::new(),
+            &mut out,
         )
-        .unwrap();
+        .unwrap_err();
+        assert!(err.contains("no agent is installed"), "{err}");
+        assert!(err.contains("sudo fleet-agent uninstall"), "{err}");
+        assert!(!String::from_utf8(out).unwrap().contains("is uninstalled"));
+    }
+
+    /// Review w01-7: a unit that is there but cannot be stopped (no user
+    /// bus) is not reported as uninstalled: the process may still run.
+    #[test]
+    fn uninstall_says_so_when_the_agent_could_not_be_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = plan_in(dir.path(), true);
+        install(&plan, &mut Recorder::default(), &mut Vec::new()).unwrap();
+        let mut systemctl = Recorder {
+            fail_on: Some(UNIT_NAME),
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        let err = uninstall(&Scope::User, &plan.layout, &[], &mut systemctl, &mut out).unwrap_err();
+        assert!(err.contains("may still be running"), "{err}");
+        assert!(err.contains("Failed to connect to bus"), "{err}");
+        assert!(err.contains("systemctl --user stop"), "{err}");
+        assert!(!plan.layout.config_path.exists(), "the token file is gone");
+        assert!(!String::from_utf8(out).unwrap().contains("is uninstalled"));
+    }
+
+    #[test]
+    fn a_units_user_is_read_from_it() {
+        assert_eq!(
+            unit_user("[Service]\nType=simple\nUser=alice\nExecStart=/x run\n").as_deref(),
+            Some("alice")
+        );
+        assert_eq!(unit_user("[Service]\nExecStart=/x run\n"), None);
     }
 
     /// The system scope's layout, rendered into a directory the test owns:

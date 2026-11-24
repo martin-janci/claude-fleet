@@ -897,9 +897,11 @@ pub fn has_identity_beyond(s: &Store, person: i64, org: i64) -> Result<bool, Ipc
 /// person named `name` (`pair_device`, `set_device_person`). The operator
 /// (no person) and the hub's personal owner may name anybody. A fleet admin
 /// who is somebody else names themselves, a new name, or a person who has
-/// no identity yet: no device, no login, no membership, neither a fleet
-/// admin nor the owner. Anything more would be a device that IS that
-/// person, their private sessions included (review w07-1).
+/// no identity yet: no device, no login, no membership, no session of
+/// their own, neither a fleet admin nor the owner. Anything more would be a
+/// device that IS that person, their private sessions included (review
+/// w07-1). The sessions count by themselves, so taking a person's devices
+/// and memberships away first opens nothing (review w01-1).
 pub fn require_may_hand_a_device_to(s: &Store, me: Me<'_>, name: &str) -> Result<(), IpcError> {
     let Some(mine) = me.person else {
         return Ok(());
@@ -942,7 +944,39 @@ pub fn require_may_hand_a_device_to(s: &Store, me: Me<'_>, name: &str) -> Result
     if has_device || has_login || member {
         return refuse("already has a device, a login or an org");
     }
+    if s.person_owns_a_session(target.id)? {
+        return refuse("has sessions of their own");
+    }
     Ok(())
+}
+
+/// Whether `me`, under fleet authority, may hand the device `row` to
+/// another person (`set_device_person`). A fleet admin who is not the hub's
+/// owner re-hands only a device that is nobody's or their own: moving
+/// somebody's device away would strip that person down to "no identity",
+/// whom [`require_may_hand_a_device_to`] then lets them pair as (review
+/// w01-1).
+fn require_may_rehand(s: &Store, me: Me<'_>, row: &ClientTokenRow) -> Result<(), IpcError> {
+    let (Some(mine), Authority::Fleet) = (me.person, me.authority) else {
+        return Ok(());
+    };
+    let Some(theirs) = row.person_id.filter(|p| *p != mine) else {
+        return Ok(());
+    };
+    if s.personal_owner_id()? == Some(mine) {
+        return Ok(());
+    }
+    let whose = s
+        .get_person(theirs)?
+        .map_or_else(|| format!("person {theirs}"), |p| p.name);
+    Err(IpcError::new(
+        codes::E_FORBIDDEN,
+        format!(
+            "{:?} belongs to {whose:?}: only the hub owner hands another person's device \
+             over (revoke it to end its access)",
+            row.name
+        ),
+    ))
 }
 
 /// A person named in `args` (`person_id`, else `person` by name). `create`:
@@ -1658,6 +1692,7 @@ fn run_action(
         }
         Action::SetDevicePerson => {
             let row = device_row(s, need(&args.device, name, "device")?, me, "handing over")?;
+            require_may_rehand(s, me, &row)?;
             let person = match args
                 .person
                 .as_deref()

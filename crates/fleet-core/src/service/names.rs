@@ -52,9 +52,15 @@ pub fn slugify(s: &str) -> String {
 }
 
 /// Make a name acceptable to `validate::tmux_name`: `.` and `:` (tmux's
-/// target separators) become `-`.
+/// target separators), `#` and every whitespace or control character
+/// become `-`. A worktree made by hand may hold a space (`.worktrees/fix
+/// login`), and the name fleet picks for a session in it must pass fleet's
+/// own rule (review w16-3).
 pub fn tmux_safe(s: &str) -> String {
-    s.replace(['.', ':', '#'], "-")
+    s.replace(
+        |c: char| matches!(c, '.' | ':' | '#') || c.is_whitespace() || c.is_control(),
+        "-",
+    )
 }
 
 #[derive(serde::Deserialize)]
@@ -233,6 +239,9 @@ mod tests {
         // A branch may hold `#`; tmux would format-expand it in a new name.
         assert_eq!(tmux_safe("feat#H.x"), "feat-H-x");
         assert!(crate::validate::tmux_name(&tmux_safe("x#(id)")).is_ok());
+        // Review w16-3: a hand-made worktree name with a space or a tab.
+        assert_eq!(tmux_safe("dev-o-r--fix login"), "dev-o-r--fix-login");
+        assert!(crate::validate::tmux_name(&tmux_safe("a b\tc\u{7}d")).is_ok());
     }
 
     #[test]

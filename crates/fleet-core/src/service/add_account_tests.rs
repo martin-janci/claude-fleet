@@ -1782,10 +1782,25 @@ async fn a_login_a_live_session_uses_is_not_removed() {
     assert_eq!(profiles_of(&store, "mercury"), vec!["api", "ci", "work"]);
 
     a.profile = "work".into();
-    run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+    let out = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
         .await
         .unwrap();
     assert_eq!(profiles_of(&store, "mercury"), vec!["api", "ci"]);
+    // Review w06-4: the ended row lets go of the removed name, so a Resume
+    // or a Restore of it does not recreate the profile empty; the live
+    // row under another profile is untouched.
+    assert_eq!(out["sessions_reset"], serde_json::json!(["old"]));
+    let s = store.lock().unwrap();
+    let rows = s.list_sessions_for_host("mercury").unwrap();
+    let profile_of = |name: &str| {
+        rows.iter()
+            .find(|r| r.tmux_name == name)
+            .unwrap()
+            .claude_profile
+            .clone()
+    };
+    assert_eq!(profile_of("old"), None);
+    assert_eq!(profile_of("build").as_deref(), Some("ci"));
 }
 
 /// w03-4: a routine that names the profile on its host keeps it: its next

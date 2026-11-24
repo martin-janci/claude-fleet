@@ -65,7 +65,12 @@ fn row(r: &rusqlite::Row<'_>) -> Result<PinnedDashboardRow> {
     let created_by: Option<String> = r.get(9)?;
     let undo = if can_undo {
         Some("restore".to_string())
-    } else if created_by.as_deref() == Some(AGENT_DEVICE) {
+    } else if created_by.as_deref() == Some(AGENT_DEVICE) && device.as_deref() == Some(AGENT_DEVICE)
+    {
+        // Control made it AND its version is the one showing (review
+        // w01-5): once the person replaced it, the dashboard is theirs, and
+        // an Undo that put their earlier version back must not offer to
+        // unpin it.
         Some("remove".to_string())
     } else {
         None

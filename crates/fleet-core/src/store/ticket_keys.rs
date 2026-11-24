@@ -194,17 +194,35 @@ const SPACE_COLUMNS: &str = "id, scope, prefix, next_seq, former_prefixes";
 /// The scope a removed project's space is kept under (w05-3).
 const RETIRED_SCOPE: &str = "retired:";
 
+/// The scope a removed project's space is kept under since w02-8, by the
+/// repository it was (`retired:repo:<owner>/<repo>:<space id>`), so the
+/// same repository registered again takes it back.
+const RETIRED_REPO_SCOPE: &str = "retired:repo:";
+
+/// `owner/repo` of a [`RETIRED_REPO_SCOPE`] scope.
+fn retired_repo(scope: &str) -> Option<&str> {
+    Some(scope.strip_prefix(RETIRED_REPO_SCOPE)?.rsplit_once(':')?.0)
+}
+
 /// Detach a removed project's ticket space, inside the transaction that
 /// removes the project (w05-3). A project id is a reused rowid, so a space
 /// left on `project:<id>` would hand its prefix and counter to the next
 /// project that takes the id. The space is kept, under
-/// `retired:project:<id>:<space id>`, so its keys still resolve by prefix.
+/// `retired:repo:<owner>/<repo>:<space id>` (the project row is still
+/// there), so its keys still resolve by prefix and
+/// [`Store::project_ticket_space`] gives it back to the same repository
+/// when it is registered again (w02-8: `refresh_projects` removes and
+/// re-adds every unused project when the projects root changes, and each
+/// came back as `APP2`). A space whose project row is already gone keeps
+/// the older `retired:project:<id>:<space id>`.
 pub(super) fn retire_project_ticket_space_in(
     tx: &rusqlite::Connection,
     project_id: i64,
 ) -> rusqlite::Result<usize> {
     tx.execute(
-        "UPDATE ticket_spaces SET scope = 'retired:' || scope || ':' || id \
+        "UPDATE ticket_spaces SET scope = COALESCE( \
+           (SELECT 'retired:repo:' || owner || '/' || repo FROM projects WHERE id = ?1), \
+           'retired:' || scope) || ':' || id \
           WHERE scope = 'project:' || ?1",
         rusqlite::params![project_id],
     )
@@ -257,20 +275,37 @@ impl Store {
         if let Some(s) = self.ticket_space_by_scope(&scope)? {
             return Ok(s);
         }
-        let repo: Option<String> = self
+        let repo: Option<(String, String)> = self
             .conn
             .query_row(
-                "SELECT repo FROM projects WHERE id = ?1",
+                "SELECT owner, repo FROM projects WHERE id = ?1",
                 rusqlite::params![project_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let Some(repo) = repo else {
+        let Some((owner, repo)) = repo else {
             return Err(IpcError::new(
                 codes::E_NOTFOUND,
                 format!("project {project_id} not found"),
             ));
         };
+        // The same repository, back after its row was removed: its own
+        // space, prefix and counter (w02-8); the newest when it went twice.
+        let name = format!("{owner}/{repo}");
+        let retired = self
+            .list_ticket_spaces()?
+            .into_iter()
+            .filter(|s| retired_repo(&s.scope).is_some_and(|r| r.eq_ignore_ascii_case(&name)))
+            .max_by_key(|s| s.id);
+        if let Some(space) = retired {
+            self.conn.execute(
+                "UPDATE ticket_spaces SET scope = ?1 WHERE id = ?2",
+                rusqlite::params![scope, space.id],
+            )?;
+            return self.ticket_space(space.id)?.ok_or_else(|| {
+                IpcError::new(codes::E_INTERNAL, "ticket space vanished after re-attach")
+            });
+        }
         self.create_ticket_space(&scope, &repo)
     }
 
@@ -557,6 +592,9 @@ impl Store {
         }
         if let Some(repo) = scope.strip_prefix("github:") {
             return Ok((format!("GitHub {repo}"), None));
+        }
+        if let Some(repo) = retired_repo(scope) {
+            return Ok((format!("{repo} (removed)"), None));
         }
         if let Some(id) = scope
             .strip_prefix(RETIRED_SCOPE)

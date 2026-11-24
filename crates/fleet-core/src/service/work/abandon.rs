@@ -16,7 +16,8 @@
 //! nothing is touched. The order afterwards keeps a race safe: the session
 //! is killed first, so Claude writes nothing after the check; `git worktree
 //! remove` without `--force` still refuses a tree that changed meanwhile;
-//! and `git branch -d` (not `-D`) refuses a branch that grew a commit.
+//! and the branch is deleted only while no commit is its alone (counted
+//! again in the same script, right before `git branch -D`).
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::trackers::tickets::{StartSpawned, START_SPAWNED};
@@ -43,7 +44,7 @@ pub struct AbandonOutcome {
     /// The checkout was removed.
     pub worktree_removed: bool,
     /// The start's branch was deleted. `false` leaves an empty branch
-    /// behind (`git branch -d` refused it); nothing is lost either way.
+    /// behind (it grew a commit meanwhile); nothing is lost either way.
     pub branch_deleted: bool,
 }
 
@@ -154,10 +155,18 @@ pub fn plan_abandon(s: &Store, session_id: i64) -> Result<AbandonPlan, IpcError>
 /// The line [`remove_script`] prints once the start's branch is deleted.
 const BRANCH_DELETED: &str = "FLEET_ABANDON_BRANCH_DELETED";
 
-/// PURE: remove the start's checkout and then (best effort, `-d` refuses a
-/// branch that grew a commit) its branch, from the worktree's own
-/// repository ([`crate::service::safe_kill::git_for_worktree`]). Fails
-/// only when the checkout could not be removed.
+/// PURE: remove the start's checkout and then (best effort) its branch,
+/// from the worktree's own repository
+/// ([`crate::service::safe_kill::git_for_worktree`]). Fails only when the
+/// checkout could not be removed.
+///
+/// The branch goes by the count [`require_clean`] made, taken again here:
+/// no commit on it that no other branch and no remote has. `git branch -d`
+/// asks something else (merged into the base checkout's HEAD, as the
+/// branch has no upstream), which a start cut from a fresh `origin/<default>`
+/// fails wherever the local default is behind: every cancelled start left
+/// its branch, and the ticket's next start continued from that old commit
+/// (review w02-2).
 fn remove_script(p: &AbandonPlan) -> String {
     let (prelude, git) = crate::service::safe_kill::git_for_worktree(
         &p.host_alias,
@@ -166,8 +175,11 @@ fn remove_script(p: &AbandonPlan) -> String {
     );
     format!(
         "{prelude}{git} worktree remove -- {wt} || exit 1; \
-         if {git} branch -d -- {branch} >/dev/null 2>&1; then echo {BRANCH_DELETED}; fi",
+         if [ \"$({git} rev-list --count {head} --not --exclude={branch} --branches --remotes \
+         2>/dev/null)\" = 0 ] && {git} branch -D -- {branch} >/dev/null 2>&1; \
+         then echo {BRANCH_DELETED}; fi",
         wt = quote(&p.worktree_path),
+        head = quote(&format!("refs/heads/{}", p.branch)),
         branch = quote(&p.branch),
     )
 }
@@ -421,8 +433,8 @@ mod tests {
         let remote = remove_script(&plan());
         assert!(
             remote.starts_with(
-                "fleet_git_dir=$(git -C '/r/.worktrees/pay-142' rev-parse --path-format=absolute \
-                 --git-common-dir) || exit 1; "
+                "fleet_git_dir=$(CDPATH= cd -- '/r/.worktrees/pay-142' && \
+                 CDPATH= cd -- \"$(git rev-parse --git-common-dir)\" && pwd -P) || exit 1; "
             ),
             "{remote}"
         );
@@ -434,7 +446,7 @@ mod tests {
             "{remote}"
         );
         assert!(
-            remote.contains("git --git-dir=\"$fleet_git_dir\" branch -d -- 'pay-142'"),
+            remote.contains("git --git-dir=\"$fleet_git_dir\" branch -D -- 'pay-142'"),
             "{remote}"
         );
         let local = remove_script(&AbandonPlan {
@@ -445,5 +457,120 @@ mod tests {
             local.starts_with("git -C '/r' worktree remove -- '/r/.worktrees/pay-142' || exit 1;"),
             "{local}"
         );
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .output()
+            .unwrap_or_else(|e| panic!("spawn git {args:?}: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// Reviews w02-1 and w02-2, against a real repository: the remote
+    /// host's script (no `--path-format`, which git before 2.31 lacks)
+    /// removes the checkout and deletes the start's branch although the
+    /// base checkout's `main` is behind `origin/main`, where `branch -d`
+    /// answered "not fully merged"; a branch with a commit of its own stays.
+    #[test]
+    fn the_remove_script_runs_against_a_real_repository() {
+        let have = |bin: &str, arg: &str| {
+            std::process::Command::new(bin)
+                .arg(arg)
+                .output()
+                .is_ok_and(|o| o.status.success())
+        };
+        if !have("bash", "--version") || !have("git", "--version") {
+            eprintln!("SKIP the_remove_script_runs_against_a_real_repository: no bash or git");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let origin = root.join("origin.git");
+        let base = root.join("base");
+        let other = root.join("other");
+        git(&root, &["init", "-q", "--bare", "-b", "main", "origin.git"]);
+        git(&root, &["init", "-q", "-b", "main", "base"]);
+        std::fs::write(base.join("f"), "1").unwrap();
+        git(&base, &["add", "f"]);
+        git(&base, &["commit", "-q", "-m", "one"]);
+        git(
+            &base,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git(&base, &["push", "-q", "origin", "main"]);
+        // origin moves on; the base checkout's `main` stays behind.
+        git(&root, &["clone", "-q", origin.to_str().unwrap(), "other"]);
+        std::fs::write(other.join("f"), "2").unwrap();
+        git(&other, &["commit", "-q", "-a", "-m", "two"]);
+        git(&other, &["push", "-q", "origin", "main"]);
+        git(&base, &["fetch", "-q", "origin", "main"]);
+        let start = |branch: &str| -> AbandonPlan {
+            let wt = base.join(".worktrees").join(branch);
+            git(
+                &base,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "--no-track",
+                    "-b",
+                    branch,
+                    wt.to_str().unwrap(),
+                    "origin/main",
+                ],
+            );
+            AbandonPlan {
+                worktree_path: wt.to_str().unwrap().into(),
+                // Another machine's path: a remote host's script never
+                // reads it.
+                project_base: "/nowhere/base".into(),
+                branch: branch.into(),
+                ..plan()
+            }
+        };
+        let run = |p: &AbandonPlan| {
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(remove_script(p))
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .current_dir(&root)
+                .output()
+                .expect("spawn bash");
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let p = start("pay-142");
+        let out = run(&p);
+        assert!(!std::path::Path::new(&p.worktree_path).exists());
+        assert!(out.lines().any(|l| l.trim() == BRANCH_DELETED), "{out}");
+        assert!(!git(&base, &["branch", "--list", "pay-142"]).contains("pay-142"));
+
+        // A commit of its own that nobody else has: the branch is kept.
+        let p = start("pay-143");
+        let wt = std::path::Path::new(&p.worktree_path);
+        std::fs::write(wt.join("f"), "3").unwrap();
+        git(wt, &["commit", "-q", "-a", "-m", "mine"]);
+        let out = run(&p);
+        assert!(!wt.exists());
+        assert!(!out.contains(BRANCH_DELETED), "{out}");
+        assert!(git(&base, &["branch", "--list", "pay-143"]).contains("pay-143"));
     }
 }

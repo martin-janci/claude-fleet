@@ -253,29 +253,57 @@ pub fn install(
 
 /// `fleet-agent uninstall` on macOS: boot the job out of the GUI domain
 /// (allowed to fail: it may not be loaded), then remove the plist, the
-/// config (this host's token) and the updater's state. The sessions the
-/// agent started keep running (`AbandonProcessGroup`); the log stays.
+/// config (this host's token) and `state_dirs` (the updater's state and the
+/// agent's own `~/.local/state/fleet-agent`, whose identity file the
+/// desktop app on this Mac reads: review w01-6). The sessions the agent
+/// started keep running (`AbandonProcessGroup`); the log stays.
+///
+/// As on Linux it does not say "uninstalled" for what it did not do
+/// (review w01-7): nothing of the agent here is an error, and so is a job
+/// that is still loaded after a failed bootout.
 pub fn uninstall(
     uid: u32,
     layout: &Layout,
-    state_dir: &Path,
+    state_dirs: &[std::path::PathBuf],
     launchctl: &mut dyn Launchctl,
     out: &mut dyn Write,
 ) -> Result<(), String> {
     let call = vec!["bootout".to_string(), service_target(uid)];
     let _ = writeln!(out, "launchctl {}", call.join(" "));
-    let _ = launchctl.run(&call);
-    for p in [
-        layout.plist_path.as_path(),
-        layout.config_path.as_path(),
-        state_dir,
-    ] {
+    // A failed bootout is the usual answer for a job that is not loaded;
+    // only one `print` still finds is a job that keeps running.
+    let still_loaded = match launchctl.run(&call) {
+        Ok(()) => None,
+        Err(e) => launchctl.run(&print_args(uid)).is_ok().then_some(e),
+    };
+    let mut removed = 0;
+    for p in [layout.plist_path.as_path(), layout.config_path.as_path()]
+        .into_iter()
+        .chain(state_dirs.iter().map(|p| p.as_path()))
+    {
         if crate::install::remove_if_there(p)? {
+            removed += 1;
             let _ = writeln!(out, "removed {}", p.display());
         }
     }
+    if removed == 0 {
+        return Err(format!(
+            "no agent is installed for this user (nothing at {} or {}): run it as the user \
+             who ran `fleet-agent install`",
+            layout.plist_path.display(),
+            layout.config_path.display()
+        ));
+    }
     if let Some(dir) = layout.config_path.parent() {
         let _ = std::fs::remove_dir(dir);
+    }
+    if let Some(e) = still_loaded {
+        return Err(format!(
+            "the agent's files are removed, but stopping it failed ({e}): it may still be \
+             running, connected with the token it holds in memory. Stop it with `launchctl \
+             bootout {}`, or end the fleet-agent process",
+            service_target(uid)
+        ));
     }
     let _ = writeln!(
         out,
@@ -310,13 +338,15 @@ mod tests {
     struct Recorder {
         calls: Vec<Vec<String>>,
         fail_on: Option<&'static str>,
+        /// A second verb that fails (`print` for a job that is not loaded).
+        also_fail: Option<&'static str>,
     }
 
     impl Launchctl for Recorder {
         fn run(&mut self, args: &[String]) -> Result<(), String> {
             self.calls.push(args.to_vec());
-            match self.fail_on {
-                Some(verb) if args.first().map(String::as_str) == Some(verb) => {
+            match args.first().map(String::as_str) {
+                Some(verb) if [self.fail_on, self.also_fail].contains(&Some(verb)) => {
                     Err(format!("{verb} failed"))
                 }
                 _ => Ok(()),
@@ -448,26 +478,65 @@ mod tests {
         install(&plan, &mut Recorder::default(), &mut Vec::new()).unwrap();
         let state_dir = dir.path().join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
+        // Review w01-6: the identity file the desktop app reads goes too.
+        let agent_state = dir.path().join("agent-state");
+        std::fs::create_dir_all(&agent_state).unwrap();
+        std::fs::write(agent_state.join("identity.json"), "{}").unwrap();
+        let state_dirs = [state_dir.clone(), agent_state.clone()];
         // Not loaded: the bootout fails, and that is fine.
         let mut launchctl = Recorder {
             fail_on: Some("bootout"),
+            also_fail: Some("print"),
             ..Default::default()
         };
         uninstall(
             plan.uid,
             &plan.layout,
-            &state_dir,
+            &state_dirs,
             &mut launchctl,
             &mut Vec::new(),
         )
         .unwrap();
         assert_eq!(
             launchctl.calls,
-            vec![vec!["bootout".to_string(), service_target(plan.uid)]]
+            vec![
+                vec!["bootout".to_string(), service_target(plan.uid)],
+                print_args(plan.uid)
+            ]
         );
         assert!(!plan.layout.plist_path.exists());
         assert!(!plan.layout.config_path.exists());
         assert!(!state_dir.exists());
+        assert!(!agent_state.exists());
+
+        // Review w01-7: nothing left is not "uninstalled".
+        let err = uninstall(
+            plan.uid,
+            &plan.layout,
+            &state_dirs,
+            &mut Recorder::default(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(err.contains("no agent is installed"), "{err}");
+    }
+
+    /// Review w01-7: a job still loaded after a failed bootout keeps
+    /// running with its token; the files go, and the result says so.
+    #[test]
+    fn uninstall_says_so_when_the_job_is_still_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = plan_in(dir.path(), true);
+        install(&plan, &mut Recorder::default(), &mut Vec::new()).unwrap();
+        let mut launchctl = Recorder {
+            fail_on: Some("bootout"),
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        let err = uninstall(plan.uid, &plan.layout, &[], &mut launchctl, &mut out).unwrap_err();
+        assert!(err.contains("may still be running"), "{err}");
+        assert!(!plan.layout.config_path.exists());
+        assert!(!String::from_utf8(out).unwrap().contains("is uninstalled"));
     }
 
     #[test]

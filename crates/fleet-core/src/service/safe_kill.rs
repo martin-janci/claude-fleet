@@ -703,10 +703,14 @@ pub(crate) fn git_for_worktree(host_alias: &str, base: &str, wt: &str) -> (Strin
     if host_alias == crate::service::projects::LOCAL_HOST {
         return (String::new(), format!("git -C {}", quote(base)));
     }
+    // No `--path-format=absolute`: git before 2.31 (Debian 11, Ubuntu
+    // 20.04) echoes the unknown flag and exits 0, and the two-line answer
+    // names no repository (review w02-1). `cd` into the answer, which may
+    // be relative to the worktree, and print where that is.
     (
         format!(
-            "fleet_git_dir=$(git -C {} rev-parse --path-format=absolute --git-common-dir) \
-             || exit 1; ",
+            "fleet_git_dir=$(CDPATH= cd -- {} && \
+             CDPATH= cd -- \"$(git rev-parse --git-common-dir)\" && pwd -P) || exit 1; ",
             quote(wt)
         ),
         "git --git-dir=\"$fleet_git_dir\"".to_string(),
@@ -1109,11 +1113,14 @@ mod tests {
         let remote = worktree_remove_script("vps", "/Users/m/projects/o/r", wt, false);
         assert!(!remote.contains("/Users/m"), "{remote}");
         assert!(
-            remote.contains(&format!(
-                "git -C '{wt}' rev-parse --path-format=absolute --git-common-dir"
+            remote.starts_with(&format!(
+                "fleet_git_dir=$(CDPATH= cd -- '{wt}' && \
+                 CDPATH= cd -- \"$(git rev-parse --git-common-dir)\" && pwd -P) || exit 1; "
             )),
             "{remote}"
         );
+        // Review w02-1: git before 2.31 does not know the flag.
+        assert!(!remote.contains("--path-format"), "{remote}");
         assert!(
             remote.ends_with(&format!(
                 "git --git-dir=\"$fleet_git_dir\" worktree remove -- '{wt}'"

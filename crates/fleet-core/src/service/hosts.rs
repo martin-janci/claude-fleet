@@ -228,6 +228,30 @@ pub async fn add_host(
             ));
         }
     }
+    // A fleet name already in use for ANOTHER machine is not re-pointed by
+    // an add: the row would keep that machine's token, provisioned flag and
+    // fingerprint (so the new one never got hooks or an MCP entry, yet read
+    // provisioned), and the old machine's token would still authenticate as
+    // this host (review w13-3). Before the agent branch below: re-adding an
+    // agent host under another SSH alias is the same move, and a later
+    // `install_agent` would put this host's token on that other machine
+    // (review w03-1).
+    if let Some(existing) = lock(store)?.get_host_row(&args.alias)? {
+        if let Some(old) = existing
+            .ssh_alias
+            .as_deref()
+            .filter(|old| *old != args.ssh_alias)
+        {
+            return Err(IpcError::new(
+                codes::E_CONFLICT,
+                format!(
+                    "a host named {:?} already exists and is reached as {old:?}: pick another \
+                     name in fleet, or remove {:?} first to move the name to {:?}",
+                    args.alias, args.alias, args.ssh_alias
+                ),
+            ));
+        }
+    }
     // An agent host is, by definition, one the hub cannot dial — that is the
     // whole reason it needs an agent — so an SSH probe must not be the price
     // of admission. Nor can the agent dial in first: the per-host token it
@@ -249,27 +273,6 @@ pub async fn add_host(
             s.insert_host(&args.alias, Some(&args.ssh_alias))?;
             drop(s);
             return list_one(store, &args.alias);
-        }
-    }
-    // A fleet name already in use for ANOTHER machine is not re-pointed by
-    // an add: the row would keep that machine's token, provisioned flag and
-    // fingerprint (so the new one never got hooks or an MCP entry, yet read
-    // provisioned), and the old machine's token would still authenticate as
-    // this host (review w13-3).
-    if let Some(existing) = lock(store)?.get_host_row(&args.alias)? {
-        if let Some(old) = existing
-            .ssh_alias
-            .as_deref()
-            .filter(|old| *old != args.ssh_alias)
-        {
-            return Err(IpcError::new(
-                codes::E_CONFLICT,
-                format!(
-                    "a host named {:?} already exists and is reached as {old:?}: pick another \
-                     name in fleet, or remove {:?} first to move the name to {:?}",
-                    args.alias, args.alias, args.ssh_alias
-                ),
-            ));
         }
     }
     let (reachable, claude_ver, tmux_ver, account) = if args.transport.as_deref() == Some("agent") {
@@ -576,6 +579,7 @@ pub async fn remove_host_with(
     let accounts_removed = {
         let s = lock(store)?;
         s.delete_host(&args.alias)?;
+        rehome_host_settings(&s, &args.alias, None);
         crate::service::add_account::sweep_unused_accounts(&s)?
     };
     tunnels.stop(&args.alias);
@@ -597,6 +601,41 @@ pub struct MergeHostArgs {
     /// Nonce from an approved `E_CONFIRM_REQUIRED`.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
+}
+
+/// The settings that name a host by its alias follow it (review w13-5):
+/// `projects.base_path`'s entry for `from` and `decide.haiku.host`. After a
+/// merge (`into`) the root moves to `into` unless it has its own, and the
+/// second opinion's host becomes `into`; after a removal (`None`) both are
+/// dropped, so a machine added later under the alias does not inherit the
+/// old one's projects root or become the host the second opinion is asked
+/// on. `local`'s root is this machine's and stays. Through `settings::set`,
+/// so each change is audited and announced; best effort, the host is
+/// already gone.
+fn rehome_host_settings(s: &Store, from: &str, into: Option<&str>) {
+    use crate::service::settings;
+    let mut result = Ok(());
+    if from != crate::service::projects::LOCAL_HOST {
+        let mut map = settings::base_path_map(s);
+        if let Some(root) = map.remove(from) {
+            if let Some(into) = into {
+                map.entry(into.to_string()).or_insert(root);
+            }
+            result = serde_json::to_string(&map)
+                .map_err(|e| IpcError::new(codes::E_INTERNAL, e.to_string()))
+                .and_then(|v| settings::set(s, settings::PROJECTS_BASE_PATH, &v));
+        }
+    }
+    if result.is_ok() && settings::get_string(s, settings::DECIDE_HAIKU_HOST) == from {
+        result = settings::set(s, settings::DECIDE_HAIKU_HOST, into.unwrap_or(""));
+    }
+    if let Err(e) = result {
+        tracing::warn!(
+            host = %from,
+            error = %e.message,
+            "[hosts] a setting that names the host could not follow it"
+        );
+    }
 }
 
 /// Fold `from` into `into` (see `Store::merge_host_alias`). `local` may be
@@ -623,6 +662,7 @@ pub fn merge_host(
         // a new generation first so a scoped stream re-reads (w06-3).
         let before = s.session_orgs()?;
         let report = s.merge_host_alias(&args.from, &args.into)?;
+        rehome_host_settings(&s, &args.from, Some(&args.into));
         crate::service::orgs::bump_org_generation();
         s.announce_org_moves(&before)?;
         report
@@ -2000,6 +2040,26 @@ mod tests {
         let row = host_row(&store, "dev").unwrap();
         assert_eq!(row.ssh_alias.as_deref(), Some("dev-old"));
         assert!(row.provisioned);
+        // Review w03-1: an agent host is not re-pointed either.
+        store
+            .lock()
+            .unwrap()
+            .set_host_transport("dev", "agent")
+            .unwrap();
+        let err = add_host(
+            AddHostArgs {
+                alias: "dev".into(),
+                ssh_alias: "box2".into(),
+                transport: Some("agent".into()),
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_CONFLICT, "{err:?}");
+        let row = host_row(&store, "dev").unwrap();
+        assert_eq!(row.ssh_alias.as_deref(), Some("dev-old"));
     }
 
     /// Review r18 A6: re-adding a connected agent host as an agent host
@@ -2495,6 +2555,70 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(row.org_id.is_some());
+    }
+
+    /// Review w13-5: the settings that name a host follow a merge and are
+    /// dropped by a removal.
+    #[tokio::test]
+    async fn the_settings_that_name_a_host_follow_it() {
+        use crate::service::settings;
+        let tunnels = TunnelSupervisor::with_spawner(
+            Arc::new(|_argv| Box::pin(std::future::pending())),
+            Duration::from_secs(3600),
+        );
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            for h in ["mac", "mbp", "vps"] {
+                s.upsert_host(h).unwrap();
+            }
+            settings::set(
+                &s,
+                settings::PROJECTS_BASE_PATH,
+                r#"{"mac":"~/code","vps":"~/src"}"#,
+            )
+            .unwrap();
+            settings::set(&s, settings::DECIDE_HAIKU_HOST, "mac").unwrap();
+        }
+        merge_host(
+            MergeHostArgs {
+                from: "mac".into(),
+                into: "mbp".into(),
+                confirm_nonce: None,
+            },
+            &store,
+            &tunnels,
+        )
+        .unwrap();
+        {
+            let s = store.lock().unwrap();
+            let map = settings::base_path_map(&s);
+            assert_eq!(map.get("mbp").map(String::as_str), Some("~/code"));
+            assert!(!map.contains_key("mac"), "{map:?}");
+            assert_eq!(settings::get_string(&s, settings::DECIDE_HAIKU_HOST), "mbp");
+        }
+        let ssh = Arc::new(crate::ssh_fake::FakeSsh::new());
+        for alias in ["vps", "mbp"] {
+            let tmux = crate::tmux::RemoteTmux {
+                client: Arc::clone(&ssh),
+                host: alias.into(),
+            };
+            remove_host_with(
+                RemoveHostArgs {
+                    alias: alias.into(),
+                    delete_credentials: false,
+                    delete_login_profiles: false,
+                },
+                &store,
+                &tunnels,
+                &tmux,
+            )
+            .await
+            .unwrap();
+        }
+        let s = store.lock().unwrap();
+        assert!(settings::base_path_map(&s).is_empty());
+        assert_eq!(settings::get_string(&s, settings::DECIDE_HAIKU_HOST), "");
     }
 
     /// Review w11-7 (b): Remove host may also delete fleet's token and key

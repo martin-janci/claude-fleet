@@ -22406,6 +22406,46 @@ async fn a_non_owner_fleet_admin_hands_devices_only_to_people_with_no_identity()
         );
         assert_eq!(got, want, "set_device_person to {who}");
     }
+    // Review w01-1: the two-call way round. Ada may not move Dave's only
+    // device to a new name (which would leave Dave with "no identity")
+    // and then pair a device as Dave.
+    let mut steal = org_admin_args("set_device_person");
+    steal.device = Some("dave-phone".into());
+    steal.person = Some("carol".into());
+    assert_eq!(
+        code(
+            tools
+                .org_admin(Extension(ada.clone()), Parameters(steal))
+                .await
+        ),
+        "E_FORBIDDEN",
+        "another person's device is not Ada's to hand over"
+    );
+    // A person stripped of devices some other way still has their
+    // sessions, and those alone are an identity.
+    {
+        let s = store.lock().unwrap();
+        let gina = s.create_person("gina", None).unwrap().id;
+        s.upsert_host("h-gina").unwrap();
+        let id = s
+            .upsert_session("gina-1", "h-gina", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE sessions SET owner_person_id = ?1, visibility = 'private' WHERE id = ?2",
+                [gina, id],
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        code(
+            tools
+                .org_admin(Extension(ada.clone()), Parameters(pair("for-gina", "gina")))
+                .await
+        ),
+        "E_FORBIDDEN",
+        "gina owns a session"
+    );
     // The owner's own device names anybody.
     let owner = trusted(client_caller("laptop", TokenMode::Full));
     tools

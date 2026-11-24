@@ -4748,7 +4748,28 @@ fn worktree_add_script_resolves_requested_base_with_default_fallback() {
 fn worktree_add_script_starts_from_a_fresh_default() {
     let script = worktree_add_script("/repo/root", "feat-x", None);
     assert!(
-        script.contains("timeout 20 git fetch -q origin \"$def\" >/dev/null 2>&1 || true"),
+        script.contains("timeout 20 git fetch -q origin \"$1\" >/dev/null 2>&1"),
+        "{script}"
+    );
+    // Review w02-3: macOS has no `timeout`; perl bounds the fetch there.
+    assert!(
+        script.contains("perl -e 'alarm 20; exec @ARGV' git fetch -q origin \"$1\""),
+        "{script}"
+    );
+    assert!(script.contains("fleet_fetch \"$def\""), "{script}");
+    // Reviews w02-3 / w17-1: a named base is fetched before it is looked
+    // for, and a stale local one gives way to origin's.
+    assert!(
+        script.contains("[ -n \"$basebr\" ] && fleet_fetch \"$basebr\""),
+        "{script}"
+    );
+    assert!(
+        script.contains("git merge-base --is-ancestor \"$basebr\" \"origin/$basebr\""),
+        "{script}"
+    );
+    assert!(
+        script.find("fleet_fetch \"$basebr\"").unwrap()
+            < script.find("refs/heads/$basebr").unwrap(),
         "{script}"
     );
     assert!(
@@ -4877,6 +4898,83 @@ async fn create_worktree_local_creates_and_is_idempotent() {
 
     // cleanup
     std::fs::remove_dir_all(&base).ok();
+}
+
+/// Reviews w17-1 and w02-3, against a real repository: a branch that only
+/// origin has (pushed from another machine after this clone last fetched)
+/// is fetched and checked out, not cut anew from the default; and a named
+/// base whose local branch is behind origin starts from origin's commit.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_new_worktree_starts_from_what_origin_has_now() {
+    let git = |dir: &std::path::Path, args: &[&str]| -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let origin = root.join("origin.git");
+    let origin_s = origin.to_str().unwrap();
+    let host = root.join("host");
+    let laptop = root.join("laptop");
+    git(&root, &["init", "-q", "--bare", "-b", "main", "origin.git"]);
+    git(&root, &["init", "-q", "-b", "main", "laptop"]);
+    std::fs::write(laptop.join("f"), "1").unwrap();
+    git(&laptop, &["add", "f"]);
+    git(&laptop, &["commit", "-q", "-m", "one"]);
+    git(&laptop, &["remote", "add", "origin", origin_s]);
+    git(&laptop, &["push", "-q", "origin", "main"]);
+    // The host clones now, and fetches nothing afterwards.
+    git(&root, &["clone", "-q", origin_s, "host"]);
+    // Later, on the laptop: main moves on and feat/x is pushed.
+    std::fs::write(laptop.join("f"), "2").unwrap();
+    git(&laptop, &["commit", "-q", "-a", "-m", "two"]);
+    git(&laptop, &["push", "-q", "origin", "main"]);
+    let main_now = git(&laptop, &["rev-parse", "HEAD"]);
+    git(&laptop, &["checkout", "-q", "-b", "feat/x"]);
+    std::fs::write(laptop.join("f"), "3").unwrap();
+    git(&laptop, &["commit", "-q", "-a", "-m", "three"]);
+    git(&laptop, &["push", "-q", "origin", "feat/x"]);
+    let feat_now = git(&laptop, &["rev-parse", "HEAD"]);
+
+    let host_s = host.to_str().unwrap();
+    let wt = create_worktree_local(host_s, "feat/x", Some("feat/x"))
+        .await
+        .expect("the branch only origin has");
+    assert_eq!(
+        git(std::path::Path::new(&wt), &["rev-parse", "HEAD"]),
+        feat_now,
+        "the pushed work, not a new branch off the default"
+    );
+    let wt = create_worktree_local(host_s, "fix-1", Some("main"))
+        .await
+        .expect("a named base");
+    assert_eq!(
+        git(std::path::Path::new(&wt), &["rev-parse", "HEAD"]),
+        main_now,
+        "origin's main, not the commit the host was cloned at"
+    );
+    // It tracks nothing: a push never aims at the base.
+    let upstream = std::process::Command::new("git")
+        .args(["-C", &wt, "rev-parse", "--abbrev-ref", "@{upstream}"])
+        .output()
+        .expect("spawn git");
+    assert!(!upstream.status.success(), "fix-1 has no upstream");
 }
 
 #[test]
@@ -5937,6 +6035,7 @@ async fn ensure_remote_project_maps_a_refused_mirror_to_a_push_hint() {
         "FrantisekSefcik",
         "sales-twins-app",
         "/home/u/projects/github.com/FrantisekSefcik/sales-twins-app",
+        None,
         Some(&wt),
         CancellationToken::new(),
     )
@@ -5981,6 +6080,7 @@ async fn ensure_remote_project_keeps_other_git_failures_verbatim() {
         "o",
         "r",
         "/home/u/projects/github.com/o/r",
+        None,
         Some(&wt),
         CancellationToken::new(),
     )
@@ -5999,6 +6099,7 @@ async fn ensure_remote_project_keeps_other_git_failures_verbatim() {
         "o",
         "r",
         "/home/u/projects/github.com/o/r",
+        None,
         Some(&wt),
         CancellationToken::new(),
     )
@@ -6080,7 +6181,99 @@ fn ensure_remote_project_script_uses_its_own_checkout_and_refuses_another() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    // Review w02-4: the project's `owner/repo` is a name, not the
+    // repository. An adopted checkout with no GitHub origin (`local/infra`
+    // on GitLab) is not judged; a second clone under another folder name
+    // (`acme/app-v2` of `acme/app`) is judged by its origin.
+    let judged = |root: &std::path::Path, clone: &str, identity: Option<&str>| {
+        let script = ensure_remote_project_script_as(root.to_str().unwrap(), clone, identity, None);
+        Command::new("bash")
+            .args(["-c", &script])
+            .output()
+            .expect("bash")
+    };
+    git(&[
+        "-C",
+        app.to_str().unwrap(),
+        "remote",
+        "set-url",
+        "origin",
+        "git@gitlab.com:team/infra.git",
+    ]);
+    let out = judged(&app, "git@github.com:local/infra.git", None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    git(&[
+        "-C",
+        app.to_str().unwrap(),
+        "remote",
+        "set-url",
+        "origin",
+        "git@github.com:acme/app.git",
+    ]);
+    let out = judged(
+        &app,
+        "git@github.com:acme/app-v2.git",
+        Some("https://github.com/acme/app.git"),
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = judged(
+        &app,
+        "git@github.com:acme/app-v2.git",
+        Some("https://github.com/acme/other.git"),
+    );
+    assert!(!out.status.success(), "another repository is still refused");
     std::fs::remove_dir_all(&base).ok();
+}
+
+/// Review w02-4: the identity a remote checkout is held to is the project's
+/// GitHub origin; an adopted `local/<dir>` project and one with no origin
+/// read yet have none. Review w17-3: a worktree of another project is
+/// refused.
+#[test]
+fn a_projects_identity_is_its_github_origin_and_a_worktree_is_its_projects() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    let app = s
+        .upsert_project("acme", "app-v2", "/p/acme/app-v2")
+        .unwrap();
+    let infra = s.upsert_project("local", "infra", "/p/infra").unwrap();
+    assert_eq!(fetch_repo_identity(&s, app).unwrap(), None, "not read yet");
+    s.set_project_github_origin(app, Some("git@github.com:acme/app.git"))
+        .unwrap();
+    s.set_project_github_origin(infra, Some("git@github.com:x/y.git"))
+        .unwrap();
+    assert_eq!(
+        fetch_repo_identity(&s, app).unwrap().as_deref(),
+        Some("git@github.com:acme/app.git")
+    );
+    assert_eq!(fetch_repo_identity(&s, infra).unwrap(), None);
+
+    let wt = s
+        .upsert_worktree_on(
+            "vps",
+            app,
+            "feat",
+            "/p/acme/app-v2/.worktrees/feat",
+            Some("feat"),
+        )
+        .unwrap();
+    reject_worktree_of_another_project(&s, wt, app).expect("its own project");
+    let e = reject_worktree_of_another_project(&s, wt, infra).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID, "{}", e.message);
+    assert_eq!(
+        reject_worktree_of_another_project(&s, 9_999, app)
+            .unwrap_err()
+            .code,
+        codes::E_NOTFOUND
+    );
 }
 
 /// Runs the real mirror script against local git repos: a bare `origin`, a

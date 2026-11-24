@@ -648,6 +648,103 @@ async fn a_start_takes_the_rules_fallback_host_while_its_host_is_offline() {
     assert_eq!(plan.fell_back_from, None);
 }
 
+/// Review w06-1: a start rule's host is the host. Placement used to re-rank
+/// it as a preference, so a rule for a host the project had never run on
+/// started on another one, under the rule's login.
+#[tokio::test]
+async fn a_rules_host_is_taken_as_is_whatever_placement_would_rank() {
+    let w = w();
+    w.host("mac", true);
+    // pos ran on h, never on mac: placement drops mac and would pick h.
+    let first = w.item("PD-1");
+    w.start(first, w.pos, Decider::Person).await;
+    {
+        let s = w.store.lock().unwrap();
+        let now = crate::store::now_unix();
+        crate::service::account_limits::seed_usage(&s, "h", None, "acct-own", 5.0, now);
+        crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "acct-w", 50.0, now);
+        crate::service::account_limits::ready_host(&s, "h");
+        crate::service::account_limits::ready_host(&s, "mac");
+    }
+    w.rule(StartRuleInput {
+        pattern: "PD-*".into(),
+        project_id: w.pos,
+        host_alias: Some("mac".into()),
+        profile: Some("work".into()),
+        ..Default::default()
+    });
+    let plan = w.preview_unhosted(w.item("PD-9")).await.plan.unwrap();
+    assert_eq!(plan.host_alias, "mac", "the rule names the host");
+    assert_eq!(plan.profile.as_deref(), Some("work"));
+}
+
+/// Review w06-2: on the fallback host the rule's login is found by its
+/// account, never carried by a name that host does not have.
+#[tokio::test]
+async fn a_rules_login_is_mapped_by_account_on_the_fallback_host() {
+    let w = w();
+    w.host("mac", false);
+    w.host("mercury", true);
+    {
+        let s = w.store.lock().unwrap();
+        let now = crate::store::now_unix();
+        crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "acct-w", 20.0, now);
+        crate::service::account_limits::seed_usage(&s, "mercury", None, "acct-own", 20.0, now);
+        crate::service::account_limits::seed_usage(
+            &s,
+            "mercury",
+            Some("client"),
+            "acct-w",
+            20.0,
+            now,
+        );
+    }
+    w.rule(StartRuleInput {
+        pattern: "PD-*".into(),
+        project_id: w.pos,
+        host_alias: Some("mac".into()),
+        fallback_host: Some("mercury".into()),
+        profile: Some("work".into()),
+        ..Default::default()
+    });
+    let item = w.item("PD-8");
+    let plan = w.preview_unhosted(item).await.plan.unwrap();
+    assert_eq!(plan.host_alias, "mercury");
+    assert_eq!(
+        plan.profile.as_deref(),
+        Some("client"),
+        "the login on the rule's account there"
+    );
+    // No login on that account on mercury: its own login, not an empty
+    // profile named `work`.
+    {
+        let s = w.store.lock().unwrap();
+        s.set_host_profiles("mercury", &[]).unwrap();
+    }
+    let plan = w.preview_unhosted(item).await.plan.unwrap();
+    assert_eq!(plan.profile, None, "mercury has no `work`");
+    // The caller's own login is the caller's choice.
+    let net = crate::service::trackers::TrackerNet::fake(Arc::new(
+        crate::net::https::FakeTransport::new(),
+    ));
+    let plan = tickets::preview_start_decided(
+        &w.store,
+        &StartArgs {
+            item_id: Some(item),
+            profile: Some("work".into()),
+            ..Default::default()
+        },
+        &ViewScope::internal(),
+        &net,
+        None,
+    )
+    .await
+    .unwrap()
+    .plan
+    .unwrap();
+    assert_eq!(plan.profile.as_deref(), Some("work"));
+}
+
 #[test]
 fn save_checks_the_fallback_account_model_effort_and_agent() {
     let w = w();
