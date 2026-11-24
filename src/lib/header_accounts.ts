@@ -56,7 +56,7 @@ export function headerAccount(
   const shown: { kind: UsageWindowKind; left: number; resetsAt: number | null; level: UsageSeverity }[] = [];
   for (const kind of ['5h', 'weekly'] as const) {
     const w = windowOf(usage, kind);
-    if (!w || freshness(kind, snap?.fetched_at ?? null, w.resets_at, now) === 'expired') continue;
+    if (!w || freshness(kind, snap?.fetched_at ?? null, w.resets_at, now, w.utilization) === 'expired') continue;
     const left = leftPct(w);
     // At the limit only on the raw figure (as `attention_facts.ts`): 99.6%
     // used shows 0% left but is low, not stopped.

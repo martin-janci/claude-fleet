@@ -73,7 +73,7 @@ const pct = (n: number) => `${Math.round(n)}%`;
 /** A window's % used, as every usage surface shows it: `null` once its
  *  number is withheld (never read, too old, or past its reset). */
 function shownUsed(kind: UsageWindowKind, w: UsageWindow | null | undefined, snap: AccountUsageSnapshot | undefined, now: number): number | null {
-  if (!w || freshness(kind, snap?.fetched_at ?? null, w.resets_at, now) === 'expired') return null;
+  if (!w || freshness(kind, snap?.fetched_at ?? null, w.resets_at, now, w.utilization) === 'expired') return null;
   return usedPct(w);
 }
 

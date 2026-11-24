@@ -9,6 +9,7 @@
   import { autoContinue, countdown, hubLacksAutoContinue, spokenCountdown, liveCountdown, type AutoContinueView } from './auto_continue';
   import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
   import { windowHidden } from './window_hidden';
+  import { hubClockSkew } from './hub_connection';
 
   let {
     sessionId,
@@ -31,6 +32,9 @@
   const POLL_MS = 10_000;
 
   let view = $state<AutoContinueView | null>(null);
+  // `due_at` is the hub's time, so the countdown runs on the hub's clock
+  // (review w15-3): this machine's plus the difference its `ready` showed.
+  const hubNow = () => Date.now() + $hubClockSkew * 1000;
   let now = $state(Date.now());
   /** The hub predates `control_auto_continue` (it runs no clock): say so
    *  instead of drawing nothing, and stop asking. */
@@ -91,8 +95,8 @@
   const ticking = $derived(live !== null);
   $effect(() => {
     if (!ticking) return;
-    now = Date.now();
-    const timer = setInterval(() => (now = Date.now()), 1000);
+    now = hubNow();
+    const timer = setInterval(() => (now = hubNow()), 1000);
     return () => clearInterval(timer);
   });
   const left = $derived(live ? live.dueAt * 1000 - now : null);

@@ -68,7 +68,7 @@ function bindingNumber(snapshot: AccountUsageSnapshot | null, now: number): Bind
   const kind = bindingWindow(snapshot.usage, now);
   const w = kind ? windowOf(snapshot.usage, kind) : null;
   if (!kind || !w) return null;
-  const fr = freshness(kind, snapshot.fetched_at, w.resets_at, now);
+  const fr = freshness(kind, snapshot.fetched_at, w.resets_at, now, w.utilization);
   if (fr === 'expired') return null;
   const left = leftPct(w);
   return { window: kind, w, left, freshness: fr, level: severity(kind, severityLeft(w), w.resets_at, now) };
@@ -95,7 +95,7 @@ export function hostChipUsage(
 }
 
 function pctText(kind: UsageWindowKind, w: UsageWindow, fetchedAt: number | null, now: number): string {
-  const fr = freshness(kind, fetchedAt, w.resets_at, now);
+  const fr = freshness(kind, fetchedAt, w.resets_at, now, w.utilization);
   if (fr === 'expired') return '?';
   return `${fr === 'stale' ? '~' : ''}${leftPct(w)}%`;
 }

@@ -262,3 +262,33 @@ async fn retry_now_wakes_a_waiting_bridge_and_leaves_no_permit() {
         .await
         .expect("a waiting bridge is woken");
 }
+
+/// Review w15-3: the hub's clock difference rides with `connected`, in the
+/// event and in the answer a late window asks for; a difference inside the
+/// frame's travel time is left out.
+#[test]
+fn connected_carries_the_hubs_clock_difference_when_there_is_one() {
+    let local = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let (s, sink) = status("cl_t");
+    s.hub_clock(Some(local + 400));
+    s.report(HubConnection::Connected);
+    let seen = sink.seen.lock().unwrap().clone();
+    let skew = seen[0].1[CLOCK_SKEW_FIELD].as_i64().expect("a skew");
+    assert!((398..=400).contains(&skew), "hub minus local, got {skew}");
+    assert_eq!(s.current_payload()["state"], json!("connected"));
+    assert_eq!(s.current_payload()[CLOCK_SKEW_FIELD], json!(skew));
+
+    // An older hub names no clock; the same clock is no difference.
+    for now in [None, Some(local)] {
+        let (s, sink) = status("cl_t");
+        s.hub_clock(now);
+        s.report(HubConnection::Connected);
+        assert_eq!(
+            sink.seen.lock().unwrap().clone(),
+            vec![(CONNECTION_EVENT, json!({ "state": "connected" }))]
+        );
+    }
+}

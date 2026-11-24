@@ -289,10 +289,10 @@ describe('AccountsPage: spend, routines and paused sessions (4.1 / 4.2)', () => 
 
   it('each card says its sessions, switched-on routines and spend today', async () => {
     render(AccountsPage, props);
-    await waitFor(() => expect(screen.getAllByTestId('account-counts')[0].textContent).toContain('$18.40 today'));
-    expect(screen.getAllByTestId('account-counts')[0].textContent?.trim()).toBe('2 sessions · 2 routines · $18.40 today');
-    expect(screen.getAllByTestId('account-counts')[1].textContent).toContain('$1.25 today');
-    expect(screen.getByTestId('account-spend').textContent).toBe('$18.40 today');
+    await waitFor(() => expect(screen.getAllByTestId('account-counts')[0].textContent).toContain('$18.40 today (UTC)'));
+    expect(screen.getAllByTestId('account-counts')[0].textContent?.trim()).toBe('2 sessions · 2 routines · $18.40 today (UTC)');
+    expect(screen.getAllByTestId('account-counts')[1].textContent).toContain('$1.25 today (UTC)');
+    expect(screen.getByTestId('account-spend').textContent).toBe('$18.40 today (UTC)');
     expect(inv.mock.calls.find((c) => c[0] === 'account_spend')?.[1]).toEqual({ args: { since: NOW } });
   });
 

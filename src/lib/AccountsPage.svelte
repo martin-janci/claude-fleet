@@ -360,7 +360,7 @@
     }
     // As `compactWindow`: a number past its reset or freshness limit is
     // withheld, never shown as `0% left` with a LIMIT badge.
-    if (freshness(kind, a.usage?.fetched_at ?? null, w.resets_at, now) === 'expired') {
+    if (freshness(kind, a.usage?.fetched_at ?? null, w.resets_at, now, w.utilization) === 'expired') {
       return { kind, title, left: null, level: 'none', badge: null, reset: '', resetShort: '', unknown: true };
     }
     const left = leftPct(w);
@@ -622,7 +622,7 @@
             {/each}
           {/if}
           {#if spend && (spend.get(a.uuid) ?? 0) > 0}
-            <div class="sub" data-testid="account-spend">{spendText(a.uuid)} today</div>
+            <div class="sub" data-testid="account-spend">{spendText(a.uuid)} today (UTC)</div>
           {/if}
 
           {#each ['5h', 'weekly'] as const as kind (kind)}

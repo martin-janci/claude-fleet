@@ -115,8 +115,8 @@ pub async fn hub_pair(
 #[tauri::command]
 pub fn hub_connection(
     status: State<'_, Arc<crate::backend::connection::HubConnectionStatus>>,
-) -> crate::backend::connection::HubConnection {
-    status.current()
+) -> serde_json::Value {
+    status.current_payload()
 }
 
 /// The disconnected banner's "Retry now": try the hub's event stream again
