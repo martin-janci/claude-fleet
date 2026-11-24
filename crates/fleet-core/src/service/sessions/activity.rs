@@ -200,9 +200,10 @@ pub async fn sync_dialog(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
     session_id: i64,
+    why: DialogFollowup,
 ) -> Result<ActivityProbe, IpcError> {
     let probe = session_activity(store, ssh, session_id).await?;
-    if probe.stuck_kind.is_none() {
+    if probe.stuck_kind.is_none() && probe_is_written(why, probe.pending_input.is_some()) {
         let status = probe
             .claude_status
             .as_deref()
@@ -211,6 +212,17 @@ pub async fn sync_dialog(
         s.record_dialog_probe(session_id, status, probe.pending_input.as_ref())?;
     }
     Ok(probe)
+}
+
+/// PURE: whether a fast-path read made for `why` is written to the row.
+///
+/// After a hook said a dialog went up ([`DialogFollowup::Raised`]) only a
+/// read that PARSED a dialog is: the hook's `blocked` is the fact, and a
+/// pane that shows no dialog fleet can read (an MCP elicitation, a
+/// permission dialog not drawn yet) must not take it back within a second
+/// (review w08-3). After a key went in, a pane without a dialog is the news.
+pub(crate) fn probe_is_written(why: DialogFollowup, parsed_dialog: bool) -> bool {
+    parsed_dialog || why == DialogFollowup::Answered
 }
 
 /// When a dialog fast-path read is made, in ms after the event that asked
@@ -236,7 +248,7 @@ pub fn spawn_dialog_followup(
         for at in DIALOG_FOLLOWUP_MS {
             tokio::time::sleep(std::time::Duration::from_millis(at - waited)).await;
             waited = at;
-            match sync_dialog(&store, &ssh, session_id).await {
+            match sync_dialog(&store, &ssh, session_id, why).await {
                 Ok(p) if why == DialogFollowup::Raised && p.pending_input.is_some() => return,
                 Ok(_) => {}
                 Err(e) => {
@@ -261,6 +273,16 @@ pub enum DialogFollowup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review w08-3: the follow-up of a hook's "a dialog went up" never
+    /// demotes the row; the one after a key does.
+    #[test]
+    fn a_raised_follow_up_writes_only_a_parsed_dialog() {
+        assert!(probe_is_written(DialogFollowup::Raised, true));
+        assert!(!probe_is_written(DialogFollowup::Raised, false));
+        assert!(probe_is_written(DialogFollowup::Answered, true));
+        assert!(probe_is_written(DialogFollowup::Answered, false));
+    }
 
     #[test]
     fn working_pane_yields_working_status_and_the_spinner() {

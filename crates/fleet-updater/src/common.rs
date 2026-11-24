@@ -193,12 +193,36 @@ pub fn save_token(dir: &Path, name: &str, token: &str) -> Result<PathBuf, String
 
 /// Move `state.db*` aside into `failed-<v>-<stamp>/` (never deleted) and put
 /// a copy of `backup` in their place, owned like the database it replaces.
+///
+/// The copy is made and synced FIRST, beside the database (review w14-3):
+/// it is the step most likely to fail (the volume already holds the
+/// database, its WAL and the backup), and a failure after the live files had
+/// been moved aside left no `state.db` at all, so the next start created a
+/// fresh, empty hub. A failed restore now leaves the database where it was
+/// and removes its own partial copy.
 pub fn restore_db(data: &Path, backup: &Path, failed_version: &str) -> Result<(), String> {
     let db = data.join("state.db");
     let owner = std::fs::metadata(&db).ok().map(|m| {
         use std::os::unix::fs::MetadataExt;
         (m.uid(), m.gid())
     });
+    let tmp = data.join("state.db.restore");
+    let copied = std::fs::copy(backup, &tmp)
+        .map_err(|e| format!("{}: {e}", backup.display()))
+        .and_then(|_| {
+            if let Some((uid, gid)) = owner {
+                // Only root may give a file away; an updater running as the
+                // hub's own user already owns it.
+                let _ = std::os::unix::fs::chown(&tmp, Some(uid), Some(gid));
+            }
+            std::fs::File::open(&tmp)
+                .and_then(|f| f.sync_all())
+                .map_err(|e| format!("{}: {e}", tmp.display()))
+        });
+    if let Err(e) = copied {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     let aside = data.join(format!("failed-{}-{}", safe(failed_version), stamp()));
     std::fs::create_dir_all(&aside).map_err(|e| format!("{}: {e}", aside.display()))?;
     for name in ["state.db", "state.db-wal", "state.db-shm"] {
@@ -207,16 +231,6 @@ pub fn restore_db(data: &Path, backup: &Path, failed_version: &str) -> Result<()
             std::fs::rename(&p, aside.join(name)).map_err(|e| format!("{}: {e}", p.display()))?;
         }
     }
-    let tmp = data.join("state.db.restore");
-    std::fs::copy(backup, &tmp).map_err(|e| format!("{}: {e}", backup.display()))?;
-    if let Some((uid, gid)) = owner {
-        // Only root may give a file away; an updater running as the hub's
-        // own user already owns it.
-        let _ = std::os::unix::fs::chown(&tmp, Some(uid), Some(gid));
-    }
-    std::fs::File::open(&tmp)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| format!("{}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, &db).map_err(|e| format!("{}: {e}", db.display()))?;
     Ok(())
 }

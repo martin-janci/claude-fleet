@@ -66,7 +66,12 @@ pub(crate) fn open_store_with_bus(
     let store = Store::open_with_bus(&db_path, bus).map_err(|e| {
         let advice = fleet_core::store::open_failure_advice(
             &e,
-            "\nIf the file is corrupt, deleting it resets all hub state — hosts, projects and sessions are re-discovered.",
+            // Review w14-2: a hub's database holds the master token, every
+            // client pairing, people and the work graph; none of it is
+            // re-discovered, and the dailies sit one folder away.
+            "\nThe file is damaged. Do not delete it: it holds the master token, every \
+             pairing and the work graph. Restore the newest backups/daily-*.db from the data \
+             directory instead (docs/hub.md, Restore drill).",
         );
         format!(
             "failed to open the claude-fleet database at {}: {e}{advice}",

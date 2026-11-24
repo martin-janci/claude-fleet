@@ -984,9 +984,12 @@ So `fleet-agent` relays them:
   agent adds no credential. That bearer is not the host token but a
   hook-only token derived from it (`fhk1_` + HMAC-SHA256 under the host
   token, `mcp::auth::hook_token`): the hub recomputes it from the stored
-  host token and accepts it on `/hook` only, so another local account that
-  takes the port while the agent is down collects nothing that can dial
-  `/agent` or call `/mcp`. Rotating the host token rotates it. An older
+  host token and accepts it on `/hook` and on `GET /voice/capture` (the
+  host's recorder reads the same headers file) only, so another local
+  account that takes the port while the agent is down collects nothing that
+  can dial `/agent` or call `/mcp`. It could post hook events and, for a
+  session of that host with the microphone on, start the claimed device's
+  capture and read the audio. Rotating the host token rotates it. An older
   agent relays it unchanged; an older hub writes the host token as before. A
   request carrying an `Origin`, or a `Host` that is not loopback, is refused
   (a browser aimed at the port). The hub's answer — status, `Content-Type`,
@@ -2678,7 +2681,9 @@ minutes between a limit and the next reading, extra usage (an account
 with it on keeps working past its limit and is counted at its limit all
 the same; its line says `extra usage is on`), and a weekly limit on one
 model only (Opus, Sonnet): fleet pauses only the sessions launched on that
-model for it, and it is not counted here.
+model for it, and the census does not count it. With `--db` (a copy) the
+window ends an hour after the copy's newest reading, not at the wall clock,
+and the output says so.
 Logins that no reading counts in the window are named in `logins with no
 usage reading`, an API key and a setup token as such (`ci (API key)`,
 `team (setup token)`).

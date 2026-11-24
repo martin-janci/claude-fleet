@@ -291,12 +291,23 @@ impl<'a> Describer<'a> {
             .session_facts("session_id", "Session")
             .unwrap_or_else(|| "a session".into());
         if tool == "queue_prompt" {
-            if self.flag("until_limit_reset") == Some(true) {
-                self.fact("When", "once the usage limit resets");
-            } else if let Some(t) = self.int("not_before") {
-                self.fact("When", format!("not before {t} (unix time)"));
-            } else {
-                self.fact("When", "when the session is next idle");
+            // The time in words, and both conditions when both are set
+            // (review w15-4): a raw unix number told the person approving
+            // nothing about whether that is tonight or next month.
+            let at = self.int("not_before").map(|t| {
+                format!(
+                    "not before {}",
+                    crate::service::account_limits::utc_stamp(t)
+                )
+            });
+            let after_reset = self.flag("until_limit_reset") == Some(true);
+            match (after_reset, at) {
+                (true, Some(at)) => {
+                    self.fact("When", format!("once the usage limit resets, and {at}"))
+                }
+                (true, None) => self.fact("When", "once the usage limit resets"),
+                (false, Some(at)) => self.fact("When", at),
+                (false, None) => self.fact("When", "when the session is next idle"),
             }
         }
         if self.flag("submit") == Some(false) {
@@ -444,6 +455,35 @@ mod tests {
         assert_eq!(
             (body.label.as_str(), body.text.as_str()),
             ("Brief", "Fix the login.")
+        );
+    }
+
+    /// Review w15-4: the card says when in words, and names both
+    /// conditions when both are set.
+    #[test]
+    fn a_scheduled_prompt_says_when_in_words() {
+        // 2026-11-24 11:00 UTC.
+        let at = 1_795_518_000_i64;
+        let when = |args: serde_json::Value| {
+            let a = describe(&store(), "queue_prompt", &args).expect("about");
+            fact(&a, "When").map(str::to_string)
+        };
+        let stamp = crate::service::account_limits::utc_stamp(at);
+        assert!(stamp.ends_with("11:00 UTC"), "{stamp}");
+        assert_eq!(
+            when(json!({ "session_id": 1, "prompt": "go", "not_before": at })),
+            Some(format!("not before {stamp}"))
+        );
+        assert_eq!(
+            when(json!({ "session_id": 1, "prompt": "go", "not_before": at,
+                         "until_limit_reset": true })),
+            Some(format!(
+                "once the usage limit resets, and not before {stamp}"
+            ))
+        );
+        assert_eq!(
+            when(json!({ "session_id": 1, "prompt": "go" })).as_deref(),
+            Some("when the session is next idle")
         );
     }
 

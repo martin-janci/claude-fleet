@@ -704,7 +704,15 @@ impl Store {
                                        OR ?12 IS NOT pr_url
                                        OR ?19 - pr_checked_at >= ?27 THEN ?19
                                   ELSE pr_checked_at END,
-               current_activity=COALESCE(excluded.current_activity, current_activity),
+               -- PreCompact's `compacting` is a hook's fact, and the pane's
+               -- last line must not replace it on the next pass (review
+               -- w08-9). PostCompact, Stop, UserPromptSubmit and a resetting
+               -- SessionStart end it; so does a pass that reads the pane
+               -- idle (an aborted compaction fires no PostCompact).
+               current_activity=CASE WHEN current_activity = 'compacting'
+                                          AND excluded.claude_status IS NOT 'idle'
+                                     THEN current_activity
+                                     ELSE COALESCE(excluded.current_activity, current_activity) END,
                -- The pane footer is a fallback (spec §1.5): it applies only
                -- when no fresh hook/transcript value exists, and a missing
                -- footer never overwrites anything.
@@ -1634,6 +1642,41 @@ mod tests {
             intel_observed: true,
             ..Default::default()
         }
+    }
+
+    /// Review w08-9: PreCompact's `compacting` outlives a pass that reads
+    /// the pane's last line, and ends on a pass that reads the pane idle.
+    #[test]
+    fn a_compacting_activity_survives_a_pass_until_the_pane_reads_idle() {
+        let (mut store, _bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let pid = store.upsert_project("o", "r", "/base/r").unwrap();
+        let pass = |store: &mut Store, ts: i64, status: &str| {
+            let sessions = vec![ReconcileSession {
+                claude_status: Some(status.to_string()),
+                current_activity: Some("? for shortcuts".into()),
+                ..live_session("s1", pid, ts)
+            }];
+            store
+                .apply_host_reconcile(HostReconcile {
+                    sessions: &sessions,
+                    keep: &["s1".to_string()],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+            store.get_session("s1", "alpha").unwrap().unwrap()
+        };
+        let id = pass(&mut store, 1, "working").id;
+        store.set_current_activity(id, Some("compacting")).unwrap();
+        assert_eq!(
+            pass(&mut store, 2, "working").current_activity.as_deref(),
+            Some("compacting")
+        );
+        assert_eq!(
+            pass(&mut store, 3, "idle").current_activity.as_deref(),
+            Some("? for shortcuts"),
+            "an aborted compaction ends when the pane reads idle"
+        );
     }
 
     /// Redesign 6.4: reconcile records the PR a session's probe saw in

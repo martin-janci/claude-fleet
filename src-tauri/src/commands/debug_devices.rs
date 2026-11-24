@@ -201,6 +201,15 @@ pub async fn debug_device_screenshot(
 /// Lines `debug_device_logs` asks for: the service's own default.
 const LOG_LINES: u32 = 200;
 
+/// How a command names the device with row id `id` to the service and to a
+/// hub's tool: `#<id>`, the one spelling `devices::resolve` reads as an id
+/// and nothing else. A bare number is matched against labels, names and
+/// serials too, so a device labelled "1" made every action on the device
+/// with id 1 ambiguous, or act on the wrong one (review w19-1).
+fn by_id(id: i64) -> String {
+    format!("#{id}")
+}
+
 pub(crate) mod routed {
     use super::*;
     use serde_json::json;
@@ -258,7 +267,7 @@ pub(crate) mod routed {
                     "update_debug_device",
                     &json!({
                         "action": "configure",
-                        "device": args.id.to_string(),
+                        "device": by_id(args.id),
                         "label": args.label,
                         "shared": args.shared,
                     }),
@@ -284,11 +293,11 @@ pub(crate) mod routed {
             Some(hub) => {
                 hub.route(
                     "release_debug_device",
-                    &json!({ "action": "release", "device": args.id.to_string() }),
+                    &json!({ "action": "release", "device": by_id(args.id) }),
                 )
                 .await
             }
-            None => devices::release(store, &Asker::desktop(), &args.id.to_string()),
+            None => devices::release(store, &Asker::desktop(), &by_id(args.id)),
         }
     }
 
@@ -301,7 +310,7 @@ pub(crate) mod routed {
             Some(hub) => {
                 hub.route(
                     "forget_debug_device",
-                    &json!({ "action": "forget", "device": args.id.to_string() }),
+                    &json!({ "action": "forget", "device": by_id(args.id) }),
                 )
                 .await
             }
@@ -321,7 +330,7 @@ pub(crate) mod routed {
             Some(hub) => {
                 hub.route(
                     "boot_debug_device",
-                    &json!({ "action": "boot", "device": args.id.to_string() }),
+                    &json!({ "action": "boot", "device": by_id(args.id) }),
                 )
                 .await
             }
@@ -330,7 +339,7 @@ pub(crate) mod routed {
                     store,
                     &**ssh,
                     &Asker::desktop(),
-                    Some(&args.id.to_string()),
+                    Some(&by_id(args.id)),
                     None,
                     None,
                 )
@@ -350,11 +359,11 @@ pub(crate) mod routed {
             Some(hub) => {
                 hub.route(
                     "shutdown_debug_device",
-                    &json!({ "action": "shutdown", "device": args.id.to_string() }),
+                    &json!({ "action": "shutdown", "device": by_id(args.id) }),
                 )
                 .await
             }
-            None => devices::shutdown(store, &**ssh, &Asker::desktop(), &args.id.to_string()).await,
+            None => devices::shutdown(store, &**ssh, &Asker::desktop(), &by_id(args.id)).await,
         }
     }
     pub async fn claim_debug_device(
@@ -368,7 +377,7 @@ pub(crate) mod routed {
                     "claim_debug_device",
                     &json!({
                         "action": "claim",
-                        "device": args.id.to_string(),
+                        "device": by_id(args.id),
                         "note": args.note,
                         "claim_s": args.claim_s,
                         "queue": args.queue,
@@ -379,7 +388,7 @@ pub(crate) mod routed {
             None => devices::claim(
                 store,
                 &Asker::desktop(),
-                &args.id.to_string(),
+                &by_id(args.id),
                 args.claim_s,
                 args.note.as_deref(),
                 args.queue.unwrap_or(false),
@@ -414,7 +423,7 @@ pub(crate) mod routed {
                     "install_debug_device",
                     &json!({
                         "action": "install",
-                        "device": args.id.to_string(),
+                        "device": by_id(args.id),
                         "path": args.path,
                         "host": host,
                     }),
@@ -427,14 +436,14 @@ pub(crate) mod routed {
                     Some(h) => h,
                     None => {
                         let s = fleet_core::ipc_error::lock(store)?;
-                        devices::resolve(&s, &asker, &args.id.to_string())?.host
+                        devices::resolve(&s, &asker, &by_id(args.id))?.host
                     }
                 };
                 devices::install(
                     store,
                     &**ssh,
                     &asker,
-                    &args.id.to_string(),
+                    &by_id(args.id),
                     InstallFrom {
                         host: &from_host,
                         path: &args.path,
@@ -459,7 +468,7 @@ pub(crate) mod routed {
                     "debug_device_logs",
                     &json!({
                         "action": "logs",
-                        "device": args.id.to_string(),
+                        "device": by_id(args.id),
                         "lines": LOG_LINES,
                         "contains": contains,
                     }),
@@ -471,7 +480,7 @@ pub(crate) mod routed {
                     store,
                     &**ssh,
                     &Asker::desktop(),
-                    &args.id.to_string(),
+                    &by_id(args.id),
                     Some(LOG_LINES),
                     None,
                     None,
@@ -493,7 +502,7 @@ pub(crate) mod routed {
                 let image = hub
                     .route_image(
                         "debug_device_screenshot",
-                        &json!({ "action": "screenshot", "device": args.id.to_string() }),
+                        &json!({ "action": "screenshot", "device": by_id(args.id) }),
                     )
                     .await?;
                 Ok(Screenshot {
@@ -505,8 +514,7 @@ pub(crate) mod routed {
             None => {
                 use base64::Engine as _;
                 let (d, bytes, mime) =
-                    devices::screenshot(store, &**ssh, &Asker::desktop(), &args.id.to_string())
-                        .await?;
+                    devices::screenshot(store, &**ssh, &Asker::desktop(), &by_id(args.id)).await?;
                 Ok(Screenshot {
                     caption: format!("{} on {}", d.title, d.host),
                     mime: mime.to_string(),
@@ -514,5 +522,22 @@ pub(crate) mod routed {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Review w19-1: every arm, routed or standalone, names its device as
+    /// `#<id>`. Read from the source: a bare `args.id.to_string()` is the
+    /// bug coming back.
+    #[test]
+    fn every_device_is_named_by_its_id_alone() {
+        assert_eq!(super::by_id(12), "#12");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands/debug_devices.rs");
+        let src = std::fs::read_to_string(path).unwrap();
+        let bare = ["args.id", ".to_string()"].concat();
+        assert!(!src.contains(&bare), "a device named by a bare number");
+        assert!(src.matches("by_id(args.id)").count() >= 17);
     }
 }

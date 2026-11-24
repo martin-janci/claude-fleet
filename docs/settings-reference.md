@@ -11,7 +11,7 @@ Scope says where a value lives: *fleet* is one value for the whole fleet, kept o
 
 | Setting | Default | Range | Scope | What it does |
 |---|---|---|---|---|
-| `reconcile.interval_secs` | `20` | seconds, `0` = off | fleet | Seconds between background reconcile passes, which refresh session state on every host. Applies after a restart. |
+| `reconcile.interval_secs` | `20` | seconds, `0` = off | fleet | Seconds between background reconcile passes, which refresh session state on every host. Everything fleet does by itself runs after a pass, no more often than this: recovery of killed sessions, stuck-session fixes, queued prompts, cleanup, usage and budgets, autofix, account switching and scheduled agents. 0 stops all of that too, while their own switches still read On. Applies after a restart. |
 | `reconcile.stale_working_secs` | `1800` | seconds, `0` = never | fleet | How long a working session may go without a hook, a turn, transcript growth or pane output before it reads idle. |
 | `reconcile.stale_working_ttl_secs` | `86400` | seconds, shown in hours, `0` = never by age | fleet | How long a session marked stale asks for a look before the tick lifts the mark on its own. An attach or any hook lifts it sooner. |
 

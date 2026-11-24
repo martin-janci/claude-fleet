@@ -490,6 +490,10 @@ pub fn hosts_health(
                 s.host_alias == h.alias
                     && s.status != "ghost"
                     && s.kind != "external"
+                    // Only Claude Code sends hooks: a Codex or Hermes row,
+                    // or a shell, is no evidence (review w08-5).
+                    && s.kind != "shell"
+                    && s.agent == crate::store::AGENT_CLAUDE
                     && (s.claude_status.as_deref() == Some("working")
                         || s.last_turn_at
                             .is_some_and(|at| now - at <= t.hooks_silent_secs))
@@ -1667,7 +1671,14 @@ mod tests {
         recent_turn.last_turn_at = Some(now - 600);
         let mut ghost = session_on("ghosted", Some("working"));
         ghost.status = "ghost".into();
+        // Review w08-5: a Codex row and a shell send no hooks.
+        let mut codex = session_on("dormant", Some("working"));
+        codex.agent = "codex".into();
+        let mut shell = session_on("dormant", Some("working"));
+        shell.kind = "shell".into();
         let sessions = vec![
+            codex,
+            shell,
             session_on("dormant", Some("idle")),
             session_on("dormant", Some("failed")),
             session_on("dormant", Some("stopped")),

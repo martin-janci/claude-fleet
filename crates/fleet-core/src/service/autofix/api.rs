@@ -154,6 +154,7 @@ pub fn dismiss(s: &Store, id: i64, until: Option<i64>, now: i64) -> Result<Findi
             "until must be in the future",
         ));
     }
+    crate::validate::unix_seconds_ahead("until", until, now)?;
     if !s.dismiss_autofix_finding(id, until)? {
         return Err(IpcError::new(
             codes::E_NOTFOUND,

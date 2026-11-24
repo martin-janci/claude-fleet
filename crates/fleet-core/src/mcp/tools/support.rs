@@ -1063,6 +1063,38 @@ pub(super) fn task_delivery_body(
     Ok(tasks::with_instruction(&block, task_id, nonce))
 }
 
+/// Refuse a task prompt that could not be delivered, BEFORE a worker is
+/// started for it (review w16-2): a blank one, and one whose delivery body
+/// (the marker, the end line and the completion instruction around it,
+/// [`task_delivery_body`]) is over the paste limit. Measured with the longest
+/// task id and a nonce of the real length, so a prompt that passes here
+/// passes at delivery.
+pub(super) fn check_task_prompt_fits(
+    prompt: &str,
+    caller: &Caller,
+    raw: bool,
+) -> Result<(), McpError> {
+    if prompt.trim().is_empty() {
+        return Err(mcp_err("E_VALIDATE", "task prompt must be non-empty", None));
+    }
+    let max = crate::service::sessions::MAX_PROMPT_BYTES;
+    // The body is only built for a prompt that could fit at all.
+    let over = prompt.len() > max
+        || task_delivery_body(prompt, i64::MAX, &tasks::make_nonce(), caller, raw)?.len() > max;
+    if over {
+        return Err(mcp_err(
+            "E_VALIDATE",
+            format!(
+                "task prompt is {} bytes; with fleet's own lines around it the limit is {max} \
+                 bytes — nothing was started",
+                prompt.len()
+            ),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 /// Validate `set_session_tags` input: at most 16 tags, each 1–32 chars of
 /// `[A-Za-z0-9_.:-]`, de-duplicated in order. The rule lives in the service
 /// (`sessions::normalize_session_tags`), which the desktop's Label shares.

@@ -260,7 +260,12 @@ pub fn backup_if_due(data_dir: &Path, now: i64) -> Result<Option<BackupInfo>, St
     // starves the live hub's WAL (SQLITE_FULL), and would every hour.
     let db = data_dir.join("state.db");
     let needed = db_bytes(&db).saturating_add(BACKUP_MARGIN_BYTES);
-    if let Some((free, _)) = disk_space(&dir) {
+    // The dailies are usually what filled the volume (14 copies of the
+    // database): the oldest go first, down to a floor, before a new one is
+    // given up on. Otherwise the newest backup only grew older while 13
+    // older ones held the space a fresh one needs (review w14-7).
+    let free_now = || disk_space(&dir).map(|(free, _)| free);
+    if let Some(free) = make_room(&dir, needed, &free_now) {
         if free < needed {
             return Err(format!(
                 "skipped: {} free under {}, a copy of the database needs about {}",
@@ -274,6 +279,24 @@ pub fn backup_if_due(data_dir: &Path, now: i64) -> Result<Option<BackupInfo>, St
     let info = backup_to(&db, &dest)?;
     prune_daily(&dir, KEEP_DAILY);
     Ok(Some(info))
+}
+
+/// The dailies never pruned to make room for a new one.
+const KEEP_DAILY_FLOOR: usize = 3;
+
+/// The free space under `dir` once the oldest dailies were removed, one at a
+/// time down to [`KEEP_DAILY_FLOOR`], until `needed` fits. Nothing is
+/// removed when it fits already. `None` when the volume cannot be read (the
+/// copy is then tried, as before).
+fn make_room(dir: &Path, needed: u64, free: &dyn Fn() -> Option<u64>) -> Option<u64> {
+    let mut now = free()?;
+    let mut keep = KEEP_DAILY;
+    while now < needed && keep > KEEP_DAILY_FLOOR {
+        keep -= 1;
+        prune_daily(dir, keep);
+        now = free()?;
+    }
+    Some(now)
 }
 
 /// Free space kept beyond the copy's size.
@@ -478,6 +501,35 @@ mod tests {
 
     /// A day's backup is taken once, named like `backup.sh`'s, and only the
     /// newest daily ones are kept; other prefixes are never pruned.
+    /// Review w14-7: on a tight volume the oldest dailies make room for a
+    /// new one, down to the floor; with room already, nothing is removed.
+    #[test]
+    fn the_oldest_dailies_make_room_for_a_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        for day in 1..=KEEP_DAILY {
+            std::fs::write(
+                dir.path().join(format!("daily-202001{day:02}-000000.db")),
+                b"x",
+            )
+            .unwrap();
+        }
+        let count = || std::fs::read_dir(dir.path()).unwrap().count() as u64;
+        // Each daily holds 10 units of a 140-unit volume that is full.
+        let free = || Some((KEEP_DAILY as u64 - count()) * 10);
+        assert_eq!(make_room(dir.path(), 0, &free), Some(0));
+        assert_eq!(count(), KEEP_DAILY as u64, "it fits: nothing removed");
+        assert_eq!(make_room(dir.path(), 25, &free), Some(30));
+        assert_eq!(count(), KEEP_DAILY as u64 - 3);
+        assert!(!dir.path().join("daily-20200103-000000.db").exists());
+        assert!(dir.path().join("daily-20200104-000000.db").exists());
+        // Never below the floor, however much is needed.
+        let got = make_room(dir.path(), u64::MAX, &free).unwrap();
+        assert_eq!(count(), KEEP_DAILY_FLOOR as u64);
+        assert!(got < u64::MAX);
+        // An unreadable volume: nothing removed, the copy is tried.
+        assert_eq!(make_room(dir.path(), u64::MAX, &|| None), None);
+    }
+
     #[test]
     fn a_daily_backup_is_taken_once_a_day_and_pruned() {
         let dir = tempfile::tempdir().unwrap();

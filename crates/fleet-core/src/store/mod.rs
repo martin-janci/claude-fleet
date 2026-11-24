@@ -518,6 +518,9 @@ fn lost_transaction() -> rusqlite::Error {
 /// CLI beside the daemon) before it fails with `SQLITE_BUSY`.
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The size `state.db-wal` is cut back to after a full checkpoint.
+const WAL_SIZE_LIMIT: i64 = 64 * 1024 * 1024;
+
 /// Journal settings for the long-lived file store, applied before migrating.
 ///
 /// The default rollback journal with `synchronous = FULL` fsyncs several
@@ -534,7 +537,14 @@ fn tune_file_connection(conn: &Connection) -> Result<()> {
     conn.busy_timeout(BUSY_TIMEOUT)?;
     let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
     if mode.eq_ignore_ascii_case("wal") {
-        conn.execute_batch("PRAGMA synchronous = NORMAL;")?;
+        // `journal_size_limit`: without it `state.db-wal` keeps its largest
+        // size for good (auto-checkpoint never truncates, and a hub never
+        // closes its last connection), so one table-rebuild migration or a
+        // long backup left hundreds of MB there. With it the file is cut
+        // back to the limit after the next full checkpoint (review w14-6).
+        conn.execute_batch(&format!(
+            "PRAGMA synchronous = NORMAL; PRAGMA journal_size_limit = {WAL_SIZE_LIMIT};"
+        ))?;
     } else {
         tracing::warn!(
             mode,
@@ -1260,6 +1270,8 @@ mod tests {
         // lose the last commits but never corrupts the database.
         assert_eq!(pragma::<i64>(&s, "synchronous"), 1);
         assert!(pragma::<i64>(&s, "busy_timeout") >= 1000);
+        // Review w14-6: the WAL is cut back after a full checkpoint.
+        assert_eq!(pragma::<i64>(&s, "journal_size_limit"), WAL_SIZE_LIMIT);
     }
 
     /// A `fleet-hub guides …` / `settings …` CLI opens `state.db` with

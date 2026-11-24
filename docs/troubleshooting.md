@@ -286,7 +286,12 @@ on the same tick, right after the pass, if you enabled them.
 - **Interval:** `reconcile.interval_secs` in **Settings → Automation**. The
   default is `20`. `0` turns the tick off, so reconcile only runs when
   something asks for it. The tick reads the value at startup, so restart the
-  app after you change it.
+  app after you change it. Everything fleet does by itself rides this tick:
+  bringing killed sessions back, the playbooks, queued prompts, GC, usage
+  collection (so spend limits and budgets), autofix, account switching and
+  scheduled agents. `0` stops all of them, though their own switches still
+  read On, and a long interval makes each of them run no more often than
+  that, whatever its own interval says.
 - **Cache-first `list_sessions`:** the sidebar, window focus and the MCP
   `list_sessions` tool serve the stored rows as long as the last completed
   pass is younger than the interval (or 20 s when the tick is off). They

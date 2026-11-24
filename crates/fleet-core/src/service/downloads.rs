@@ -302,7 +302,8 @@ mod progress {
 pub struct SendFileArgs {
     /// The session whose host holds the file (yours: `whoami`).
     pub session_id: i64,
-    /// Absolute, or relative to the session's worktree root.
+    /// Absolute, `~/…` (the host account's home), or relative to the
+    /// session's worktree root.
     pub path: String,
     /// One line for the person: what the file is.
     #[serde(default)]
@@ -322,7 +323,9 @@ const STAT_ERR: &str = "__CF_DL_ERR__";
 /// Print the file's size and absolute path after the carry's marker, or a
 /// one-word refusal. A relative path is taken from the session's worktree
 /// root — the git top level of the pane's directory, as `repo_file` reads
-/// it — or the pane's directory itself outside git.
+/// it — or the pane's directory itself outside git. `~/…` is the host
+/// account's home, as the agent that wrote the file there means it (review
+/// w16-7): the value is quoted, so the shell never expands it by itself.
 pub fn stat_script(tmux_name: &str, path: &str) -> String {
     let target = quote(&crate::tmux::exact_pane(tmux_name));
     format!(
@@ -330,6 +333,7 @@ pub fn stat_script(tmux_name: &str, path: &str) -> String {
 p={p}
 case "$p" in
   /*) ;;
+  "~"/*) p="$HOME/${{p#\~/}}" ;;
   *) d=$(tmux display-message -t {target} -p '#{{pane_current_path}}' 2>/dev/null)
      [ -n "$d" ] || {{ printf '{STAT_ERR} nocwd\n'; exit 0; }}
      r=$(cd "$d" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null) || r=$d

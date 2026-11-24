@@ -191,7 +191,9 @@ impl HubBase {
     /// The bearer the hooks carry, beside [`HubBase::hook_url`]: through an
     /// agent's loopback relay, the hook-only token derived from `token`
     /// (`mcp::auth::hook_token`, review w10-5), which a squatter on the relay
-    /// port could use for `/hook` and nothing else; anywhere else, `token`.
+    /// port could use for `/hook` and for `/voice/capture` (the microphone of
+    /// a session of this host that has it on; review w01-3, see
+    /// `mcp::auth::hook_token`) and nothing else; anywhere else, `token`.
     /// An older agent relays the bearer unchanged, so it needs no update.
     pub fn hook_token(&self, token: &str) -> String {
         match self.hook_relay {

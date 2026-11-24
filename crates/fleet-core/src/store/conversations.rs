@@ -433,12 +433,18 @@ impl Store {
     /// this (the MCP-1 guard) and the StopFailure guard (`last_hook_at =
     /// last_stop_at`) no longer holds. Any other status is left as it is; a
     /// row with nothing to end is not written.
+    ///
+    /// `stopped` ends the same way (review w08-7): it says "the Claude
+    /// process is gone", and a SessionStart for the row proves one runs.
+    /// Left alone, a restarted session read `stopped` until a pass that asked
+    /// `claude agents` (60 s, or never where that fails).
     pub fn clear_ended_turn_state(&self, session_id: i64) -> Result<(), IpcError> {
         let was_failed: Option<bool> = self
             .conn
             .query_row(
-                "SELECT claude_status = 'failed' FROM sessions \
-                 WHERE id = ?1 AND (claude_status = 'failed' OR stale_working_at IS NOT NULL \
+                "SELECT claude_status IN ('failed', 'stopped') FROM sessions \
+                 WHERE id = ?1 AND (claude_status IN ('failed', 'stopped') \
+                                    OR stale_working_at IS NOT NULL \
                                     OR stale_demoted_at IS NOT NULL)",
                 [session_id],
                 |r| r.get::<_, Option<bool>>(0).map(|b| b.unwrap_or(false)),
@@ -450,7 +456,7 @@ impl Store {
         self.conn.execute(
             "UPDATE sessions SET last_hook_at = ?2, stale_working_at = NULL, \
                  stale_demoted_at = NULL, \
-                 claude_status = CASE WHEN claude_status = 'failed' THEN 'idle' \
+                 claude_status = CASE WHEN claude_status IN ('failed', 'stopped') THEN 'idle' \
                                       ELSE claude_status END \
              WHERE id = ?1",
             rusqlite::params![session_id, now_unix()],

@@ -79,6 +79,61 @@ pub fn build_send_script(
     buffer: &str,
     submit: bool,
 ) -> String {
+    build_send_script_guarded(tmux_name, pane_id, body, buffer, submit, false)
+}
+
+/// The exit status of a typing script that typed nothing because the pane
+/// holds a bare login shell: the agent has exited (review w09-1).
+pub(super) const AGENT_EXITED_STATUS: i32 = 97;
+
+/// The exit status of a typing script that found its own paste already in
+/// the pane: an earlier run of the same script was cut off after the paste.
+pub(super) const ALREADY_PASTED_STATUS: i32 = 98;
+
+/// The step of a typing script that refuses a pane whose agent has exited.
+/// An agent's pane command ends in `; exec ${SHELL:-/bin/zsh} -l`, so after
+/// `/exit`, a crash or a failed self-update the tmux session lives on as a
+/// login shell, and a prompt pasted there would be run as shell commands.
+///
+/// Two readings, and both must say "shell". `pane_current_command` alone
+/// cannot tell: while the agent runs under the launcher (`sh -c '…; exec
+/// $SHELL -l'`, no job control) tmux names the launcher shell, not the
+/// agent. So the pane's first process is read too: the launcher carries the
+/// whole pane command as its argument (several words), the shell it becomes
+/// is `zsh -l` or `-zsh`. An agent a person started by hand from that shell
+/// is the foreground job, so `pane_current_command` names it and the prompt
+/// goes in. A `ps` that fails reads as "not a shell": the guard never
+/// refuses on a reading it could not take.
+fn agent_exited_guard() -> String {
+    format!(
+        "pc=\"$(tmux display-message -p -t \"$t\" '#{{pane_pid}} #{{pane_current_command}}' 2>/dev/null)\"; \
+         case \"${{pc#* }}\" in bash|zsh|fish|sh|dash|ksh|tcsh|csh|-bash|-zsh|-fish|-sh|-dash|-ksh) \
+         case \"$(ps -o args= -p \"${{pc%% *}}\" 2>/dev/null)\" in *' '*' '*) ;; *sh|*sh' '-*) exit {AGENT_EXITED_STATUS} ;; esac ;; esac; "
+    )
+}
+
+/// PURE: whether `row`'s pane is known to have run an agent, so a bare shell
+/// there means the agent exited. A `shell` session is meant to be typed
+/// into, and so is a tmux session fleet only discovered and that never ran
+/// an agent (no conversation bound to it): a person may well drive a plain
+/// terminal from fleet.
+pub(super) fn runs_an_agent(row: &crate::store::SessionRow) -> bool {
+    row.kind != "shell"
+        && !crate::store::has_no_pane(&row.kind)
+        && (row.claude_session_id.is_some() || row.agent != crate::store::AGENT_CLAUDE)
+}
+
+/// [`build_send_script`], with the [`agent_exited_guard`] ahead of the paste
+/// when `agent_guard` (a row that runs an agent, [`runs_an_agent`]). A
+/// bare Enter is not guarded: it types nothing a shell could run.
+pub fn build_send_script_guarded(
+    tmux_name: &str,
+    pane_id: Option<&str>,
+    body: &str,
+    buffer: &str,
+    submit: bool,
+    agent_guard: bool,
+) -> String {
     use base64::Engine as _;
     let body = body.strip_suffix('\n').unwrap_or(body);
     let exact = quote(&crate::tmux::exact_pane(tmux_name));
@@ -102,11 +157,26 @@ pub fn build_send_script(
         }
         return script;
     }
+    if agent_guard {
+        script.push_str(&agent_exited_guard());
+    }
     let b64 = base64::engine::general_purpose::STANDARD.encode(body.as_bytes());
     let buf_q = quote(buffer);
+    // Run twice, type once (review w09-4): ssh reruns a command whose
+    // ControlMaster died under it, and the drop may have come after the
+    // paste. The paste leaves this send's buffer name on the session
+    // (`@fleet_sent`); a run that finds it there types nothing and says the
+    // outcome is unknown. Best effort: a tmux that refuses the option types
+    // as before.
+    script.push_str(&format!(
+        "if [ \"$(tmux show-options -v -t \"$t\" @fleet_sent 2>/dev/null)\" = {buf_q} ]; then exit {ALREADY_PASTED_STATUS}; fi; "
+    ));
     script.push_str(&format!(
         "printf %s {} | base64 -d | tmux load-buffer -b {buf_q} - && tmux paste-buffer -p -d -b {buf_q} -t \"$t\" || {{ tmux delete-buffer -b {buf_q} 2>/dev/null; false; }}",
         quote(&b64)
+    ));
+    script.push_str(&format!(
+        " && {{ tmux set-option -t \"$t\" @fleet_sent {buf_q} 2>/dev/null; true; }}"
     ));
     if submit {
         script.push_str(" && sleep 0.15 && tmux send-keys -t \"$t\" Enter");
@@ -203,6 +273,33 @@ async fn run_tmux_script(
         )
         .await?
     };
+    if out.status.code() == Some(AGENT_EXITED_STATUS) {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            "the agent in this session has exited, so the prompt was not typed into its \
+             shell; restart the session",
+        ));
+    }
+    // Cut off part-way (review w09-4): the script was run again after its
+    // paste, or ssh lost a connection it had made. Either way the body may
+    // be in the pane, so the code is one `codes::may_have_run` knows: the
+    // callers neither type it again nor report "nothing typed".
+    if out.status.code() == Some(ALREADY_PASTED_STATUS) {
+        return Err(IpcError::new(
+            codes::E_SSH_TIMEOUT,
+            "the connection dropped while typing; the prompt was pasted and may not have been \
+             submitted",
+        ));
+    }
+    if host_alias != "local" && dropped_mid_run(&out) {
+        return Err(IpcError::new(
+            codes::E_SSH_TIMEOUT,
+            format!(
+                "the connection dropped while typing; the prompt may have been typed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        ));
+    }
     if !out.status.success() {
         return Err(IpcError::new(
             codes::E_TMUX,
@@ -210,6 +307,17 @@ async fn run_tmux_script(
         ));
     }
     Ok(())
+}
+
+/// PURE: whether ssh itself failed (exit 255) on a connection it had
+/// established, so the remote script may have run in part. A connection that
+/// was never made ran nothing and stays a plain failure.
+pub(super) fn dropped_mid_run(out: &std::process::Output) -> bool {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    out.status.code() == Some(255)
+        && crate::ssh_diag::classify::connect_failure_kind(&stderr).is_none()
+        // sshd closing the socket before the key exchange (MaxStartups).
+        && !stderr.contains("exchange_identification")
 }
 
 /// Who composed a prompt fleet delivers: it decides whether the prompt may
@@ -261,13 +369,26 @@ pub(super) async fn send_prompt_inner(
     let body = normalize_prompt_body(prompt)?;
     // The pane Claude runs in, when reconcile or a hook has told us. Lock,
     // read, unlock — never across the send.
-    let pane_id = {
+    let (pane_id, agent_row) = {
         let s = lock(store)?;
-        s.get_session(tmux_name, host_alias)?
-            .and_then(|r| r.context.tmux_pane_id)
+        match s.get_session(tmux_name, host_alias)? {
+            Some(r) => {
+                let agent = runs_an_agent(&r);
+                (r.context.tmux_pane_id, agent)
+            }
+            None => (None, false),
+        }
     };
     let buffer = format!("fleet-{}", uuid::Uuid::new_v4().simple());
-    let script = build_send_script(tmux_name, pane_id.as_deref(), &body, &buffer, submit);
+    // A pane that ran an agent must still hold it (review w09-1).
+    let script = build_send_script_guarded(
+        tmux_name,
+        pane_id.as_deref(),
+        &body,
+        &buffer,
+        submit,
+        agent_row,
+    );
     // The work loop guard (`work::detect::loop_guard`) tells fleet's own
     // prompt from the person's by comparing the UserPromptSubmit hook's text
     // with `last_prompt`, and Claude Code fires that hook the moment Enter
@@ -789,6 +910,41 @@ pub async fn send_prompt(
         Origin::Person,
     )
     .await
+}
+
+/// [`send_prompt`] for a caller that holds nothing yet: a standalone
+/// desktop's composer (review w09-5). One typing at a time into the pane, as
+/// on a hub: a submitted prompt claims the session's idle moment in its
+/// typing lane ([`super::deferred::send_direct`]) and staged text takes the
+/// lane alone, so this send cannot land between a queued prompt's paste and
+/// its Enter. A key press or a bare Enter goes straight through, as there.
+///
+/// Never call it from inside `send_direct` or with the lane held (the hub
+/// tool and the orchestrator call [`send_prompt`] there): the lane is not
+/// re-entrant.
+pub async fn send_prompt_in_lane(
+    args: SendPromptArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<(), IpcError> {
+    if args.keys.is_some() || args.prompt.is_empty() {
+        return send_prompt(args, store, ssh).await;
+    }
+    crate::validate::host_alias(&args.host_alias)?;
+    crate::validate::tmux_name_addressable(&args.tmux_name)?;
+    let row = lock(store)?.get_session(&args.tmux_name, &args.host_alias)?;
+    let Some(row) = row else {
+        return send_prompt(args, store, ssh).await;
+    };
+    if args.submit {
+        let body = normalize_prompt_body(&args.prompt)?;
+        super::deferred::send_direct(store, &row, &body, |_| send_prompt(args, store, ssh))
+            .await
+            .map(|_| ())
+    } else {
+        let _lane = super::deferred::typing_lane(store, row.id).await;
+        send_prompt(args, store, ssh).await
+    }
 }
 
 /// Deliver a prompt fleet itself composed (safe-kill instructions, an inbox

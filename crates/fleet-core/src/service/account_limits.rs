@@ -953,11 +953,23 @@ pub fn refuse_over_limit_on(
 /// "when the limit resets" (M15 step G1.8) holds a prompt only while the
 /// limit is known to be hit.
 pub fn account_over_line(s: &Store, account_uuid: &str, now: i64) -> Result<bool, IpcError> {
+    account_over_line_on(s, account_uuid, now, None)
+}
+
+/// [`account_over_line`] for a session launched on `launch_model`: that
+/// model's own weekly window counts as well, as it does where the row is
+/// paused (`Facts::limit_for`).
+pub fn account_over_line_on(
+    s: &Store,
+    account_uuid: &str,
+    now: i64,
+    launch_model: Option<&str>,
+) -> Result<bool, IpcError> {
     let used = s
         .latest_usage_snapshots()?
         .into_iter()
         .find(|r| r.account_uuid == account_uuid)
-        .and_then(|r| used_pct_of(&r.usage, Some(r.fetched_at), now));
+        .and_then(|r| used_pct_on(&r.usage, Some(r.fetched_at), now, launch_model));
     Ok(used.is_some_and(|u| u >= pause_at_pct(s)))
 }
 

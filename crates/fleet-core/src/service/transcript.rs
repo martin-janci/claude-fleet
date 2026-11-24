@@ -2671,9 +2671,18 @@ async fn fetch_conversation_as(
     ssh: &Arc<SshClient>,
     authors: &[crate::store::PromptAuthorRow],
 ) -> Result<Conversation, IpcError> {
+    let mut budget = conv_read_bytes(args.turns);
     let script = conversation_read_script(&args)?;
-    let text = read_tail(&args, &script, ssh).await?;
+    let mut text = read_tail(&args, &script, ssh).await?;
     let mut turns = agent.parse_transcript(&text);
+    // A tail cut inside the window's opening turn (or inside one line) is
+    // read again wider, so the turn comes back with its prompt and a fixed
+    // `at` (reviews w10-1, w10-5).
+    while let Some(wider) = wider_conv_read(budget, text.len(), &turns, args.turns.max(1)) {
+        budget = wider;
+        text = read_tail_bytes(&args, budget, ssh).await?;
+        turns = agent.parse_transcript(&text);
+    }
     if !authors.is_empty() {
         attach_prompt_authors(&mut turns, authors);
     }
@@ -2686,9 +2695,40 @@ async fn fetch_conversation_as(
     );
     // A tail that filled the byte budget started mid-file: older history
     // exists even when the parsed turns fit the window.
-    conv.truncated |= text.len() >= conv_read_bytes(args.turns);
+    conv.truncated |= text.len() >= budget;
     conv.context = agent.context_usage(&text).as_ref().map(ContextView::from);
     Ok(conv)
+}
+
+/// PURE: the wider tail to read after one of `budget` bytes gave `turns`,
+/// or `None` when that read stands.
+///
+/// A tail that filled its budget started mid-file. When no turn of the
+/// window (the last `window` parsed) has its prompt, the cut fell inside the
+/// window's opening turn, or inside a single line larger than the budget (a
+/// screenshot's tool result), which parses to nothing. Such a turn has no
+/// prompt and takes its `at` from the first entry still in the tail, which
+/// moves on every read: a phone that knows a turn by `(at, prompt)` appended
+/// one more copy per poll (review w10-1), and the desktop's thread went
+/// empty (review w10-5). The ladder is the default window's budget, then
+/// [`MAX_READ_BYTES`]; a turn larger than that is served cut, as before.
+fn wider_conv_read(budget: usize, read: usize, turns: &[ConvTurn], window: usize) -> Option<usize> {
+    if read < budget || budget >= MAX_READ_BYTES {
+        return None;
+    }
+    let prompted = turns
+        .iter()
+        .rev()
+        .take(window)
+        .any(|t| t.prompt.is_some() || t.prompt_uuid.is_some());
+    if prompted {
+        return None;
+    }
+    Some(if budget < CONV_READ_BYTES {
+        CONV_READ_BYTES
+    } else {
+        MAX_READ_BYTES
+    })
 }
 
 #[cfg(test)]
@@ -5025,6 +5065,47 @@ mod tests {
             "E_INVALID"
         );
         assert_eq!(transcript_read_script(&bad).unwrap_err().code, "E_INVALID");
+    }
+
+    /// Reviews w10-1 / w10-5: a full tail whose window holds no prompted
+    /// turn is read again wider; anything else stands.
+    #[test]
+    fn a_tail_cut_inside_the_windows_turn_is_read_again_wider() {
+        let headless = parse_conversation(
+            r#"{"type":"assistant","timestamp":"2026-01-01T00:00:05Z","message":{"content":[{"type":"text","text":"still going"}]}}"#,
+        );
+        assert_eq!(headless.len(), 1);
+        assert!(headless[0].prompt.is_none());
+        let small = MIN_CONV_READ_BYTES;
+        // A caught-up phone's one-turn read: the live turn outgrew the tail.
+        assert_eq!(
+            wider_conv_read(small, small, &headless, 1),
+            Some(CONV_READ_BYTES)
+        );
+        // One line larger than the budget parses to nothing.
+        assert_eq!(
+            wider_conv_read(CONV_READ_BYTES, CONV_READ_BYTES, &[], CONV_TURNS),
+            Some(MAX_READ_BYTES)
+        );
+        // The whole file was read, or there is nothing wider to read.
+        assert_eq!(wider_conv_read(small, small - 1, &headless, 1), None);
+        assert_eq!(
+            wider_conv_read(MAX_READ_BYTES, MAX_READ_BYTES, &headless, 1),
+            None
+        );
+        // A prompted turn in the window: the read stands, cut or not.
+        let prompted = parse_conversation(concat!(
+            r#"{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"content":"fix it"}}"#,
+            "\n",
+            r#"{"type":"assistant","timestamp":"2026-01-01T00:00:05Z","message":{"content":[{"type":"text","text":"done"}]}}"#,
+        ));
+        assert!(prompted.last().unwrap().prompt.is_some());
+        assert_eq!(wider_conv_read(small, small, &prompted, 1), None);
+        // Only the window counts: an older cut turn above a prompted one in
+        // a one-turn window needs nothing, the reverse does.
+        let mut both = headless.clone();
+        both.extend(prompted.clone());
+        assert_eq!(wider_conv_read(small, small, &both, 1), None);
     }
 
     #[cfg(unix)]

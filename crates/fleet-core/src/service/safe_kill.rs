@@ -293,6 +293,18 @@ pub async fn safe_kill_session(
                     ),
                 )
             })?;
+        // The request is a prompt for the session's agent: a shell would
+        // run its lines as commands, and a pane-less row has nowhere to
+        // type it (reviews w04-1, w17-2).
+        if row.kind == "shell" || crate::store::has_no_pane(&row.kind) {
+            return Err(IpcError::new(
+                codes::E_INVALID_STATE,
+                format!(
+                    "session {} has no agent to ask; kill it instead",
+                    args.tmux_name
+                ),
+            ));
+        }
         if row.status != "running" {
             return Err(IpcError::new(
                 codes::E_NOT_ALIVE,
@@ -1601,6 +1613,44 @@ SAFE_REMOVE_READY_n1";
                 row.safe_kill_state.is_none(),
                 "{status}: nothing was stamped"
             );
+        }
+    }
+
+    /// Reviews w04-1 / w17-2: a shell session (and a pane-less row) has no
+    /// agent to ask; nothing is stamped or typed into it.
+    #[tokio::test]
+    async fn safe_kill_refuses_a_shell_and_a_pane_less_row() {
+        for kind in ["shell", "bg"] {
+            let s = Store::open_in_memory().unwrap();
+            s.upsert_host("mac").unwrap();
+            let id = s
+                .upsert_session("w", "mac", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET kind = ?2, claude_status = 'idle' WHERE id = ?1",
+                    rusqlite::params![id, kind],
+                )
+                .unwrap();
+            let store = Mutex::new(s);
+            let ssh = Arc::new(SshClient::new());
+            let err = safe_kill_session(
+                SafeKillSessionArgs {
+                    host_alias: "mac".into(),
+                    tmux_name: "w".into(),
+                },
+                &store,
+                &ssh,
+            )
+            .await
+            .expect_err("no agent to ask");
+            assert_eq!(err.code, codes::E_INVALID_STATE, "{kind}: {}", err.message);
+            let row = lock(&store)
+                .unwrap()
+                .get_session_by_id(id)
+                .unwrap()
+                .unwrap();
+            assert!(row.safe_kill_state.is_none(), "{kind}: nothing was stamped");
         }
     }
 
