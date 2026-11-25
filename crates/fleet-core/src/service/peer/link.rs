@@ -100,6 +100,49 @@ pub async fn redeem(url: &str, code: &str) -> Result<String, String> {
     token_from_pair_response(&raw)
 }
 
+/// The tool path's address fence: a peer hub is another fleet's, never this
+/// hub's own loopback or a link-local address (cloud metadata). Without it a
+/// trusted device could make the hub `POST` to any port it can reach and
+/// read the answer's shape back as a port scan of the hub's own machine.
+/// Private networks stay allowed: a peer on the LAN is ordinary. The CLI
+/// (`fleet-hub peer add`) keeps loopback for its tests.
+async fn refuse_internal_target(at: &Endpoint) -> Result<(), IpcError> {
+    let refused = |why: &str| {
+        IpcError::new(
+            codes::E_INVALID,
+            format!("a peer hub cannot be at a {why} address"),
+        )
+    };
+    if let Ok(ip) = at
+        .host()
+        .trim_matches(['[', ']'])
+        .parse::<std::net::IpAddr>()
+    {
+        return match crate::net::https::refused_address(ip) {
+            Some(why) => Err(refused(why)),
+            None => Ok(()),
+        };
+    }
+    let addrs = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::lookup_host((at.host(), at.port())),
+    )
+    .await
+    .map_err(|_| {
+        IpcError::new(
+            codes::E_INVALID,
+            "the peer hub's name did not resolve in time",
+        )
+    })?
+    .map_err(|_| IpcError::new(codes::E_INVALID, "the peer hub's name does not resolve"))?;
+    for a in addrs {
+        if let Some(why) = crate::net::https::refused_address(a.ip()) {
+            return Err(refused(why));
+        }
+    }
+    Ok(())
+}
+
 /// The `link_peer` tool: link this hub to the hub at `url` with a peer code
 /// minted there (`fleet-hub pair --mode peer`). `https://` only: a tool
 /// never dials a plain hub, which `fleet-hub peer add --insecure` keeps for
@@ -107,7 +150,7 @@ pub async fn redeem(url: &str, code: &str) -> Result<String, String> {
 /// connects it within a few seconds.
 pub async fn link(store: &Mutex<Store>, url: &str, code: &str) -> Result<i64, IpcError> {
     let url = url.trim();
-    check_peer_url(url, false).map_err(|e| IpcError::new(codes::E_INVALID, e))?;
+    let at = check_peer_url(url, false).map_err(|e| IpcError::new(codes::E_INVALID, e))?;
     let code = code.trim();
     if code.is_empty() || code.len() > 128 || code.chars().any(char::is_control) {
         return Err(IpcError::new(
@@ -115,6 +158,7 @@ pub async fn link(store: &Mutex<Store>, url: &str, code: &str) -> Result<i64, Ip
             "a pairing code is one short line",
         ));
     }
+    refuse_internal_target(&at).await?;
     let token = redeem(url, code)
         .await
         .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
@@ -132,6 +176,16 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e.code, codes::E_INVALID);
+        for internal in [
+            "https://127.0.0.1:5432",
+            "https://[::1]:8443",
+            "https://169.254.169.254",
+            "https://localhost:1",
+        ] {
+            let e = link(&store, internal, "abc").await.unwrap_err();
+            assert_eq!(e.code, codes::E_INVALID, "{internal}");
+            assert!(e.message.contains("address"), "{internal}: {}", e.message);
+        }
         let e = link(&store, "https://b.example", "a\nb").await.unwrap_err();
         assert_eq!(e.code, codes::E_INVALID);
         assert!(store
