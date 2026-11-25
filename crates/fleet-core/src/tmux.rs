@@ -119,6 +119,13 @@ pub fn shell_terminal_commands_in(session: &str, lines: &str) -> Vec<(u32, Optio
 /// tmux session is gone: a terminal is only ever opened beside a live one.
 pub const SHELL_TERMINAL_NO_SESSION: i32 = 3;
 
+/// `value` as a literal for a tmux argument that tmux format-expands, such as
+/// `new-session -c`: a `#` doubles, so a directory named `a#(cmd)` is
+/// entered rather than running `cmd`.
+pub fn format_literal(value: &str) -> String {
+    value.replace('#', "##")
+}
+
 /// Open terminal `n` of `session` unless it is already open: a tmux session
 /// of its own, started in the agent pane's current directory (`$HOME` when
 /// that is gone, or when `home` asks for it — the strip's "New terminal opens
@@ -137,7 +144,8 @@ pub fn open_shell_terminal_script(session: &str, n: u32, home: bool) -> String {
     };
     format!(
         "tmux has-session -t {agent} 2>/dev/null || exit {gone}; {cwd}\
-         tmux has-session -t {exact} 2>/dev/null || tmux new-session -d -s {name} -c \"$cwd\" \
+         tmux has-session -t {exact} 2>/dev/null || tmux new-session -d -s {name} \
+         -c \"$(printf %s \"$cwd\" | sed 's/#/##/g')\" \
          -e COLORTERM=truecolor -e TERM=xterm-256color -e \"LANG=${{LANG:-en_US.UTF-8}}\" \
          -e \"PATH=$PATH\" {cmd}",
         agent = quote(&exact_session(session)),
@@ -1397,7 +1405,10 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
         // shell-escape arguments since we're sending a single script string.
         let mut script = String::from("tmux new-session -d");
         script.push_str(&format!(" -s {}", quote(name)));
-        script.push_str(&format!(" -c {}", quote(&cwd.to_string_lossy())));
+        script.push_str(&format!(
+            " -c {}",
+            quote(&format_literal(&cwd.to_string_lossy()))
+        ));
         // Forward env explicitly — remote sshd typically doesn't pass LANG.
         script.push_str(" -e COLORTERM=truecolor -e TERM=xterm-256color");
         script.push_str(&format!(
@@ -2155,7 +2166,7 @@ pub async fn new_session(
         "-s",
         name,
         "-c",
-        &working_dir.to_string_lossy(),
+        &format_literal(&working_dir.to_string_lossy()),
     ]);
     for var in ["LANG", "LC_ALL", "LC_CTYPE", "PATH"] {
         if let Ok(val) = std::env::var(var) {
@@ -2390,6 +2401,12 @@ pub(crate) mod fake_exec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_format_literal_doubles_every_hash() {
+        assert_eq!(format_literal("/srv/a#(id)/b##c"), "/srv/a##(id)/b####c");
+        assert_eq!(format_literal("/plain"), "/plain");
+    }
 
     /// Review w15-7: a local probe that does not answer is ended at its
     /// wall clock, reported as a timeout, and its child is killed.

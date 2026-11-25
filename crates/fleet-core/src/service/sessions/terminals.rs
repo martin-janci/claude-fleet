@@ -513,6 +513,33 @@ mod tests {
     }
 
     #[test]
+    fn a_terminal_opened_in_a_directory_named_like_a_tmux_format_runs_nothing() {
+        let Some(t) = Tmux::new() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        // tmux format-expands `new-session -c`: `#(cmd)` in a path ran `cmd`
+        // and entered its output instead (here `axb`, which exists too).
+        let odd = dir.path().join("a#(echo x)b");
+        std::fs::create_dir(&odd).unwrap();
+        std::fs::create_dir(dir.path().join("axb")).unwrap();
+        let d = quote(&crate::tmux::format_literal(odd.to_str().unwrap()));
+        assert!(t
+            .sh(&format!("tmux new-session -d -s agent -c {d} 'sleep 60'"))
+            .status
+            .success());
+        let open = t.sh(&open_shell_terminal_script("agent", 1, false));
+        assert!(
+            open.status.success(),
+            "{}",
+            String::from_utf8_lossy(&open.stderr)
+        );
+        let cwd = t.sh("tmux display-message -p -t '=agent--sh1:' '#{pane_current_path}'");
+        assert_eq!(
+            std::fs::canonicalize(String::from_utf8_lossy(&cwd.stdout).trim()).unwrap(),
+            std::fs::canonicalize(&odd).unwrap()
+        );
+    }
+
+    #[test]
     fn open_close_kill_and_rename_scripts_drive_a_real_tmux() {
         let Some(t) = Tmux::new() else { return };
         let dir = tempfile::tempdir().unwrap();
