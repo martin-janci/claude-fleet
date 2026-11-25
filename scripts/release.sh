@@ -5,6 +5,9 @@
 #        scripts/release.sh --next         (print that derived version; changes nothing)
 #        scripts/release.sh --list         (print the version carriers; changes nothing)
 #        scripts/release.sh --list-image-pin (print the hub compose path; changes nothing)
+#        scripts/release.sh --tag-only <X.Y.Z[-rc.N]>
+#                                  (tag main's tip, whose release commit is already
+#                                   merged, e.g. from a PR; bumps nothing)
 # Env:   RELEASE_DRY_RUN=1        edit files only — no cargo/commit/tag, and no
 #                                network: the remote preflight below is skipped
 #                                too, so a dry run still works offline
@@ -58,7 +61,20 @@ if [[ ${1:-} == "--list-image-pin" ]]; then
   exit 0
 fi
 
-[[ $# -eq 1 ]] || die "usage: scripts/release.sh <X.Y.Z[-rc.N]> | auto | --next | --list | --list-image-pin"
+# `--tag-only <v>` finishes a release whose `chore(release): v<v>` commit
+# reached main through a PR rather than through this script (0.6.5 did, and
+# went 12 days untagged while main pinned a hub image that did not exist).
+# It bumps nothing: it requires every carrier and the CHANGELOG section to be
+# at <v> already, runs the same gates as a release (main, clean, origin tip,
+# CI green), and creates only the tag, on HEAD.
+TAG_ONLY=""
+if [[ ${1:-} == "--tag-only" ]]; then
+  [[ $# -eq 2 ]] || die "usage: scripts/release.sh --tag-only <X.Y.Z[-rc.N]>"
+  TAG_ONLY=1
+  shift
+fi
+
+[[ $# -eq 1 ]] || die "usage: scripts/release.sh <X.Y.Z[-rc.N]> | auto | --next | --list | --list-image-pin | --tag-only <X.Y.Z[-rc.N]>"
 
 # X.Y.Z, or X.Y.Z-<pre> for a release candidate. The pre-release suffix is the
 # review channel that replaced the draft habit: `v0.3.0-rc.1` builds the same
@@ -107,8 +123,8 @@ derive_next() {
 
 NEXT_ONLY=""
 case "$1" in
-  --next) NEXT_ONLY=1 ;;
-  auto) ;;
+  --next) [[ -z "$TAG_ONLY" ]] || die "--tag-only needs an explicit version"; NEXT_ONLY=1 ;;
+  auto) [[ -z "$TAG_ONLY" ]] || die "--tag-only needs an explicit version"; ;;
   *) check_version "$1"; NEW="$1" ;;
 esac
 
@@ -133,7 +149,6 @@ BRANCH="$(git branch --show-current)"
 [[ "$BRANCH" == "main" ]] || die "must run on main (currently on '$BRANCH')"
 [[ -z "$(git status --porcelain)" ]] || die "working tree is dirty — commit or discard first"
 git rev-parse -q --verify "refs/tags/v$NEW" >/dev/null && die "tag v$NEW already exists"
-[[ "$CUR" != "$NEW" ]] || die "package.json is already at $NEW"
 
 # --- remote preflight: is THIS commit the one to release, and is it green? ---
 # Both questions need the network, and neither protects anything in a dry run,
@@ -141,6 +156,7 @@ git rev-parse -q --verify "refs/tags/v$NEW" >/dev/null && die "tag v$NEW already
 # RELEASE_DRY_RUN — otherwise the documented "edit files only, for testing"
 # mode would require gh, a network and a pushed, CI-green HEAD, and there would
 # be no way to rehearse a bump offline at all.
+remote_preflight() {
 if [[ -n "${RELEASE_DRY_RUN:-}" ]]; then
   echo "release.sh: RELEASE_DRY_RUN is set — skipping the remote preflight (up-to-date check and CI gate); a dry run creates no tag for them to protect" >&2
 else
@@ -181,6 +197,34 @@ else
       || die "CI is not green on HEAD (see above). Fix it, or set RELEASE_SKIP_CI_CHECK=1 if you know why this is safe."
   fi
 fi
+}
+
+if [[ -n "$TAG_ONLY" ]]; then
+  # The release commit is already on main, so the carriers must say <v> and
+  # the CHANGELOG must hold its section: release.yml takes its notes from
+  # that section, and the version-consistency job re-checks the carriers
+  # against the tag. Checking both here refuses the tag before it exists.
+  [[ "$CUR" == "$NEW" ]] || die "--tag-only: package.json is at $CUR, not $NEW — merge the release commit (scripts/release.sh $NEW) first"
+  scripts/check-version-consistency.sh --expect-tag "v$NEW" \
+    || die "--tag-only: the version carriers do not all say $NEW (see above)"
+  grep -qF "## [$NEW]" CHANGELOG.md || die "--tag-only: CHANGELOG.md has no '## [$NEW]' section"
+  remote_preflight
+  if [[ -n "${RELEASE_DRY_RUN:-}" ]]; then
+    echo "Dry run: would tag v$NEW at $(git rev-parse --short HEAD); nothing created."; exit 0
+  fi
+  git tag -a "v$NEW" -m "claude-fleet v$NEW"
+  echo
+  echo "Created tag v$NEW at $(git rev-parse --short HEAD) (main itself is unchanged). To publish:"
+  echo "  git push origin v$NEW"
+  echo
+  echo "That push builds every asset and — once verify-release passes — PUBLISHES"
+  echo "the release."
+  exit 0
+fi
+
+[[ "$CUR" != "$NEW" ]] || die "package.json is already at $NEW (if its release commit is merged but untagged: scripts/release.sh --tag-only $NEW)"
+
+remote_preflight
 
 echo "Bumping $CUR -> $NEW"
 
