@@ -390,8 +390,9 @@
 //!   moved. The mission event `planner_failed`: a hub without it never
 //!   writes one, and a client drops an event name it does not know. The
 //!   hook bearer of a relay host's hooks (`fhk1_…`, review w10-5, good on
-//!   `/hook` and `/voice/capture` only): a hub without it writes the host
-//!   token instead, and the agent relays either unchanged.
+//!   `/hook` only; the recorder's `/voice/capture` takes its own `fvc1_…`,
+//!   review w01-3): a hub without it writes the host token instead, and the
+//!   agent relays either unchanged.
 //!   `queue_prompt {client_msg_id}` (review w17-3): a hub without it
 //!   ignores it, so a retried queue is queued twice there, as before.
 pub const CONTRACT_REVISION: u32 = 18;

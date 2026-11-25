@@ -228,6 +228,18 @@ fn query_token(query: Option<&str>) -> Option<&str> {
         .filter(|t| !t.is_empty())
 }
 
+/// A derived host token's prefix and resolver for the one route it is good
+/// on: the hook token on `/hook` (review w10-5), the voice token on
+/// `/voice/capture` (review w01-3); `None` on every other route.
+type DerivedResolver = fn(&str, &[crate::store::HostTokenRow]) -> Option<auth::Caller>;
+fn derived_resolver(path: &str) -> Option<(&'static str, DerivedResolver)> {
+    match path {
+        "/hook" => Some((auth::HOOK_TOKEN_PREFIX, auth::resolve_hook_token)),
+        "/voice/capture" => Some((auth::VOICE_TOKEN_PREFIX, auth::resolve_voice_token)),
+        _ => None,
+    }
+}
+
 /// Shared auth middleware for `/mcp` AND `/hook`: DNS-rebinding defense,
 /// then bearer → [`Caller`] (master or per-host token), inserted into the
 /// request extensions for the MCP handler / hook handler to read.
@@ -310,6 +322,12 @@ async fn authorize(
         }
     };
     let personal_owner = rows.personal_owner;
+    // A bearer derived from a host token for this route, with its resolver.
+    let derived = derived_resolver(request.uri().path()).and_then(|(prefix, resolve)| {
+        auth::bearer_token(request.headers().get(axum::http::header::AUTHORIZATION))
+            .filter(|t| t.starts_with(prefix))
+            .map(|t| (t, resolve))
+    });
     let mut caller = match auth::check_request(
         request.headers(),
         &state.master,
@@ -327,25 +345,19 @@ async fn authorize(
         // re-provision every host before then. Only with an empty Host
         // allowlist (desktop / loopback hub): a public hub's master token
         // must never be accepted from a URL that proxies and logs can see.
-        // A hook-only token (review w10-5), derived from a host token: good
-        // on `/hook` and on the host recorder's `/voice/capture` (it reads
-        // the same `fleet-hook.headers` file; the handler demands a host
-        // caller and refuses peers, review w18-1), and nowhere else.
-        Err(StatusCode::UNAUTHORIZED)
-            if matches!(request.uri().path(), "/hook" | "/voice/capture")
-                && auth::bearer_token(request.headers().get(axum::http::header::AUTHORIZATION))
-                    .is_some_and(|t| t.starts_with(auth::HOOK_TOKEN_PREFIX)) =>
-        {
-            auth::bearer_token(request.headers().get(axum::http::header::AUTHORIZATION))
-                .and_then(|t| auth::resolve_hook_token(t, &rows.hosts))
-                .ok_or_else(|| {
-                    tracing::warn!(
-                        "[mcp] rejected {} request: unknown hook token",
-                        request.uri().path()
-                    );
-                    StatusCode::UNAUTHORIZED
-                })?
-        }
+        // A token derived from a host token, each good on one route only:
+        // the hook-only token (review w10-5) on `/hook`, and the host
+        // recorder's voice token (review w01-3) on `/voice/capture`, whose
+        // handler demands a host caller and refuses peers (review w18-1).
+        Err(StatusCode::UNAUTHORIZED) if derived.is_some() => derived
+            .and_then(|(token, resolve)| resolve(token, &rows.hosts))
+            .ok_or_else(|| {
+                tracing::warn!(
+                    "[mcp] rejected {} request: unknown derived token",
+                    request.uri().path()
+                );
+                StatusCode::UNAUTHORIZED
+            })?,
         Err(StatusCode::UNAUTHORIZED)
             if request.uri().path() == "/hook" && state.allowed_hosts.is_empty() =>
         {
@@ -2024,19 +2036,32 @@ mod tests {
             mcp_derived.contains("401"),
             "the hook-only token must not reach /mcp:\n{mcp_derived}"
         );
-        // …but the host recorder's voice capture reads the same headers
-        // file (review w18-1): past auth to the handler (voice is off here).
-        let voice_derived = round_trip(
-            addr,
-            &format!(
+        // …nor the host recorder's voice capture, which has a bearer of its
+        // own (review w01-3): a hook token read off the relay port opens no
+        // microphone…
+        let capture = |bearer: &str| {
+            format!(
                 "GET /voice/capture?tmux=x HTTP/1.1\r\nHost: 127.0.0.1\r\n\
-                 Authorization: Bearer {derived}\r\nConnection: close\r\n\r\n"
-            ),
-        )
-        .await;
+                 Authorization: Bearer {bearer}\r\nConnection: close\r\n\r\n"
+            )
+        };
+        let voice_hook = round_trip(addr, &capture(&derived)).await;
         assert!(
-            !voice_derived.contains("401") && voice_derived.contains("voice relay is off"),
-            "the hook-only token must reach /voice/capture:\n{voice_derived}"
+            voice_hook.contains("401"),
+            "the hook-only token must not reach /voice/capture:\n{voice_hook}"
+        );
+        // …while the voice token reaches the handler (voice is off here)…
+        let voice = auth::voice_token("host-tok");
+        let voice_ok = round_trip(addr, &capture(&voice)).await;
+        assert!(
+            !voice_ok.contains("401") && voice_ok.contains("voice relay is off"),
+            "the voice token must reach /voice/capture:\n{voice_ok}"
+        );
+        // …and posts no hook.
+        let hook_voice = round_trip(addr, &post("/hook", Some(&voice), None, stop)).await;
+        assert!(
+            hook_voice.contains("401"),
+            "the voice token must not reach /hook:\n{hook_voice}"
         );
         // …and one derived from a token the hub does not hold is nobody.
         let stranger = auth::hook_token("not-a-host-tok");
