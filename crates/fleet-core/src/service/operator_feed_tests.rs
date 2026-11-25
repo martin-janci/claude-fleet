@@ -544,12 +544,7 @@ async fn an_autofix_problem_reaches_the_operator_once() {
     run_with(&w.store, &fake, &CFG, now).await;
     {
         let s = w.store.lock().unwrap();
-        s.insert_client_token(
-            crate::service::operator::OPERATOR_CLIENT_NAME,
-            "aa11",
-            "full",
-        )
-        .unwrap();
+        s.insert_operator_client_token("aa11", "full").unwrap();
         let cx = crate::service::autofix::apply::gather(&s, &[], now).unwrap();
         let found = crate::service::autofix::operator_unbound::scan(&cx);
         crate::service::autofix::sync::sync(

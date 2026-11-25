@@ -146,8 +146,8 @@ pub use changesets::{
     AppliedRecord, ChangesetItemRow, ChangesetRow, NewChangesetItem, TriageVerdictRow,
 };
 pub use clients::{
-    breaks_a_line, validate_client_mode, validate_client_name, ClientBinding, CLIENT_MODES,
-    LINE_SEPARATORS, MAX_CLIENT_NAME_LEN,
+    breaks_a_line, is_reserved_client_name, validate_client_mode, validate_client_name,
+    ClientBinding, CLIENT_MODES, LINE_SEPARATORS, MAX_CLIENT_NAME_LEN,
 };
 pub use control_handoffs::{
     handoff_preview, ControlHandoffRow, FeedEventRow, HandoffItem, NewHandoff, APPROVAL_PERSON,

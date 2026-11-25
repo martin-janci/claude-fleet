@@ -23485,12 +23485,7 @@ fn autofix_params(action: &str, id: Option<i64>) -> AutofixParams {
 #[tokio::test]
 async fn autofix_lists_the_operator_finding_and_a_trusted_device_fixes_it() {
     let s = Store::open_in_memory().unwrap();
-    s.insert_client_token(
-        crate::service::operator::OPERATOR_CLIENT_NAME,
-        "aa11",
-        "full",
-    )
-    .unwrap();
+    s.insert_operator_client_token("aa11", "full").unwrap();
     let t = test_tools(s);
     let mut dev = client_caller("laptop", TokenMode::Full);
     dev.client.as_mut().unwrap().trusted = true;
@@ -23529,12 +23524,7 @@ async fn autofix_lists_the_operator_finding_and_a_trusted_device_fixes_it() {
 #[tokio::test]
 async fn the_operator_may_list_but_not_apply_or_dismiss() {
     let s = Store::open_in_memory().unwrap();
-    s.insert_client_token(
-        crate::service::operator::OPERATOR_CLIENT_NAME,
-        "aa11",
-        "full",
-    )
-    .unwrap();
+    s.insert_operator_client_token("aa11", "full").unwrap();
     let t = test_tools(s);
     let mut op = client_caller(
         crate::service::operator::OPERATOR_CLIENT_NAME,
@@ -23565,12 +23555,7 @@ async fn the_operator_may_list_but_not_apply_or_dismiss() {
 #[tokio::test]
 async fn an_untrusted_device_may_not_apply() {
     let s = Store::open_in_memory().unwrap();
-    s.insert_client_token(
-        crate::service::operator::OPERATOR_CLIENT_NAME,
-        "aa11",
-        "full",
-    )
-    .unwrap();
+    s.insert_operator_client_token("aa11", "full").unwrap();
     let t = test_tools(s);
     let dev = client_caller("phone", TokenMode::Full); // trusted: false
     let scan = result_json(
@@ -23595,12 +23580,7 @@ async fn an_untrusted_device_may_not_apply() {
 #[tokio::test]
 async fn dismiss_refuses_an_until_in_the_past() {
     let s = Store::open_in_memory().unwrap();
-    s.insert_client_token(
-        crate::service::operator::OPERATOR_CLIENT_NAME,
-        "aa11",
-        "full",
-    )
-    .unwrap();
+    s.insert_operator_client_token("aa11", "full").unwrap();
     let t = test_tools(s);
     let mut dev = client_caller("laptop", TokenMode::Full);
     dev.client.as_mut().unwrap().trusted = true;

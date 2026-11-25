@@ -79,7 +79,23 @@ pub fn validate_client_name(name: &str) -> Result<String, crate::ipc_error::IpcE
              (a line break could split the untrusted-content marker)",
         );
     }
+    if is_reserved_client_name(trimmed) {
+        return invalid(
+            "is reserved: it is the name of Control's own token, which the hub mints itself",
+        );
+    }
     Ok(trimmed.to_string())
+}
+
+/// Whether `name` is Control's (`service::operator::OPERATOR_CLIENT_NAME`),
+/// in any case. `Caller::is_operator` reads the client's NAME, so a device
+/// paired, signed in or renamed as `ux-agent` while no live Control token
+/// held it became the operator: the owner's clipboard, every paired device
+/// in `diagnose`, Control's journal. Only
+/// [`Store::insert_operator_client_token`] writes that name.
+pub fn is_reserved_client_name(name: &str) -> bool {
+    name.trim()
+        .eq_ignore_ascii_case(crate::service::operator::OPERATOR_CLIENT_NAME)
 }
 
 /// Check a client mode: one of [`CLIENT_MODES`].
@@ -110,7 +126,30 @@ impl Store {
         // The stored name is the trimmed one the validator returns, so a name
         // can never be padded into something `revoke_client_token` (which
         // trims what it is given) could no longer match.
-        let name = &validate_client_name(name)?;
+        let name = validate_client_name(name)?;
+        self.insert_client_token_named(&name, token_sha256, mode)
+    }
+
+    /// Insert Control's own token row (`OPERATOR_CLIENT_NAME`, which
+    /// [`validate_client_name`] refuses everywhere else).
+    pub fn insert_operator_client_token(
+        &self,
+        token_sha256: &str,
+        mode: &str,
+    ) -> Result<ClientTokenRow, crate::ipc_error::IpcError> {
+        self.insert_client_token_named(
+            crate::service::operator::OPERATOR_CLIENT_NAME,
+            token_sha256,
+            mode,
+        )
+    }
+
+    fn insert_client_token_named(
+        &self,
+        name: &str,
+        token_sha256: &str,
+        mode: &str,
+    ) -> Result<ClientTokenRow, crate::ipc_error::IpcError> {
         validate_client_mode(mode)?;
         let at = now_unix();
         self.conn
@@ -1007,13 +1046,39 @@ mod tests {
         Store::open_in_memory().expect("store")
     }
 
+    /// Control's name is the operator's identity (`Caller::is_operator`), so
+    /// no pairing, sign-in, rename or other mint may take it, in any case or
+    /// padding; only `insert_operator_client_token` writes it.
+    #[test]
+    fn controls_name_is_reserved_for_its_own_mint() {
+        let s = store();
+        for name in ["ux-agent", "UX-Agent", " ux-agent "] {
+            let e = super::validate_client_name(name).unwrap_err();
+            assert_eq!(e.code, codes::E_VALIDATE, "{name:?}");
+            assert!(e.message.contains("reserved"), "{}", e.message);
+            assert!(
+                s.insert_client_token(name, "aa11", "full").is_err(),
+                "{name:?}"
+            );
+        }
+        s.insert_client_token("phone", "bb22", "full").unwrap();
+        assert!(s.rename_client_token("phone", "ux-agent").is_err());
+        let row = s.insert_operator_client_token("cc33", "full").unwrap();
+        assert_eq!(row.name, crate::service::operator::OPERATOR_CLIENT_NAME);
+        assert!(super::validate_client_name("ux-agent-2").is_ok());
+    }
+
     /// Pair a device the way redemption leaves it: a live row of `mode`,
     /// bound to `person`. Returns the plaintext token and the row id.
     fn pair_test(s: &Store, name: &str, mode: &str, person: Option<i64>) -> (String, i64) {
         let token = format!("tok-{name}");
-        let row = s
-            .insert_client_token(name, &crate::mcp::auth::sha256_hex(&token), mode)
-            .unwrap();
+        let sha = crate::mcp::auth::sha256_hex(&token);
+        let row = if super::is_reserved_client_name(name) {
+            s.insert_operator_client_token(&sha, mode)
+        } else {
+            s.insert_client_token(name, &sha, mode)
+        }
+        .unwrap();
         if person.is_some() {
             s.set_client_person(name, person).unwrap();
         }
@@ -1255,9 +1320,9 @@ mod tests {
     #[test]
     fn a_replaced_token_is_reinstated_and_its_replacement_revoked() {
         let s = store();
-        s.insert_client_token("ux-agent", "aa11", "full").unwrap();
+        s.insert_operator_client_token("aa11", "full").unwrap();
         let old = s.revoke_client_token("ux-agent").unwrap();
-        s.insert_client_token("ux-agent", "bb22", "full").unwrap();
+        s.insert_operator_client_token("bb22", "full").unwrap();
 
         let back = s.reinstate_client_token("ux-agent", old.id).unwrap();
         assert_eq!(back.token_sha256, "aa11");

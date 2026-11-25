@@ -1245,8 +1245,7 @@ mod tests {
         let store = Mutex::new(Store::open_in_memory().unwrap());
         let id = {
             let s = store.lock().unwrap();
-            s.insert_client_token(OPERATOR_CLIENT_NAME, "aa11", "full")
-                .unwrap();
+            s.insert_operator_client_token("aa11", "full").unwrap();
             let cx = gather(&s, &[], 10).unwrap();
             sync(&s, &crate::service::autofix::scan_all(&cx), Scope::All, 10)
                 .unwrap()
@@ -1425,8 +1424,7 @@ mod tests {
         let store = Mutex::new(Store::open_in_memory().unwrap());
         {
             let s = store.lock().unwrap();
-            s.insert_client_token(OPERATOR_CLIENT_NAME, "aa11", "full")
-                .unwrap();
+            s.insert_operator_client_token("aa11", "full").unwrap();
         }
         let exec = FakeExec::default();
         let out = run_pass_with(&store, &exec, &[], 10, |cx| {
@@ -1572,8 +1570,7 @@ mod tests {
     #[test]
     fn a_disabled_detector_finds_nothing_in_a_scan() {
         let s = Store::open_in_memory().unwrap();
-        s.insert_client_token(OPERATOR_CLIENT_NAME, "aa11", "full")
-            .unwrap();
+        s.insert_operator_client_token("aa11", "full").unwrap();
         s.insert_host("h1", Some("h1")).unwrap();
         s.set_host_provisioned("h1", true).unwrap();
         let mut h = s

@@ -10,8 +10,12 @@ fn args(action: &str) -> OrgAdminArgs {
 
 fn device(st: &Mutex<Store>, name: &str, mode: &str) {
     let s = st.lock().unwrap();
-    s.insert_client_token(name, &format!("digest-{name}"), mode)
-        .unwrap();
+    if crate::store::is_reserved_client_name(name) {
+        s.insert_operator_client_token(&format!("digest-{name}"), mode)
+    } else {
+        s.insert_client_token(name, &format!("digest-{name}"), mode)
+    }
+    .unwrap();
 }
 
 fn err_code(r: Result<serde_json::Value, IpcError>) -> String {

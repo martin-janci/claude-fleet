@@ -1632,7 +1632,7 @@ pub(crate) async fn ensure_operator_with(
 /// row, its binding to the hub's owner, and its recorded hash. The caller
 /// gives the revoked token back when this fails.
 fn commit_operator_token(s: &Store, sha: &str) -> Result<(), IpcError> {
-    s.insert_client_token(OPERATOR_CLIENT_NAME, sha, "full")?;
+    s.insert_operator_client_token(sha, "full")?;
     // The token is the hub owner's, as the session started in step 6 is
     // (`hub_personal_owner`). A client with no person gets a REFUSING
     // `view_scope` — the agent would see no session, its own included.
@@ -2253,7 +2253,7 @@ mod tests {
                 },
             )
             .unwrap();
-            s.insert_client_token(OPERATOR_CLIENT_NAME, "the-old-sha", "full")
+            s.insert_operator_client_token("the-old-sha", "full")
                 .unwrap();
             s.set_setting(SETTING_OPERATOR_TOKEN_SHA, "the-old-sha")
                 .unwrap();
@@ -2893,7 +2893,7 @@ mod tests {
         {
             let s = lock(&store).unwrap();
             s.set_setting(crate::mcp::SETTING_TOKEN, "").unwrap();
-            s.insert_client_token(OPERATOR_CLIENT_NAME, "the-old-sha", "full")
+            s.insert_operator_client_token("the-old-sha", "full")
                 .unwrap();
         }
         let host = FakeHost::new(&store);
@@ -3065,8 +3065,7 @@ mod tests {
             let s = store.lock().unwrap();
             s.restore_session(session_id).unwrap();
             let sha = "deadbeef-token-sha";
-            s.insert_client_token(OPERATOR_CLIENT_NAME, sha, "full")
-                .unwrap();
+            s.insert_operator_client_token(sha, "full").unwrap();
             s.set_setting(SETTING_OPERATOR_TOKEN_SHA, sha).unwrap();
             s.revoke_client_token(OPERATOR_CLIENT_NAME).unwrap();
         }
@@ -3079,8 +3078,7 @@ mod tests {
         {
             let s = store.lock().unwrap();
             let sha = "a-live-token-sha";
-            s.insert_client_token(OPERATOR_CLIENT_NAME, sha, "full")
-                .unwrap();
+            s.insert_operator_client_token(sha, "full").unwrap();
             s.set_setting(SETTING_OPERATOR_TOKEN_SHA, sha).unwrap();
         }
         let st = operator_status(&store).unwrap();
@@ -3120,7 +3118,7 @@ mod tests {
         // A token the operator already holds and is working with.
         {
             let s = lock(&store).unwrap();
-            s.insert_client_token(OPERATOR_CLIENT_NAME, "the-live-sha", "full")
+            s.insert_operator_client_token("the-live-sha", "full")
                 .unwrap();
             s.set_setting(SETTING_OPERATOR_TOKEN_SHA, "the-live-sha")
                 .unwrap();

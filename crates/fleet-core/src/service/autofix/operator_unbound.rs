@@ -72,7 +72,7 @@ mod tests {
     #[test]
     fn an_unbound_operator_token_is_a_blocking_finding_with_a_bind_fix() {
         let s = Store::open_in_memory().unwrap();
-        s.insert_client_token(OPERATOR_CLIENT_NAME, "deadbeefcafe0123", "full")
+        s.insert_operator_client_token("deadbeefcafe0123", "full")
             .unwrap();
         let found = scan(&cx(&s));
         assert_eq!(found.len(), 1);
@@ -97,8 +97,7 @@ mod tests {
     #[test]
     fn a_bound_operator_token_is_healthy() {
         let s = Store::open_in_memory().unwrap();
-        s.insert_client_token(OPERATOR_CLIENT_NAME, "aa11", "full")
-            .unwrap();
+        s.insert_operator_client_token("aa11", "full").unwrap();
         s.set_client_person(OPERATOR_CLIENT_NAME, s.personal_owner_id().unwrap())
             .unwrap();
         assert!(scan(&cx(&s)).is_empty());
@@ -113,8 +112,7 @@ mod tests {
     #[test]
     fn a_hub_without_an_owner_gets_an_explanation_and_no_fix() {
         let s = Store::open_in_memory().unwrap();
-        s.insert_client_token(OPERATOR_CLIENT_NAME, "aa11", "full")
-            .unwrap();
+        s.insert_operator_client_token("aa11", "full").unwrap();
         let mut c = cx(&s);
         c.owner = None;
         let found = scan(&c);

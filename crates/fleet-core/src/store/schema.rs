@@ -4451,10 +4451,10 @@ mod tests {
         let old = Store::open_in_memory().expect("open");
         let owner = old.personal_owner_id().unwrap().expect("an owner");
         let ada = old.create_person("ada", None).unwrap().id;
-        old.insert_client_token("ux-agent", &"a".repeat(64), "full")
+        old.insert_operator_client_token(&"a".repeat(64), "full")
             .unwrap();
         old.revoke_client_token("ux-agent").unwrap();
-        old.insert_client_token("ux-agent", &"b".repeat(64), "full")
+        old.insert_operator_client_token(&"b".repeat(64), "full")
             .unwrap();
         old.insert_client_token("phone", &"c".repeat(64), "full")
             .unwrap();
