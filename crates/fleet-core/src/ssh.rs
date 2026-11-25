@@ -1425,9 +1425,17 @@ async fn run_local_with_stdin(
 /// expected (a transcript, review r18 M5); the temp file is removed when
 /// either step fails. Run as `sh -c '<script>'`, one word for the remote
 /// login shell whatever shell that is; every value is `shell::quote`d.
+///
+/// The temp file is created under `umask 077`, so what lands is `0600`
+/// (the agent path's upload keeps that too). It used to take the remote
+/// umask, and the secret writes that go through here (`~/.claude.json`, the
+/// hook headers file, a profile's config) sat world-readable at a
+/// predictable name until a later `chmod 600`, or for good when the
+/// connection dropped before it. A caller that wants another mode sets it
+/// after the upload, as the provisioning steps do.
 pub(crate) fn atomic_upload_command(remote_path: &str) -> String {
     let script = format!(
-        "f={}; t=\"$f.cf-upload.$$\"; \
+        "f={}; t=\"$f.cf-upload.$$\"; umask 077; \
          if cat > \"$t\" && mv -f -- \"$t\" \"$f\"; then exit 0; fi; \
          rm -f -- \"$t\"; exit 1",
         crate::shell::quote(remote_path)
@@ -2131,6 +2139,13 @@ mod tests {
             .unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new\n");
         assert_eq!(names(dir.path()), vec!["it's a.jsonl".to_string()]);
+        // Private from the moment it exists, whatever the remote umask.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{mode:o}");
+        }
     }
 
     /// Only a directory of this user's own, closed to everyone else, holds
