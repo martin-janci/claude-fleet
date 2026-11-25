@@ -416,6 +416,47 @@ pub trait ShepherdExec: Send + Sync {
     }
 }
 
+/// One probe for a nudge: whether a person is attached, and what runs in the
+/// pane's foreground.
+pub(crate) fn nudge_probe_script(tmux_name: &str) -> String {
+    format!(
+        "tmux display -p -t {} '#{{session_attached}}|#{{pane_current_command}}'",
+        crate::shell::quote(&crate::tmux::exact_pane(tmux_name))
+    )
+}
+
+/// Pure: may the shepherd type into the pane [`nudge_probe_script`] read?
+/// Not when a person is attached (or the probe cannot tell), and not when the
+/// foreground is a bare shell: Claude has exited there, and the prompt —
+/// which carries text from the PR and its checks — would run as commands.
+pub(crate) fn nudge_may_type(stdout: &str) -> bool {
+    let line = stdout.trim();
+    let Some((attached, command)) = line.split_once('|') else {
+        return false;
+    };
+    if crate::service::playbooks::pane_is_attached(attached) {
+        return false;
+    }
+    let command = command.trim().trim_start_matches('-');
+    let base = command.rsplit('/').next().unwrap_or(command);
+    !base.is_empty()
+        && !matches!(
+            base,
+            "bash"
+                | "sh"
+                | "dash"
+                | "zsh"
+                | "fish"
+                | "ksh"
+                | "mksh"
+                | "tcsh"
+                | "csh"
+                | "ash"
+                | "busybox"
+                | "login"
+        )
+}
+
 /// Production executor: skip an attached pane (as `press_enter` does), else
 /// deliver the prompt as fleet's own (`send_system_prompt`).
 pub struct RealShepherdExec {
@@ -461,18 +502,14 @@ impl ShepherdExec for RealShepherdExec {
         prompt: &str,
     ) -> Result<NudgeOutcome, IpcError> {
         crate::validate::tmux_name_addressable(tmux_name)?;
-        let attached = crate::service::sessions::run_host_script(
+        let probe = crate::service::sessions::run_host_script(
             &self.ssh,
             host_alias,
-            &crate::service::playbooks::attached_probe_script(tmux_name),
+            &nudge_probe_script(tmux_name),
             std::time::Duration::from_secs(10),
         )
         .await?;
-        if !attached.status.success()
-            || crate::service::playbooks::pane_is_attached(&String::from_utf8_lossy(
-                &attached.stdout,
-            ))
-        {
+        if !probe.status.success() || !nudge_may_type(&String::from_utf8_lossy(&probe.stdout)) {
             return Ok(NudgeOutcome::Attached);
         }
         crate::service::sessions::send_system_prompt(

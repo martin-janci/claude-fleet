@@ -585,3 +585,24 @@ async fn explain_reads_what_the_next_tick_would_do_and_sends_nothing() {
     let after = e.sessions.iter().find(|v| v.session_id == id).unwrap();
     assert!(after.detail.contains("already recorded"), "{after:?}");
 }
+
+#[test]
+fn a_nudge_types_only_into_a_detached_pane_running_claude() {
+    use super::{nudge_may_type, nudge_probe_script};
+    assert!(nudge_may_type("0|claude\n"));
+    assert!(nudge_may_type("0|node"));
+    // A person is attached, or the probe could not tell.
+    assert!(!nudge_may_type("1|claude"));
+    assert!(!nudge_may_type(""));
+    assert!(!nudge_may_type("0"));
+    // Claude exited and left a shell: the prompt would run as commands.
+    for sh in ["bash", "-bash", "zsh", "sh", "fish", "/bin/dash", ""] {
+        assert!(!nudge_may_type(&format!("0|{sh}")), "{sh}");
+    }
+    let script = nudge_probe_script("my api");
+    assert!(script.contains("#{pane_current_command}"), "{script}");
+    assert!(
+        script.contains("'=my api:'") || script.contains("=my api"),
+        "{script}"
+    );
+}
