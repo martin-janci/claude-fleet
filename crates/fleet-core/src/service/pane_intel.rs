@@ -1249,8 +1249,29 @@ fn has_elapsed(s: &str) -> bool {
     false
 }
 
+/// The most lines [`analyze`] reads, from the bottom. A capture is a few
+/// screens at most (`PANE_TAIL_LINES` in reconcile); the dialog readers
+/// below are quadratic in numbered lines, and a probe answer is a host's
+/// to write (up to `TMUX_OUTPUT_CAP`), so 200 000 lines of `1. x` pinned a
+/// worker, and for an `agy` row the store lock, for minutes.
+const ANALYZE_MAX_LINES: usize = 400;
+
+/// The last [`ANALYZE_MAX_LINES`] lines of `text`.
+fn bottom_lines(text: &str) -> &str {
+    let mut seen = 0;
+    for (i, b) in text.bytes().enumerate().rev() {
+        if b == b'\n' {
+            seen += 1;
+            if seen > ANALYZE_MAX_LINES {
+                return &text[i + 1..];
+            }
+        }
+    }
+    text
+}
+
 pub fn analyze(pane_tail: &str) -> PaneIntel {
-    let stripped = strip_ansi(pane_tail);
+    let stripped = strip_ansi(bottom_lines(pane_tail));
     let stuck = detect_stuck(&stripped);
     let context_pct = parse_context_pct(&stripped);
     // A stuck state (trust prompt, auth menu, …) is the more specific reading
@@ -1281,6 +1302,19 @@ pub fn analyze(pane_tail: &str) -> PaneIntel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hostile capture of very many numbered lines is read from its
+    /// bottom only, in bounded time; an ordinary one is read whole.
+    #[test]
+    fn analyze_reads_a_bounded_bottom_of_any_capture() {
+        let text = "1. x\n".repeat(200_000);
+        let started = std::time::Instant::now();
+        let _ = analyze(&text);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(bottom_lines("a\nb\n"), "a\nb\n");
+        let many = "l\n".repeat(ANALYZE_MAX_LINES + 10);
+        assert_eq!(bottom_lines(&many).lines().count(), ANALYZE_MAX_LINES);
+    }
 
     /// The tail of an interactive Claude Code whose login is gone: the
     /// error under the prompt, then the live input box and footer.
