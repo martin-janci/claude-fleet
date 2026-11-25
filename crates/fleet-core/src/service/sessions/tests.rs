@@ -9578,3 +9578,58 @@ fn a_connection_lost_mid_probe_gets_the_redial_grace() {
         "a protocol error with no connection_lost flag is a real failure"
     );
 }
+
+/// A remote's default branch is chosen by whoever runs the remote: one named
+/// `--no-checkout` reached `git worktree add` as an option and left an empty
+/// checkout. A dash-led default is ignored, and the start falls back to HEAD.
+#[cfg(unix)]
+#[test]
+fn a_default_branch_shaped_like_an_option_never_reaches_git() {
+    use std::process::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("r");
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("f"), "hi").unwrap();
+    git(&["add", "f"]);
+    git(&["commit", "-qm", "f"]);
+    git(&["update-ref", "refs/remotes/origin/--no-checkout", "HEAD"]);
+    git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/--no-checkout",
+    ]);
+    let script = worktree_add_script(repo.to_str().unwrap(), "feat-x", None);
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wt = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .last()
+        .unwrap()
+        .to_string();
+    assert!(
+        std::path::Path::new(&wt).join("f").exists(),
+        "the worktree was checked out empty: {wt}"
+    );
+}

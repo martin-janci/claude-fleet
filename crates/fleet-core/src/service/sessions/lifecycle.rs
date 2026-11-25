@@ -384,7 +384,9 @@ pub(super) fn worktree_add_script(root: &str, name: &str, base: Option<&str>) ->
          wt=\"$base/$dir\"\n\
          if [ ! -e \"$wt\" ]; then\n\
          def=\"$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')\"\n\
+         case \"$def\" in -*) def=;; esac\n\
          [ -z \"$def\" ] && def=\"$(git rev-parse --abbrev-ref HEAD 2>/dev/null)\"\n\
+         case \"$def\" in -*) def=;; esac\n\
          if [ -n \"$basebr\" ] && git show-ref --verify --quiet \"refs/heads/$basebr\"; then start=\"$basebr\"\n\
          elif [ -n \"$basebr\" ] && git show-ref --verify --quiet \"refs/remotes/origin/$basebr\"; then start=\"origin/$basebr\"\n\
          else start=\"$def\"\n\
@@ -638,6 +640,15 @@ pub async fn new_session(
 
     if let Some(name) = args.new_worktree.as_deref() {
         validate_new_worktree_name(name)?;
+    }
+    // The base reaches git as a ref: never in option position.
+    if let Some(b) = args
+        .base_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+    {
+        crate::validate::git_ref(b)?;
     }
     // Two starts creating the same worktree at once would both run `git
     // worktree add` into one directory and share whatever it became.
