@@ -1,6 +1,7 @@
 // The UX agent's state, as Control's Chat tab (`AgentPanel.svelte`) needs it.
 // Follows `app_views.ts`: Control and the panel talk through these stores
 // instead of prop-drilling through App.svelte.
+import { leftOfUsed } from './account_usage';
 import { derived, get, writable, type Readable, type Writable } from 'svelte/store';
 import { openControl } from './control';
 import { insertIntoComposer } from './conversation';
@@ -67,7 +68,7 @@ export function operatorAccountLine(
   const named = a.account_uuid && accountName ? accountName(a.account_uuid) : null;
   const who = named ?? a.email ?? (a.account_uuid ? a.account_uuid.slice(0, 8) : 'its account');
   const login = a.profile ? `profile ${a.profile}` : `${a.host_alias}'s own login`;
-  const used = a.used_pct == null ? '' : ` · ${Math.max(0, 100 - Math.round(a.used_pct))}% left`;
+  const used = a.used_pct == null ? '' : ` · ${leftOfUsed(a.used_pct)}% left`;
   if (a.state === 'ok' || a.state === 'unknown') return `Control runs as ${who} (${login})${used}`;
   return `${a.label ?? a.state} · ${who} (${login})${used}`;
 }

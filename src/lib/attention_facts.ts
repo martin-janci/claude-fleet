@@ -5,6 +5,7 @@
 // Blocked buckets. Mirrors `attention::Facts::from_fleet` in fleet-core; the
 // shared fixture (`attention_states.json`) checks both classifiers agree.
 import { stable } from './stable_store';
+import { hubNowSecs } from './now_tick';
 import { derived, type Readable } from 'svelte/store';
 import type { HostRow } from './hosts';
 import { hosts } from './hosts';
@@ -103,7 +104,7 @@ export function attentionFactsFrom(
 // cheaper than one re-rank.
 export const attentionFacts: Readable<AttentionFacts> = stable(
   derived([hosts, accountUsage], ([$hosts, $usage]) =>
-    attentionFactsFrom($hosts, $usage, Math.floor(Date.now() / 1000)),
+    attentionFactsFrom($hosts, $usage, hubNowSecs()),
   ),
   (a, b) => JSON.stringify(a) === JSON.stringify(b),
 );

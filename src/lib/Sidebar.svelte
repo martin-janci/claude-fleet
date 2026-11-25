@@ -1175,7 +1175,11 @@
   // Review w08-3 (option a): a session shared with this person at Read that
   // waits is listed, apart and uncounted: its question is the owner's. So
   // is a teammate's row seen through team reach (review w11-1).
-  const inboxWatched = $derived(inboxRows(inboxPoolAll.filter((s) => !$waitsOnMeOf(s)), attentionOpts));
+  // Only the shares (review r5-06-4): a teammate's row is not shared with
+  // this person, and stays in the Sessions list.
+  const inboxWatched = $derived(
+    inboxRows(inboxPoolAll.filter((s) => isSharedWithMe(s) && !$waitsOnMeOf(s)), attentionOpts),
+  );
   const inboxNeeding = $derived(
     inboxList.length +
       $failingCount +

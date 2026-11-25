@@ -7,10 +7,17 @@
 // so the clock is too: this machine's plus the difference the hub's `ready`
 // frame showed (`hubClockSkew`, review w15-3). A desktop six minutes ahead
 // otherwise read every usage figure as stale for good.
-import { derived, readable } from 'svelte/store';
+import { derived, get, readable } from 'svelte/store';
 import { hubClockSkew } from './hub_connection';
 
 export const NOW_TICK_MS = 30_000;
+
+/** "Now" on the hub's clock, unix seconds: what a view passes where it
+ *  compares against a timestamp the hub wrote (review r5-06-1: `nowTick`
+ *  carried the hub's time, and every reader went back to `Date.now()`). */
+export function hubNowSecs(): number {
+  return Math.floor(Date.now() / 1000) + get(hubClockSkew);
+}
 
 const localTick = readable(Math.floor(Date.now() / 1000), (set) => {
   set(Math.floor(Date.now() / 1000));

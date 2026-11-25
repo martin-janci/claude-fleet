@@ -8,6 +8,7 @@
   // when expired, `no account` / `offline` — and the selected chip gets a full
   // line below the row plus a warning when its account is low. Picking is
   // always the user's: nothing here ever changes the chosen host.
+  import { hubNowSecs } from './now_tick';
   import { hosts } from './hosts';
   import { accounts } from './accounts';
   import { accountUsage } from './account_usage_store';
@@ -20,7 +21,7 @@
     lockedReason = () => null,
     onpick,
     showUsage = false,
-    now = Math.floor(Date.now() / 1000),
+    now = hubNowSecs(),
     locale,
     timeZone,
     selectedAccount,

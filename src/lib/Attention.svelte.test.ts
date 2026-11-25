@@ -248,6 +248,38 @@ describe('Attention: the notifications matrix (11.9)', () => {
       expect(shown).toHaveLength(1);
     });
 
+    it('r5-06-3: a row joining a cause already announced does not ring again', async () => {
+      hosts.set([hostRow('trn', true)]);
+      const a = row({ tmux_name: 'dev-1', host_alias: 'trn', claude_status: 'working' });
+      const b = row({ tmux_name: 'dev-2', host_alias: 'trn', claude_status: 'working' });
+      sessions.set([a]);
+      render(Attention);
+      await tick();
+      sessions.set([{ ...a }]);
+      await tick();
+      hosts.set([hostRow('trn', false)]);
+      sessions.set([{ ...a }]);
+      await tick();
+      sessions.set([{ ...a }, b]);
+      await tick();
+      expect(shown).toEqual(['trn is down · 1 session']);
+    });
+
+    it('r5-06-2: a signed-out login is announced with no usage reading at all', async () => {
+      const up = hostRow('trn', true);
+      hosts.set([up]);
+      const a = row({ tmux_name: 'dev-so', host_alias: 'trn', claude_status: 'idle', last_viewed_at: 9_999_999_999 } as Partial<SessionRow>);
+      sessions.set([a]);
+      render(Attention);
+      await tick();
+      sessions.set([{ ...a }]);
+      await tick();
+      hosts.set([{ ...up, signed_out_logins: [{ profile: null }] } as unknown as HostRow]);
+      sessions.set([{ ...a }]);
+      await tick();
+      expect(shown).toEqual(['A login is signed out · 1 session']);
+    });
+
     it('w11-2: rows already blocked when the hosts first answer are the baseline', async () => {
       const a = row({ tmux_name: 'dev-a', host_alias: 'trn', claude_status: 'working' });
       sessions.set([a]);

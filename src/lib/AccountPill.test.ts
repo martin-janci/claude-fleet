@@ -96,6 +96,22 @@ describe('AccountPill', () => {
     }
   });
 
+  it("r5-06-1: reads a reading's age on the hub's clock", async () => {
+    // This desktop runs an hour ahead of the hub, which read usage a
+    // minute ago by its own clock.
+    const { hubClockSkew } = await import('./hub_connection');
+    const real = Math.floor(Date.now() / 1000);
+    const usage = atLimitUsage();
+    accountUsage.set({ ...usage, [WORK.uuid]: { ...usage[WORK.uuid], fetched_at: real - 3600 - 60 } });
+    hubClockSkew.set(-3600);
+    try {
+      render(AccountPill, { uuid: WORK.uuid });
+      expect(screen.getByTestId('account-pill').getAttribute('data-level')).toBe('warn');
+    } finally {
+      hubClockSkew.set(0);
+    }
+  });
+
   it('is amber at 85% used', () => {
     render(AccountPill, { uuid: WORK.uuid, clock });
     const pill = screen.getByTestId('account-pill');
