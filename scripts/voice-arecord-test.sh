@@ -24,7 +24,10 @@ mkdir -p "$HOME/.claude" "$HOME/.claude-fleet/voice" "$TMP/bin"
 PORT="$(free_port)"
 FB_PORT="$(free_port)"
 printf 'FLEET_VOICE_URL=http://127.0.0.1:%s\n' "$PORT" >"$HOME/.claude-fleet/voice/voice.env"
-printf 'Authorization: Bearer good\n' >"$HOME/.claude/fleet-hook.headers"
+# Its own bearer file wins over the hook headers (review w01-3).
+VOICE_HEADERS="$HOME/.claude-fleet/voice/voice.headers"
+printf 'Authorization: Bearer good\n' >"$VOICE_HEADERS"
+printf 'Authorization: Bearer bad\n' >"$HOME/.claude/fleet-hook.headers"
 
 # The recorder asks for the session of its own pane (`-t "$TMUX_PANE"`):
 # pane %2 is in session t2, %3 in t3, %4 in t4, any other pane (or none) in t1.
@@ -126,8 +129,17 @@ n="$("$ARECORD" -f S16_LE -r 16000 -c 1 -t raw -q - | wc -c)"
 [ "$n" -eq 32000 ] || fail "3: got $n bytes, want 32000"
 echo "ok 3 record 32000 bytes"
 
-# 4. bad bearer, no fallback token: exit 1 with hint
+# 3b. a host provisioned before voice.headers existed: the hook headers
+mv "$VOICE_HEADERS" "$TMP/voice.headers.saved"
+printf 'Authorization: Bearer good\n' >"$HOME/.claude/fleet-hook.headers"
+n="$("$ARECORD" -f S16_LE -r 16000 -c 1 -t raw -q - | wc -c)"
+[ "$n" -eq 32000 ] || fail "3b: got $n bytes, want 32000"
+mv "$TMP/voice.headers.saved" "$VOICE_HEADERS"
 printf 'Authorization: Bearer bad\n' >"$HOME/.claude/fleet-hook.headers"
+echo "ok 3b falls back to the hook headers"
+
+# 4. bad bearer, no fallback token: exit 1 with hint
+printf 'Authorization: Bearer bad\n' >"$VOICE_HEADERS"
 FB_TOKEN="$HOME/.config/fleet-voice/token"
 set +e
 "$ARECORD" -f S16_LE -r 16000 -c 1 -t raw -q - >"$TMP/out" 2>"$TMP/err"
@@ -157,7 +169,7 @@ not_alive() { ! alive "$1"; }
 # 7. Claude Code ends a recording with SIGTERM to arecord and waits for its
 #    stdout to close: the stream must end at once, the server see the
 #    hang-up, and no temp file stay behind. No fallback may answer instead.
-printf 'Authorization: Bearer good\n' >"$HOME/.claude/fleet-hook.headers"
+printf 'Authorization: Bearer good\n' >"$VOICE_HEADERS"
 rm -f "$FB_TOKEN"
 mkfifo "$TMP/pipe"
 cat "$TMP/pipe" >"$TMP/rec" & reader=$!; PIDS+=("$reader")

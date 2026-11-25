@@ -648,6 +648,70 @@ async fn a_start_takes_the_rules_fallback_host_while_its_host_is_offline() {
     assert_eq!(plan.fell_back_from, None);
 }
 
+/// Review r5-01-7: a rule's host stays binding while it is down. With no
+/// fallback the start is refused naming the rule (`E_HOST_OFFLINE`), never
+/// placed elsewhere; the preview asks for a host instead of failing, and a
+/// host the caller names still starts.
+#[tokio::test]
+async fn a_rules_host_that_is_down_refuses_the_start_naming_the_rule() {
+    let w = w();
+    w.host("mac", false);
+    w.rule(StartRuleInput {
+        pattern: "PD-*".into(),
+        project_id: w.pos,
+        host_alias: Some("mac".into()),
+        ..Default::default()
+    });
+    let item = w.item("PD-8");
+    let preview = w.preview_unhosted(item).await;
+    assert!(preview.plan.is_none(), "not placed elsewhere");
+    assert_eq!(preview.missing.as_deref(), Some("host"));
+    let c = preview
+        .conflicts
+        .iter()
+        .find(|c| c.kind == "rule_host_down")
+        .expect("the refusal is shown");
+    assert!(
+        c.message.contains("start rule PD-*") && c.message.contains("mac"),
+        "{}",
+        c.message
+    );
+    assert!(c.message.contains("no fallback host"), "{}", c.message);
+    let ticket = tickets::StartTicket {
+        key: "PD-8".into(),
+        title: String::new(),
+        item_id: Some(item),
+    };
+    let e = tickets::plan_resolved(
+        &w.store,
+        &StartArgs {
+            item_id: Some(item),
+            ..Default::default()
+        },
+        &ViewScope::internal(),
+        &ticket,
+    )
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_HOST_OFFLINE, "{}", e.message);
+    // The caller's own host is the caller's choice.
+    let plan = tickets::plan_resolved(
+        &w.store,
+        &StartArgs {
+            item_id: Some(item),
+            host_alias: Some("h".into()),
+            ..Default::default()
+        },
+        &ViewScope::internal(),
+        &ticket,
+    )
+    .unwrap();
+    assert_eq!(plan.host_alias, "h");
+    // Back up: the rule decides again.
+    w.host("mac", true);
+    let plan = w.preview_unhosted(item).await.plan.unwrap();
+    assert_eq!(plan.host_alias, "mac");
+}
+
 /// Review w06-1: a start rule's host is the host. Placement used to re-rank
 /// it as a preference, so a rule for a host the project had never run on
 /// started on another one, under the rule's login.

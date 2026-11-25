@@ -208,6 +208,10 @@ jobs:
       # (fleet-mobile 0.4.8 shipped at 7 beside a revision-8 hub). A second.
       - name: release-mobile contract guard
         run: bash scripts/release-mobile-test.sh
+      # scripts/release.sh --tag-only in a throwaway repo: it tags only a
+      # merged release commit and refuses the rest with no tag. A second.
+      - name: release.sh --tag-only
+        run: bash scripts/release-tag-only-test.sh
       # scripts/check-release-drift.sh against a fake gh and curl: zero drafts
       # under the workflow's token is clean, and the completeness check still
       # reaches stable releases behind the per-push dev ones. A second.

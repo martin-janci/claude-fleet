@@ -274,6 +274,9 @@ step bash scripts/buildkite-verify-test.sh
 # scripts/release-mobile.sh's contract guard against a fake gh: a second.
 step bash scripts/release-mobile-test.sh
 
+# scripts/release.sh --tag-only in a throwaway repo: a second.
+step bash scripts/release-tag-only-test.sh
+
 # scripts/check-release-drift.sh against a fake gh and curl: a second.
 step bash scripts/check-release-drift-test.sh
 

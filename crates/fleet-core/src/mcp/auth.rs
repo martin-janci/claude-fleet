@@ -500,8 +500,12 @@ pub fn sha256_hex(s: &str) -> String {
 }
 
 /// The prefix that marks a hook-only token, so `authorize` knows to try
-/// [`resolve_hook_token`] on `/hook` and `/voice/capture`, and nowhere else.
+/// [`resolve_hook_token`] on `/hook`, and nowhere else.
 pub const HOOK_TOKEN_PREFIX: &str = "fhk1_";
+
+/// The prefix that marks a voice-only token, so `authorize` knows to try
+/// [`resolve_voice_token`] on `/voice/capture`, and nowhere else.
+pub const VOICE_TOKEN_PREFIX: &str = "fvc1_";
 
 /// The hook-only token derived from a host's token (review w10-5): what a
 /// public hub writes into the hooks of an agent host that relays them on
@@ -510,40 +514,56 @@ pub const HOOK_TOKEN_PREFIX: &str = "fhk1_";
 /// host token with a fixed label, so it needs no column of its own: the hub
 /// recomputes it from the stored host token, a rotated host token rotates it,
 /// and nobody holding it can recover the host token. It authorizes `/hook`
-/// and, since the host recorder reads the same `fleet-hook.headers` file,
-/// `GET /voice/capture` ([`resolve_hook_token`]); every other route compares
-/// stored tokens and never matches it, so it cannot dial `/agent` or call
-/// `/mcp`.
-///
-/// What that opens today (review w01-3): whoever reads this bearer off the
-/// relay port can post hook events AND, for a session of that host with the
-/// microphone on, start the claimed device's capture and read the audio.
-/// The recorder never goes through the relay itself; it only shares the
-/// file. A bearer of its own for `/voice/capture` would close this; that is
-/// an open design decision (the owner's), not something this code decides.
+/// only ([`resolve_hook_token`]); every other route compares stored tokens
+/// and never matches it, so it cannot dial `/agent`, call `/mcp` or open a
+/// microphone on `/voice/capture`, which takes [`voice_token`] (review w01-3).
 pub fn hook_token(host_token: &str) -> String {
+    derived_token(host_token, HOOK_TOKEN_PREFIX, b"fleet-hook-v1")
+}
+
+/// The voice-only token derived from a host's token, the same way as
+/// [`hook_token`] under its own label (review w01-3): the bearer the host's
+/// `arecord` stand-in presents on `GET /voice/capture`, from a headers file of
+/// its own. A hook bearer read off the relay port therefore cannot start a
+/// person's microphone, and this one cannot post hooks.
+pub fn voice_token(host_token: &str) -> String {
+    derived_token(host_token, VOICE_TOKEN_PREFIX, b"fleet-voice-v1")
+}
+
+fn derived_token(host_token: &str, prefix: &str, label: &[u8]) -> String {
     use hmac::{Hmac, Mac};
     let mut mac = Hmac::<sha2::Sha256>::new_from_slice(host_token.as_bytes())
         .expect("HMAC-SHA256 accepts any key length");
-    mac.update(b"fleet-hook-v1");
-    format!(
-        "{HOOK_TOKEN_PREFIX}{}",
-        hex::encode(mac.finalize().into_bytes())
-    )
+    mac.update(label);
+    format!("{prefix}{}", hex::encode(mac.finalize().into_bytes()))
 }
 
 /// The host whose [`hook_token`] `presented` is, as the host token itself
 /// would resolve — the caller a `/hook` request needs. Every row is
 /// compared, with no short-circuit, as in [`resolve_token_at`]. For `/hook`
-/// and `/voice/capture` only: the caller of this decides the route.
+/// only: the caller of this decides the route.
 pub fn resolve_hook_token(presented: &str, host_tokens: &[HostTokenRow]) -> Option<Caller> {
-    if !presented.starts_with(HOOK_TOKEN_PREFIX) {
+    resolve_derived(presented, HOOK_TOKEN_PREFIX, hook_token, host_tokens)
+}
+
+/// [`resolve_hook_token`] for a [`voice_token`]. For `/voice/capture` only.
+pub fn resolve_voice_token(presented: &str, host_tokens: &[HostTokenRow]) -> Option<Caller> {
+    resolve_derived(presented, VOICE_TOKEN_PREFIX, voice_token, host_tokens)
+}
+
+fn resolve_derived(
+    presented: &str,
+    prefix: &str,
+    derive: fn(&str) -> String,
+    host_tokens: &[HostTokenRow],
+) -> Option<Caller> {
+    if !presented.starts_with(prefix) {
         return None;
     }
     let mut found = None;
     for row in host_tokens {
         if !row.token.is_empty()
-            && constant_time_eq(presented.as_bytes(), hook_token(&row.token).as_bytes())
+            && constant_time_eq(presented.as_bytes(), derive(&row.token).as_bytes())
         {
             found = Some(Caller {
                 host_alias: Some(row.host_alias.clone()),
@@ -1025,6 +1045,24 @@ mod tests {
             resolve_token(&a, "master", &hosts, &[], Some(1)).is_none(),
             "the general resolver never takes a hook token"
         );
+    }
+
+    /// Review w01-3: the voice token is a bearer of its own. It names its
+    /// host on the voice resolver, and neither derived token passes the
+    /// other's resolver.
+    #[test]
+    fn the_voice_token_and_the_hook_token_never_stand_in_for_each_other() {
+        let hosts = vec![host_row("a", "tok-a", "full")];
+        let v = voice_token("tok-a");
+        assert!(v.starts_with(VOICE_TOKEN_PREFIX));
+        assert_ne!(v, hook_token("tok-a"));
+        assert_ne!(v, voice_token("tok-b"));
+        let caller = resolve_voice_token(&v, &hosts).expect("host a");
+        assert_eq!(caller.host_alias.as_deref(), Some("a"));
+        assert!(resolve_voice_token(&hook_token("tok-a"), &hosts).is_none());
+        assert!(resolve_hook_token(&v, &hosts).is_none());
+        assert!(resolve_voice_token("tok-a", &hosts).is_none());
+        assert!(resolve_token(&v, "master", &hosts, &[], Some(1)).is_none());
     }
 
     fn host_row(alias: &str, token: &str, mode: &str) -> HostTokenRow {

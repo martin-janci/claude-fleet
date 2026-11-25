@@ -16,8 +16,12 @@ Design: `docs/superpowers/specs/2026-10-05-voice-relay-design.md`.
 1. **Settings -> Voice**: switch on `voice.enabled` (off by default).
 2. **Re-provision the host** so it gets the stand-in: `fleet-hub provision
    --host <alias> --content-only` (or re-provision it from the desktop). This
-   installs `~/.claude-fleet/voice/bin/arecord` and
-   `~/.claude-fleet/voice/voice.env` on the host.
+   installs `~/.claude-fleet/voice/bin/arecord`,
+   `~/.claude-fleet/voice/voice.env` and the recorder's own bearer,
+   `~/.claude-fleet/voice/voice.headers` (0600), on the host. On an agent
+   host whose hooks go through the loopback relay that bearer is a
+   voice-only token (`fvc1_…`), so the hook token (`fhk1_…`) opens no
+   microphone; a hub refuses `fhk1_…` on `/voice/capture`.
 3. **Restart sessions started before** the re-provisioning: the `PATH` is set
    when the session starts.
 4. **Standalone desktop only** (not paired to a hub): the host's recorder
@@ -65,7 +69,8 @@ Security -> Microphone. The microphone indicator turns off when you release.
 | HTTP 409 | No claim for this session. Switch 🎤 on for it (or off and on). |
 | HTTP 423 | This session is already recording (the last capture is still held). Try again in a moment. |
 | HTTP 403 "voice relay is off" | The relay is off. Turn on `voice.enabled`. |
-| HTTP 403 "only a host's recorder captures" | The bearer in `~/.claude/fleet-hook.headers` is not this host's own token (a person's or client's token was put there). Re-provision the host. |
+| HTTP 403 "only a host's recorder captures" | The bearer in `~/.claude-fleet/voice/voice.headers` (or, where that file is missing, `~/.claude/fleet-hook.headers`) is not this host's own token (a person's or client's token was put there). Re-provision the host. |
+| HTTP 401 | The hub does not know the bearer: the host was provisioned before `voice.headers` existed and its hooks carry a hook-only token, or its token was rotated. Re-provision the host. |
 | HTTP 400 "bad tmux name" | The recorder's tmux session has a name fleet never gives a session (characters it refuses), so `claude` is running in a tmux session fleet does not manage. Use `/voice` in a fleet session. |
 | HTTP 404 | The fleet server does not know this tmux session. |
 | HTTP 502 | The microphone failed to open: check the OS permission and the input device. |

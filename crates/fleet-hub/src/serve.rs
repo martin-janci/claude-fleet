@@ -63,6 +63,31 @@ pub(crate) fn open_store_with_bus(
         }
     }
     let db_path = data_dir.join("state.db");
+    // Review w14-8: `docker compose pull && up -d` migrates on the first
+    // open, and without a copy the only way back is yesterday's daily. Every
+    // subcommand opens through here, so whichever runs first copies.
+    use fleet_core::service::hub_storage::{backup_before_migrate, PreMigrate};
+    match backup_before_migrate(&data_dir, fleet_core::store::now_unix()) {
+        Ok(PreMigrate::NotNeeded) => {}
+        // stderr, not stdout: a `--json` subcommand's stdout stays its answer.
+        Ok(PreMigrate::Taken(info)) => out::error(&format!(
+            "copied the database to {} (schema {}) before migrating it",
+            info.path.display(),
+            info.schema.unwrap_or_default()
+        )),
+        Ok(PreMigrate::NoSpace(why)) => out::error(&format!(
+            "migrating the database WITHOUT a copy first: {why}. \
+             Free space and restart if you want one."
+        )),
+        Err(e) => {
+            return Err(format!(
+                "not migrating the claude-fleet database at {}: the copy taken before a \
+                 migration failed: {e}. Fix that (permissions of {}/backups?) and start again.",
+                db_path.display(),
+                data_dir.display()
+            ))
+        }
+    }
     let store = Store::open_with_bus(&db_path, bus).map_err(|e| {
         let advice = fleet_core::store::open_failure_advice(
             &e,

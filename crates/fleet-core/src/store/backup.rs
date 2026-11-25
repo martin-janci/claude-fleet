@@ -130,6 +130,19 @@ pub fn create_private_dir(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The `MAX(schema_version)` of the database at `src`, opened read-only and
+/// never migrated; `None` when it has no `schema_version` table.
+pub fn schema_version_at(src: &Path) -> Result<Option<i64>, String> {
+    let conn = Connection::open_with_flags(
+        src,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("open {} read-only: {e}", src.display()))?;
+    conn.busy_timeout(std::time::Duration::from_secs(10))
+        .map_err(|e| e.to_string())?;
+    schema_of(&conn)
+}
+
 /// `MAX(version)` of `schema_version`, `None` when the table is absent.
 fn schema_of(conn: &Connection) -> Result<Option<i64>, String> {
     let has_table: Option<i64> = conn
