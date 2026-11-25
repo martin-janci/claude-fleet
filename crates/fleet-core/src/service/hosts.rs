@@ -1120,7 +1120,17 @@ pub(crate) fn parse_oauth_account(line: &str) -> Option<OauthAccount> {
     }
     serde_json::from_str::<OauthAccount>(trimmed)
         .ok()
-        .filter(|a| a.uuid.is_some())
+        .filter(|a| a.uuid.as_deref().is_some_and(account_id_shaped))
+}
+
+/// An account id fit to be a primary key: what Claude Code writes is a
+/// UUID. The probe answer is the host's to write, and any string used to
+/// become an `accounts` row (a new random one each pass, one row each).
+fn account_id_shaped(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
 }
 
 /// Convert a probed `OauthAccount` into a storable `AccountRow`, dropping
@@ -1189,6 +1199,19 @@ use crate::store::now_unix;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An account id that is not id-shaped is no account.
+    #[test]
+    fn an_account_id_must_be_id_shaped() {
+        assert!(
+            parse_oauth_account(r#"{"accountUuid":"0b1c2d3e-aaaa-bbbb-cccc-0123456789ab"}"#)
+                .is_some()
+        );
+        let long = format!(r#"{{"accountUuid":"{}"}}"#, "x".repeat(65));
+        assert!(parse_oauth_account(&long).is_none());
+        assert!(parse_oauth_account(r#"{"accountUuid":"a b\nc"}"#).is_none());
+        assert!(parse_oauth_account(r#"{"accountUuid":""}"#).is_none());
+    }
 
     /// A visible, reachable ssh host row with nothing else set.
     fn bare_host(alias: &str) -> HostRow {
