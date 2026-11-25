@@ -262,11 +262,15 @@ impl Store {
                     self.conn.execute(
                         "DELETE FROM session_events WHERE session_id=?1 AND kind=?2 AND id NOT IN (\
                                SELECT id FROM session_events WHERE session_id=?1 AND kind=?2 \
-                               ORDER BY at DESC, id DESC LIMIT ?3)",
+                               ORDER BY id DESC LIMIT ?3)",
                         rusqlite::params![session_id, AUDIT_EVENT_KIND, SESSION_AUDIT_EVENTS_CAP],
                     )?;
                 }
             }
+            // Both prunes keep the newest rows by `id`, which only grows:
+            // by the wall-clock `at`, a clock stepped back made each new
+            // row the oldest, deleted in the same savepoint that wrote it
+            // (and announced anyway) until the clock caught up.
             // Prune only when actually over the cap: a cheap indexed
             // COUNT(*) (idx_session_events_session covers session_id)
             // instead of unconditionally running the DELETE…NOT IN subquery
@@ -281,7 +285,7 @@ impl Store {
                 self.conn.execute(
                     "DELETE FROM session_events WHERE session_id=?1 AND id NOT IN (\
                            SELECT id FROM session_events WHERE session_id=?1 \
-                           ORDER BY at DESC, id DESC LIMIT ?2)",
+                           ORDER BY id DESC LIMIT ?2)",
                     rusqlite::params![session_id, SESSION_EVENTS_CAP],
                 )?;
             }
@@ -1186,6 +1190,32 @@ mod tests {
         };
         assert_eq!(n(now - 60), 2);
         assert_eq!(n(now + 60), 0, "only events at or after `since`");
+    }
+
+    /// The cap keeps the newest rows by id: a clock stepped back does not
+    /// make each new row the one the prune deletes.
+    #[test]
+    fn the_cap_keeps_the_newest_rows_whatever_the_clock_says() {
+        let s = Store::open_in_memory().expect("open");
+        for i in 0..SESSION_EVENTS_CAP {
+            s.insert_session_event(7, "status_change", Some(&format!("v{i}")))
+                .unwrap();
+        }
+        // As if every row so far were written in the far future.
+        s.conn
+            .execute("UPDATE session_events SET at = at + 1000000", [])
+            .unwrap();
+        s.insert_session_event(7, "prompt_sent", Some("after the step"))
+            .unwrap();
+        let kept: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_events WHERE session_id = 7 AND detail = 'after the step'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1, "the newest row survives its own prune");
     }
 
     #[test]
