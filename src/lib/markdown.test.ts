@@ -212,6 +212,13 @@ describe('review r4 w10-9 / w10-10', () => {
     expect(blocks.map((b) => b.t)).toEqual(['para', 'table']);
   });
 
+  // r5-07-2: a pipeline in the last line of a paragraph, then a rule.
+  it('does not read a text line with a pipe above a rule as a table', () => {
+    const blocks = parseMarkdown('To check:\nrun `ps aux | grep fleet` first.\n---\nNext part');
+    expect(blocks.map((b) => b.t)).toEqual(['para', 'hr', 'para']);
+    expect(parseMarkdown('Results:\na | b\n--- | ---\n1 | 2').map((b) => b.t)).toEqual(['para', 'table']);
+  });
+
   it('lets only an ordered item starting at 1 interrupt a paragraph', () => {
     expect(parseMarkdown('released back in\n2021. It was a good year.').map((b) => b.t)).toEqual(['para']);
     expect(parseMarkdown('Steps:\n1. one\n2. two').map((b) => b.t)).toEqual(['para', 'list']);

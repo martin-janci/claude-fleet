@@ -96,11 +96,16 @@ describe('Tour', () => {
     await screen.findByTestId('tour');
     // The Filters button with its panel open: Esc closes the panel.
     const button = document.createElement('button');
+    button.setAttribute('aria-haspopup', 'true');
     button.setAttribute('aria-expanded', 'true');
     document.body.appendChild(button);
     try {
       await fireEvent.keyDown(button, { key: 'Escape' });
       expect(get(tourStep)).toBe(0);
+      // WebKit leaves focus on body after the click (r5-07-4): still the panel's.
+      await fireEvent.keyDown(document.body, { key: 'Escape' });
+      expect(get(tourStep)).toBe(0);
+      button.setAttribute('aria-expanded', 'false');
       // In Control, Esc leaves Control.
       destination.set('control');
       await fireEvent.keyDown(document.body, { key: 'Escape' });

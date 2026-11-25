@@ -450,16 +450,9 @@ function took(map: FleetSettings): void {
   hubSettingKeys.set(new Set(Object.keys(map)));
 }
 
-/** The hub refused this device the fleet's settings (`get_settings` answers
- *  the master and a fleet admin's device only): nothing here says what any
- *  of them is. Not the same as "off": see `hubGatedOn`. */
-export const settingsUnreadable = writable(false);
-
 export async function loadFleetSettings(): Promise<Result<FleetSettings>> {
   const r = await invokeCmd<FleetSettings>('get_fleet_settings');
   if (r.ok && r.value) took(r.value);
-  if (r.ok) settingsUnreadable.set(false);
-  else if (r.error.code === 'E_FORBIDDEN') settingsUnreadable.set(true);
   return r;
 }
 
@@ -482,29 +475,28 @@ const TOGGLE_NEWER_THAN_FEATURE: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * PURE: whether a Writing help feature the HUB switches (`work.context_help`,
- * `work.prompt_tune`, `work.draft_*`, `work.dashboard_summary`) is offered.
- * "Off" and "this window does not know" are kept apart, as on the phone:
- *
- * - the hub refused this device its settings (a colleague's or an org-bound
- *   paired desktop, review r4 w19-2): offered, and the hub's own refusal
- *   says "off" when it is;
- * - the hub answered without the key, and the toggle is newer than the
- *   feature (a hub older than this build, r4 w03-6): offered, the hub runs it;
- * - otherwise the value, default off.
+ * PURE: whether a Writing help feature the HUB switches is offered. The
+ * value, default off, with one exception: the hub answered without the key
+ * and the toggle is newer than the feature (a hub older than this build,
+ * review r4 w03-6), where the hub serves the feature and has no such
+ * setting. A device the hub REFUSED its settings keeps the compiled default
+ * (off), as before: not every feature behind these toggles is refused by
+ * the hub when it is off (the terminal's Context help runs on this device,
+ * review r5-07-1), and on a default hub the buttons would only fail
+ * (r5-07-6; w19-2 is open, a product call).
  */
-export function hubGatedOn(map: FleetSettings, keys: ReadonlySet<string> | null, unreadable: boolean, key: SettingKey): boolean {
-  if (unreadable) return true;
+export function hubGatedOn(map: FleetSettings, keys: ReadonlySet<string> | null, key: SettingKey): boolean {
   if (keys !== null && !keys.has(key) && TOGGLE_NEWER_THAN_FEATURE.has(key)) return true;
   return settingBool(map, key);
 }
 
-/** `hubGatedOn` over the live stores: `$hubGated(SETTING_KEYS.workPromptTune)`. */
+/** `hubGatedOn` over the live stores: `$hubGated(SETTING_KEYS.workPromptTune)`.
+ *  Only for a feature a hub tool enforces the toggle of. */
 export const hubGated = derived(
-  [fleetSettings, hubSettingKeys, settingsUnreadable],
-  ([map, keys, unreadable]) =>
+  [fleetSettings, hubSettingKeys],
+  ([map, keys]) =>
     (key: SettingKey) =>
-      hubGatedOn(map, keys, unreadable, key),
+      hubGatedOn(map, keys, key),
 );
 
 export function settingBool(map: FleetSettings, key: SettingKey): boolean {

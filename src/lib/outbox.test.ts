@@ -211,6 +211,9 @@ describe('outbox: attachments', () => {
     expect(h.uploads).toHaveLength(0);
     expect(h.sends).toHaveLength(0);
     expect(h.msgs()[0]).toMatchObject({ state: 'failed', retryable: false });
+    // r5-07-3: nothing was uploaded, so Edit hands the tile back unspent.
+    const back = h.box.edit(A.id, h.msgs()[0].id);
+    expect(back?.attachments).toEqual([tile('t1', '/tmp/a.txt')]);
   });
 
   it('a send the backend refused as invalid offers no Retry', async () => {
