@@ -357,6 +357,9 @@ pub trait SupportHost: Send + Sync {
     ) -> Result<String, String>;
 }
 
+/// What a support script's stdout may carry back.
+const SCRIPT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+
 /// The production host: the tracker through its provider, the rest over
 /// SSH (or a local shell).
 pub struct LiveSupportHost {
@@ -410,15 +413,27 @@ impl SupportHost for LiveSupportHost {
         script: &str,
         wall_clock_secs: u64,
     ) -> Result<String, String> {
-        let out = crate::ssh::run_shell_bounded(
-            &*self.ssh,
-            host,
-            script,
-            CONNECT,
-            Duration::from_secs(wall_clock_secs),
-        )
-        .await
-        .map_err(|e| e.message)?;
+        // The script goes on stdin, through the same private launcher the
+        // definition probe uses: a scan script carries an MCP server's
+        // `env` (API tokens), which as the `bash -lc` argument sat on the
+        // hub's `ssh` command line and the host's for the whole call,
+        // readable by every local user of both machines.
+        let out = self
+            .ssh
+            .run_with_stdin(
+                host,
+                &[
+                    "bash",
+                    "-lc",
+                    &crate::shell::quote(&crate::service::fleet_agents::probe::launcher()),
+                ],
+                script.as_bytes().to_vec(),
+                CONNECT,
+                Duration::from_secs(wall_clock_secs),
+                SCRIPT_OUTPUT_BYTES,
+            )
+            .await
+            .map_err(|e| e.message)?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
             return Err(format!(

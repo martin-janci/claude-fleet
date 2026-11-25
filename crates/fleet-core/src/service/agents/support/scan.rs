@@ -219,8 +219,10 @@ pub fn call_script(
         if k.is_empty() || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return Err(format!("scan: env name {k:?}"));
         }
+        // `export` lines in the script (which travels on stdin into a 0600
+        // file), never `env K=V` on a command line `ps` shows.
         env.push(format!(
-            "{k}={}",
+            "export {k}={}\n",
             quote(v.as_str().ok_or("scan: an env value is not a string")?)
         ));
     }
@@ -234,14 +236,14 @@ pub fn call_script(
     ];
     let lines: Vec<String> = messages.iter().map(|m| quote(&m.to_string())).collect();
     Ok(format!(
-        "out=$(mktemp) || exit 1\n\
+        "{env}out=$(mktemp) || exit 1\n\
          trap 'rm -f \"$out\"' EXIT\n\
          {{ printf '%s\\n' {msgs}; i=0; while [ $i -lt {timeout_secs} ] && ! grep -Eq '\"id\": ?{CALL_ID}[,}}]' \"$out\"; do sleep 1; i=$((i+1)); done; }} \
-         | timeout {kill} env {env} {argv} > \"$out\" 2>/dev/null\n\
+         | timeout {kill} {argv} > \"$out\" 2>/dev/null\n\
          grep -E '\"id\": ?{CALL_ID}[,}}]' \"$out\" | head -n1\n",
         msgs = lines.join(" "),
         kill = timeout_secs + 5,
-        env = env.join(" "),
+        env = env.concat(),
         argv = argv.join(" "),
     ))
 }
@@ -352,12 +354,13 @@ mod tests {
         let entry = json!({ "type": "stdio", "command": "node", "args": ["/opt/sa/dist/mcp/graylog/index.js"],
             "env": { "GRAYLOG_API_TOKEN": "t'ok" } });
         let s = call_script(&entry, "search_logs", &json!({ "from": 1, "to": 2 }), 60).unwrap();
-        assert!(s.contains("GRAYLOG_API_TOKEN='t'\\''ok'"), "{s}");
+        assert!(s.contains("export GRAYLOG_API_TOKEN='t'\\''ok'\n"), "{s}");
         assert!(
             s.contains("'node' '/opt/sa/dist/mcp/graylog/index.js'"),
             "{s}"
         );
-        assert!(s.contains("timeout 65 env"));
+        assert!(s.contains("timeout 65 'node'"), "{s}");
+        assert!(!s.contains(" env "), "no secret on a command line: {s}");
         assert!(s.contains(r#""name":"search_logs""#));
         assert!(call_script(&json!({ "type": "http", "url": "u" }), "t", &json!({}), 60).is_err());
         assert!(call_script(
