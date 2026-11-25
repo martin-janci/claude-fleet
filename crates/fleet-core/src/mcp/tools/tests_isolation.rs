@@ -5239,6 +5239,16 @@ async fn the_work_view_reads_follow_d31_off() {
             fx.pid_acme
         )
         .is_ok());
+        // Its own org's project on ANOTHER org's host: the host's org is a
+        // boundary too, whatever org a rule gives the project.
+        let err = super::support::require_bound_client_may_create(
+            &s,
+            &Who::BoundA.caller(),
+            "h-b",
+            fx.pid_acme,
+        )
+        .unwrap_err();
+        assert!(err.message.starts_with("E_FORBIDDEN"), "{err:?}");
     }
     // Back on: A's bound client reads the unassigned rows again, from its
     // next call on (the scope is read with each call).

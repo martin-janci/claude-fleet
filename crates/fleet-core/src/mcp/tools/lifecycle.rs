@@ -704,6 +704,10 @@ impl FleetTools {
             "the session to move",
         )?;
         require_move_hosts(&caller, &row.host_alias, &p.target_host_alias)?;
+        {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            require_bound_client_sees_host(&s, &caller, &p.target_host_alias)?;
+        }
         // `dry_run` changes nothing, and a `when` of `cancel` PREVENTS a
         // move — for both, asking the user to confirm would put a dialog
         // between them and the safe action. A `when` of `idle` is a

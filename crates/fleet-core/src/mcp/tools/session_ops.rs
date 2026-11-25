@@ -1086,9 +1086,13 @@ impl FleetTools {
             &format!("host={} name={}", args.host_alias, args.name),
         );
         require_host(&caller, &args.host_alias, "the new background session")?;
-        if let Some(pid) = args.project_id {
+        {
             let s = lock(self.reader()).map_err(to_mcp_err)?;
-            require_bound_client_may_create(&s, &caller, &args.host_alias, pid)?;
+            // With no project too: the host alone is the boundary then.
+            require_bound_client_sees_host(&s, &caller, &args.host_alias)?;
+            if let Some(pid) = args.project_id {
+                require_bound_client_may_create(&s, &caller, &args.host_alias, pid)?;
+            }
         }
         self.confirm_gate(
             "new_bg_session",

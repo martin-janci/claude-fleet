@@ -698,6 +698,19 @@ impl FleetTools {
                 // (it could otherwise read another host's output back via
                 // wait_for_task / list_tasks / its inbox).
                 require_host(&caller, &spec.host_alias, "the new worker")?;
+                // An org-bound client's worker lands in its org only, as
+                // `new_session` does (docs/hub.md: it cannot start a session
+                // in another org's project or host).
+                {
+                    let s = lock(&self.store).map_err(to_mcp_err)?;
+                    require_bound_client_sees_host(&s, &caller, &spec.host_alias)?;
+                    require_bound_client_may_create(
+                        &s,
+                        &caller,
+                        &spec.host_alias,
+                        spec.project_id,
+                    )?;
+                }
                 // A worker runs Claude on the login `profile` names (the
                 // host's own without one): past `accounts.pause_at` it
                 // would stall at the limit with the task open, so it asks

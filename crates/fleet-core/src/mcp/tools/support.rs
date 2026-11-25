@@ -537,7 +537,11 @@ pub(super) fn require_bound_client_may_create(
     let org = s
         .org_for_new_session(host, project_id)
         .map_err(to_mcp_err)?;
-    if !scope.sees_org(org) {
+    // The host's own org as well: a project an org-A rule covers resolved
+    // the new session to org A on a host of org B (or of no org with
+    // `bound_sees_unassigned` off), and the session ran on that host.
+    let host_org = s.host_org(host).map_err(to_mcp_err)?;
+    if !scope.sees_org(org) || !scope.sees_org(host_org) {
         return Err(mcp_err(
             codes::E_FORBIDDEN,
             "a client bound to an org starts sessions only in its own org's projects and hosts",
