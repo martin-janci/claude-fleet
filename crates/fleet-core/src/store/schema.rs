@@ -2659,6 +2659,13 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/231_detach_downloads_library.sql"),
         already_applied: None,
     },
+    // An attachment row that goes takes its blob when nothing else names it
+    // (the retention cascade left them behind). Idempotent.
+    Migration {
+        version: 232,
+        sql: include_str!("../../migrations/232_attachment_blobs_follow_rows.sql"),
+        already_applied: None,
+    },
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

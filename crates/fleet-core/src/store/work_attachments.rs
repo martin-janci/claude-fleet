@@ -403,6 +403,34 @@ mod tests {
         }
     }
 
+    /// A work item deleted outright (the retention sweep) takes its
+    /// attachments' bytes with it, unless another live attachment names
+    /// the same content (migration 232).
+    #[test]
+    fn a_deleted_items_attachment_bytes_go_with_it() {
+        let s = Store::open_in_memory().unwrap();
+        let gone = item(&s);
+        let kept = item(&s);
+        s.add_attachment(&new(gone, "a.png", "image/png"), PNG, MAX)
+            .unwrap();
+        s.add_attachment(&new(gone, "b.txt", "text/plain"), b"only here", MAX)
+            .unwrap();
+        let shared = s
+            .add_attachment(&new(kept, "a.png", "image/png"), PNG, MAX)
+            .unwrap();
+        s.conn
+            .execute("DELETE FROM work_items WHERE id = ?1", [gone])
+            .unwrap();
+        let blobs: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM work_attachment_blobs", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(blobs, 1, "only the shared content is left");
+        assert_eq!(s.attachment_bytes(shared.id).unwrap().unwrap(), PNG);
+    }
+
     #[test]
     fn an_attachment_is_kept_with_its_digest_and_served_newest_first() {
         let s = Store::open_in_memory().unwrap();
