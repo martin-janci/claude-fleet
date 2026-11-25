@@ -75,6 +75,9 @@ export interface OutboxMessage {
   /** False once a retry cannot work as-is: the upload spent the picked
    *  paths, or the prompt is too long. Edit is the way out. */
   retryable: boolean;
+  /** Failed before anything was uploaded (too long): the picked paths are
+   *  not spent, so Edit hands the tiles back as they were (review r5-07-3). */
+  unsent?: boolean;
   /** ISO time the user pressed Enter. */
   at: string;
   /** ms timestamp the current send attempt started. */
@@ -319,7 +322,7 @@ export function createOutbox(deps: OutboxDeps) {
     // Before the upload, which spends the picked paths (w16-1): the text
     // alone is already over the limit.
     if (paths === null && tooLong(outboxBody(m))) {
-      patch(sid, id, { state: 'failed', error: TOO_LONG, retryable: false });
+      patch(sid, id, { state: 'failed', error: TOO_LONG, retryable: false, unsent: true });
       return;
     }
     if (paths === null && m.attachments.length > 0) {
@@ -453,7 +456,7 @@ export function createOutbox(deps: OutboxDeps) {
     if (!m || m.state !== 'failed') return null;
     remove(sid, id);
     pump(sid);
-    const spent = m.paths !== null || !m.retryable;
+    const spent = m.paths !== null || (!m.retryable && !m.unsent);
     const ids = new Set(spent ? m.attachments.map((a) => a.id) : []);
     return { text: m.text, attachments: markNeedsReattach(m.attachments, ids) };
   }

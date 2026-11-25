@@ -72,14 +72,16 @@
       // In the capture phase `defaultPrevented` is always false, so it says
       // nothing. Escape ends the tour only when nothing else can want the
       // key (reviews w14-5, r4 w04-3): focus is in the tour's own popover or
-      // on nothing at all, no dialog or menu is open, and the window shows
+      // on nothing at all, no dialog, menu or popup a button opened is open
+      // (WebKit does not focus a clicked button, so the Esc that closes the
+      // Filters panel arrives on `body`, review r5-07-4), and the window shows
       // the session view. An Esc on a focused button (the Filters panel it
       // opened), in a field, in the terminal (it goes to the pty) or in
       // Control (it leaves Control) is not the tour's; Skip is always there.
       const t = e.target instanceof HTMLElement ? e.target : null;
       const unfocused = t === null || t === document.body || t === document.documentElement;
       if (!unfocused && !pop?.contains(t)) return;
-      if (document.querySelector('dialog[open], [role="menu"]') || isEditable(t)) return;
+      if (document.querySelector('dialog[open], [role="menu"], [aria-haspopup][aria-expanded="true"]') || isEditable(t)) return;
       if ($destination !== 'session') return;
       endTour();
       return;

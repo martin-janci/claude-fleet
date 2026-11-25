@@ -17,6 +17,7 @@
   import Modal from './Modal.svelte';
   import PickerList from './PickerList.svelte';
   import HostChips from './HostChips.svelte';
+  import { leftOfUsed } from './account_usage';
   import { refreshAccountUsage } from './account_usage_store';
   import { accountByUuid, accountLabel, accounts, accountsForbiddenFor } from './accounts';
   import { orgs, projectOrgId } from './orgs';
@@ -44,6 +45,7 @@
     hubGated,
   } from './fleet_settings';
   import { hubStatus, ownsTheFleet, hubActionBlocked } from './hub';
+  import { hubNowSecs } from './now_tick';
   import { hubConnection } from './hub_connection';
   import { startWork, ticketBriefPreview, ticketRef, type TicketRow } from './trackers';
   import { startWorkMulti, siblingCandidates, multiStartNote, multiStartToast, shownSiblings } from './multi_start';
@@ -103,7 +105,7 @@
     ticket,
     autostart = false,
     proposal = null,
-    clock = () => Math.floor(Date.now() / 1000),
+    clock = hubNowSecs,
     locale,
     timeZone,
   }: {
@@ -2267,7 +2269,7 @@
             /login.</span
           >
         {:else}
-          {@const leftNow = Math.max(0, 100 - Math.round(limitAsk.chosen.used_pct ?? 0))}
+          {@const leftNow = leftOfUsed(limitAsk.chosen.used_pct ?? 0)}
           <span>{accountName(limitAsk.chosen.account_uuid)} has {leftNow}% left (this asks under {100 - limitAsk.pause_at_pct}% left).</span>
         {/if}
         {#if limitAsk.suggestion}

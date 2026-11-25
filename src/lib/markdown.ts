@@ -111,6 +111,17 @@ function tableAt(lines: string[], i: number): boolean {
   return lines[i].includes('|') && i + 1 < lines.length && TABLE_SEP.test(lines[i + 1].trim()) && lines[i + 1].includes('-');
 }
 
+/** A table interrupts the paragraph above it at `i`. Stricter than a table
+ *  at a block start (review r5-07-2): `TABLE_SEP` takes a bare `---`, and a
+ *  text line with a `|` (a shell pipeline) right above a rule is not a
+ *  header. The separator must hold a `|`, or have as many cells as the
+ *  header (the GFM rule). */
+function tableInterrupts(lines: string[], i: number): boolean {
+  if (!tableAt(lines, i)) return false;
+  const sep = lines[i + 1];
+  return sep.includes('|') || splitRow(lines[i]).length === splitRow(sep).length;
+}
+
 /** A bare URL without the sentence punctuation after it. A closing `)` is
  *  kept while it has its `(` inside the URL (a Wikipedia link). */
 function trimBareUrl(url: string): string {
@@ -193,7 +204,7 @@ function parseBlocks(lines: string[], depth: number): Block[] {
     const para: string[] = [line.trim()];
     i++;
     // A table may follow a text line with no blank line between (w10-9).
-    while (i < lines.length && !isBlank(lines[i]) && !interruptsParagraph(lines[i]) && !tableAt(lines, i)) {
+    while (i < lines.length && !isBlank(lines[i]) && !interruptsParagraph(lines[i]) && !tableInterrupts(lines, i)) {
       para.push(lines[i].trim());
       i++;
     }

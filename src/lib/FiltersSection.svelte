@@ -84,6 +84,7 @@
       class="btn btn--quiet is-bounded filters-btn"
       class:has-active={count > 0}
       data-testid={filtersTestid}
+      aria-haspopup="dialog"
       aria-expanded={open}
       aria-controls={panelId}
       aria-label={count > 0 ? `Filters, ${count} active` : 'Filters'}

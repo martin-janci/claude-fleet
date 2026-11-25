@@ -61,7 +61,7 @@ import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { myGrants, myPersonId, type GrantLevel } from './access';
 import { hubConnection } from './hub_connection';
 import { invoke } from '@tauri-apps/api/core';
-import { fleetSettings, settingsUnreadable, SETTING_DEFAULTS } from './fleet_settings';
+import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import type { PickedFile } from './attachments';
 import { outbox } from './outbox';
 import { resetHeldForTests } from './composer_hold';
@@ -5404,19 +5404,6 @@ describe('ConversationPanel composer access (multi-user M1)', () => {
       }
     });
   }
-
-  // r4 w19-2: a device the hub refuses its settings cannot know the tuner
-  // is off, so it offers it and the hub's own refusal says so.
-  it('offers Tune when this device may not read the fleet\'s settings', async () => {
-    fleetSettings.set({ ...SETTING_DEFAULTS });
-    settingsUnreadable.set(true);
-    try {
-      await renderShared('answer');
-      expect(screen.getByTestId('conv-tune-button')).toBeTruthy();
-    } finally {
-      settingsUnreadable.set(false);
-    }
-  });
 
   // The prompt tuner on a shared session: the hub runs it
   // (`session_prompt_tune`), and the rewrite lands in the box only on

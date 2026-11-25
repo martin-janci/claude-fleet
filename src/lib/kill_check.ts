@@ -87,8 +87,19 @@ export function cleanUpBlocked(row: SessionRow): string | null {
   return (
     hubActionBlocked('safe_kill_session', get(hubStatus), get(hubConnection)) ??
     sessionActionBlocked(row, 'safe_kill_session') ??
-    pinnedBlock(row)
+    pinnedBlock(row) ??
+    // Nobody to ask and no direct remove (a paired desktop): the request
+    // would only be refused (`safe_kill_session` answers E_INVALID_STATE for
+    // a shell, review r5-03-4), so the button is not offered.
+    (!hasAgentToAsk(row) && !directRemoveAllowed(row) ? NO_AGENT : null)
   );
+}
+
+const NO_AGENT = 'This session has no agent to commit and push for it. Use Kill.';
+
+/** This window may remove a clean session itself (`discard_kill_session`). */
+function directRemoveAllowed(row: SessionRow): boolean {
+  return (hubBlock('discard_kill_session', get(hubStatus)) ?? sessionActionBlocked(row, 'discard_kill_session')) === null;
 }
 
 /**
@@ -106,13 +117,14 @@ export async function cleanUp(row: SessionRow, check: WorkCheck): Promise<Result
   // row) is removed directly as well: fleet removes no worktree for it, and
   // the request would be typed into bash or fail `E_NOT_ALIVE` (w04-1).
   const nothingToAsk = check.state === 'unknown' && check.noWorktree === true && !hasAgentToAsk(row);
-  const direct =
-    (check.state === 'clean' || nothingToAsk) &&
-    (hubBlock('discard_kill_session', get(hubStatus)) ?? sessionActionBlocked(row, 'discard_kill_session')) === null;
+  const direct = (check.state === 'clean' || nothingToAsk) && directRemoveAllowed(row);
   if (direct) {
     const r = await discardKillSession(row.host_alias, row.tmux_name, false);
     return r.ok ? { ok: true, value: 'removed' } : r;
   }
+  // Work to commit (or a worktree fleet could not read) and nobody to ask:
+  // said here, in the app's words, rather than by a refused call (r5-03-4).
+  if (!hasAgentToAsk(row)) return { ok: false, error: { code: 'E_INVALID_STATE', message: NO_AGENT } };
   const r = await safeKillSession(row.host_alias, row.tmux_name);
   return r.ok ? { ok: true, value: 'asked' } : r;
 }
