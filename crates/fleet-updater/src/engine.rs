@@ -959,10 +959,36 @@ impl<R: Runtime> Updater<R> {
                     cand.version
                 );
                 if self.state.phase == Installing {
-                    let running_cand = matches!(
-                        self.runtime.inspect().await,
-                        Ok(Some(s)) if s.image_id.is_some() && s.image_id == cand.image_id
-                    );
+                    let seen = self.runtime.inspect().await;
+                    let running = |id: Option<&str>| matches!(&seen, Ok(Some(s)) if s.image_id.is_some() && s.image_id.as_deref() == id);
+                    let running_cand = running(cand.image_id.as_deref());
+                    // Interrupted before the swap (the report, the stop):
+                    // the build that ran before still runs, untouched, and
+                    // the candidate never ran. Rolling back would stop that
+                    // healthy hub, put the pre-update backup over every
+                    // write since, and bad-list a release that was never
+                    // tried; the attempt is abandoned instead, as an
+                    // interruption before `Installing` is.
+                    let previous_runs = self
+                        .state
+                        .previous
+                        .as_ref()
+                        .is_some_and(|p| running(Some(p.image_id.as_str())));
+                    if !running_cand && previous_runs {
+                        log!(
+                            "the install of {} was interrupted before the swap; the hub was not touched",
+                            cand.version
+                        );
+                        self.report(
+                            Failed,
+                            &cand,
+                            Value::Null,
+                            Some("the updater was interrupted before the install".into()),
+                        )
+                        .await;
+                        self.set_phase(Idle);
+                        return Some(Outcome::Failed("interrupted".into()));
+                    }
                     if !running_cand {
                         return Some(
                             self.fail_and_roll_back(

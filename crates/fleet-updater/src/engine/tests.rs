@@ -787,6 +787,48 @@ async fn an_interrupted_validation_is_finished_after_a_restart() {
     assert_eq!(u.state.phase, UpdatePhase::Idle);
 }
 
+/// Interrupted in `Installing` before the swap (the report, the stop): the
+/// build that ran before still runs. The attempt is abandoned, not rolled
+/// back: the hub is not stopped, nothing is restored, nothing bad-listed.
+#[tokio::test(start_paused = true)]
+async fn an_install_interrupted_before_the_swap_touches_nothing() {
+    let r = rig(Behaviour::Good, 141);
+    let state_dir = r.u.cfg.state_dir.clone();
+    let mut s = r.u.state.clone();
+    s.phase = UpdatePhase::Installing;
+    s.previous = Some(crate::state::Previous {
+        version: Version::new(0, 5, 3),
+        image_id: "sha256:old".into(),
+        spec: serde_json::Value::Null,
+        schema: Some(140),
+        backup: None,
+    });
+    s.candidate = Some(Build {
+        version: Version::new(0, 5, 4),
+        image: Some("ghcr.io/o/fleet-hub".into()),
+        digest: Some(format!("sha256:{}", "a".repeat(64))),
+        image_id: Some("sha256:new".into()),
+        commit: None,
+        build_id: None,
+        schema_to: Some(141),
+    });
+    s.save(&state_dir).unwrap();
+    let mut u = Updater::new(
+        ContainerRuntime::new(FakeDocker(r.world.clone()), NAME),
+        Box::new(FakeChannel(r.hub.clone())),
+        r.u.cfg.clone(),
+        State::load(&state_dir).unwrap(),
+    );
+    let (o, _) = u.tick().await;
+    assert_eq!(o, Outcome::Failed("interrupted".into()));
+    assert_eq!(u.state.phase, UpdatePhase::Idle);
+    assert_eq!(r.running_image(), "sha256:old", "the hub was left running");
+    assert!(
+        u.state.bad.entries.is_empty(),
+        "nothing was tried, so nothing is bad"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn an_unreachable_hub_changes_nothing() {
     let mut r = rig(Behaviour::Good, 141);
