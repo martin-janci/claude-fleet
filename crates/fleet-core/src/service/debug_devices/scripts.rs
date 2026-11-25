@@ -447,7 +447,71 @@ pub fn check_run_args(target: &Target, args: &[String]) -> Result<(), IpcError> 
             allowed.join(", ")
         ));
     }
+    if matches!(target, Target::Adb { .. }) {
+        check_adb_host_side(verb, &args[1..]).map_err(|m| IpcError::new(codes::E_INVALID, m))?;
+    }
     Ok(())
+}
+
+/// Emulator console commands `adb emu` may send: the device's own state.
+/// Not `screenrecord`, `avd` or anything else that names a path or a file
+/// on the machine the emulator runs on.
+pub const EMU_COMMANDS: &[&str] = &[
+    "kill", "geo", "sms", "gsm", "power", "network", "rotate", "sensor", "finger", "event",
+];
+
+/// The three adb verbs whose arguments reach the HOST the device is on,
+/// not the device: `forward`'s first spec is a listener on the host,
+/// `reverse`'s second is what the host connects to, and `emu` speaks to the
+/// emulator process. A caller drives the device and not that machine
+/// (docs/debug-devices.md), so a host-side spec is a TCP port and nothing
+/// else (never a unix socket path the adb server would create or connect
+/// to), and `emu` takes the commands in [`EMU_COMMANDS`].
+fn check_adb_host_side(verb: &str, rest: &[String]) -> Result<(), String> {
+    fn tcp_port(spec: &str) -> bool {
+        spec.strip_prefix("tcp:")
+            .and_then(|p| p.parse::<u16>().ok())
+            .is_some_and(|p| p > 0)
+    }
+    let host_spec = |spec: &str| {
+        if tcp_port(spec) {
+            Ok(())
+        } else {
+            Err(format!(
+                "adb {verb}: the host side must be tcp:<port>, not {spec:?}"
+            ))
+        }
+    };
+    match verb {
+        "forward" | "reverse" => {
+            let args: Vec<&str> = rest.iter().map(String::as_str).collect();
+            match args.as_slice() {
+                ["--list"] | ["--remove-all"] => Ok(()),
+                ["--remove", spec] => {
+                    if verb == "forward" {
+                        host_spec(spec)
+                    } else {
+                        Ok(())
+                    }
+                }
+                [first, second] | ["--no-rebind", first, second] => {
+                    if verb == "forward" {
+                        host_spec(first)
+                    } else {
+                        host_spec(second)
+                    }
+                }
+                _ => Err(format!(
+                    "adb {verb} takes LOCAL REMOTE (or --list, --remove, --remove-all)"
+                )),
+            }
+        }
+        "emu" => match rest.first() {
+            Some(c) if EMU_COMMANDS.contains(&c.as_str()) => Ok(()),
+            _ => Err(format!("adb emu takes one of: {}", EMU_COMMANDS.join(", "))),
+        },
+        _ => Ok(()),
+    }
 }
 
 fn quoted(args: &[String]) -> String {
@@ -800,6 +864,9 @@ set +e
 s={s}
 tar -xzf "$s/app.tgz" -C "$s" 2>/dev/null || {{ printf '{FAILED} untar\n' >&2; exit 5; }}
 rm -f "$s/app.tgz"
+# The app must be a file in the staging folder itself, not a link (a link
+# member would hand adb a file anywhere on this host).
+if [ -L "$s/"{n} ] || [ ! -e "$s/"{n} ]; then printf '{FAILED} unpacked app is not a plain file or folder\n' >&2; exit 5; fi
 printf '\n{OUT_MARKER}\n%s\n' "$s/"{n}
 "#,
         s = quote(stage),
@@ -936,6 +1003,24 @@ mod tests {
         assert!(ok(&sim, &["spawn", "/bin/sh"]).is_err());
         let long = "x".repeat(MAX_ARG_BYTES + 1);
         assert!(ok(&adb, &["shell", &long]).is_err());
+        // The host-side half of forward/reverse is a TCP port, never a
+        // socket path on the machine the device hangs off; emu takes the
+        // device's own console commands.
+        assert!(ok(&adb, &["forward", "tcp:8080", "tcp:80"]).is_ok());
+        assert!(ok(&adb, &["forward", "tcp:8080", "localabstract:chrome"]).is_ok());
+        assert!(ok(&adb, &["forward", "localfilesystem:/tmp/x", "tcp:80"]).is_err());
+        assert!(ok(&adb, &["forward", "--remove", "tcp:8080"]).is_ok());
+        assert!(ok(&adb, &["forward", "--list"]).is_ok());
+        assert!(ok(&adb, &["reverse", "tcp:80", "tcp:3000"]).is_ok());
+        assert!(ok(
+            &adb,
+            &["reverse", "tcp:80", "localfilesystem:/run/docker.sock"]
+        )
+        .is_err());
+        assert!(ok(&adb, &["reverse", "--no-rebind", "tcp:80", "tcp:0"]).is_err());
+        assert!(ok(&adb, &["emu", "geo", "fix", "1", "2"]).is_ok());
+        assert!(ok(&adb, &["emu", "screenrecord", "start", "/etc/x"]).is_err());
+        assert!(ok(&adb, &["emu"]).is_err());
     }
 
     #[test]

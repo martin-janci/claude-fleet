@@ -1126,6 +1126,20 @@ pub async fn install(
                     )
                 })?;
             let name = lines.next().unwrap_or("").to_string();
+            // The source host prints it; the destination host reads the app
+            // at `<stage>/<name>`, so it must be one plain name in the
+            // staging folder, never a path out of it.
+            if name.is_empty()
+                || name == "."
+                || name == ".."
+                || name.contains(['/', '\\', '\0'])
+                || name.chars().any(char::is_control)
+            {
+                return Err(IpcError::new(
+                    codes::E_PARSE,
+                    format!("{}: pack printed no usable file name", from.host),
+                ));
+            }
             if size > MAX_INSTALL_BYTES {
                 return Err(IpcError::new(
                     codes::E_LIMIT,

@@ -175,7 +175,10 @@ call can drive the device but not the machine it is attached to:
   `get-serialno`, `get-devpath`, `emu`, `root`, `unroot`, `wait-for-device`.
   `push`, `pull` and `install` read or write paths on the host and are not
   allowed; `install` has its own action. `logcat` streams forever; `logs`
-  takes a dump.
+  takes a dump. The host side of `forward` (its first spec) and of
+  `reverse` (its second) must be `tcp:<port>`, never a socket path on the
+  host, and `emu` takes `kill`, `geo`, `sms`, `gsm`, `power`, `network`,
+  `rotate`, `sensor`, `finger` or `event`.
 - `simctl`: `launch`, `terminate`, `openurl`, `uninstall`, `listapps`,
   `appinfo`, `get_app_container`, `privacy`, `ui`, `status_bar`,
   `location`, `erase`. Not `spawn`, which runs any process on the Mac.
