@@ -1,8 +1,28 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { get } from 'svelte/store';
 import type { SessionRow } from './sessions';
+
+const plugin = vi.hoisted(() => ({
+  clicks: [] as Array<(a: { actionId: string; notification: { id: number } | null }) => void>,
+  removed: [] as Array<Array<{ id: number }>>,
+}));
+vi.mock('@tauri-apps/plugin-notification', () => ({
+  onAction: vi.fn(async (cb: (a: { actionId: string; notification: { id: number } | null }) => void) => {
+    plugin.clicks.push(cb);
+    return { unregister: vi.fn() };
+  }),
+  removeActive: vi.fn(async (n: Array<{ id: number }>) => {
+    plugin.removed.push(n);
+  }),
+}));
+
 import {
   attentionIdleMinutes,
+  closeOsNotification,
+  heldByQuietHours,
+  notificationsThroughPlugin,
+  QuietHold,
+  quietSummary,
   inQuietHours,
   newlyNotifiable,
   notifySnapshot,
@@ -77,6 +97,41 @@ describe('Notification API guards', () => {
   });
 });
 
+describe('through tauri-plugin-notification (review w11-11)', () => {
+  afterEach(() => {
+    delete (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  });
+
+  it('posts with a numeric id, opens on a click by that id, and takes it down by id', () => {
+    const { shown } = installFakeNotification('granted');
+    expect(notificationsThroughPlugin()).toBe(false);
+    (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    expect(notificationsThroughPlugin()).toBe(true);
+    const opened = vi.fn();
+    expect(showOsNotification('dev-x needs you', 'trn', 'needs_you-7', opened)).toBe(true);
+    expect(shown).toHaveLength(1);
+    const id = (shown[0] as { id?: number }).id;
+    expect(typeof id).toBe('number');
+    expect(shown[0]).toEqual({ title: 'dev-x needs you', body: 'trn', id });
+    expect(plugin.clicks).toHaveLength(1);
+    plugin.clicks[0]({ actionId: 'tap', notification: { id: id! } });
+    expect(opened).toHaveBeenCalledTimes(1);
+    // The click took it down; a second one finds nothing to run.
+    expect(plugin.removed).toContainEqual([{ id }]);
+    plugin.clicks[0]({ actionId: 'tap', notification: { id: id! } });
+    expect(opened).toHaveBeenCalledTimes(1);
+  });
+
+  it('withdraws a notification its row no longer earns', () => {
+    const { shown } = installFakeNotification('granted');
+    (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    showOsNotification('dev-y failed', 'trn', 'failed-8');
+    const id = (shown[0] as { id?: number }).id;
+    closeOsNotification('failed-8');
+    expect(plugin.removed).toContainEqual([{ id }]);
+  });
+});
+
 describe('notifications matrix and quiet hours (11.9)', () => {
   const base = {
     'notify.desktop': 'needs_you,failed,blocked',
@@ -105,6 +160,42 @@ describe('notifications matrix and quiet hours (11.9)', () => {
     expect(notificationAllowed('desktop', 'blocked', base, at(23))).toBe(false);
     expect(notificationAllowed('desktop', 'failed', base, at(23))).toBe(true);
     expect(notificationAllowed('desktop', 'blocked', { ...base, 'notify.quiet_hours': '' }, at(23))).toBe(true);
+  });
+});
+
+describe('what quiet hours hold back (review w11-12)', () => {
+  const base = {
+    'notify.desktop': 'needs_you,failed',
+    'notify.quiet_hours': '22:00-07:30',
+    'notify.quiet_except': 'failed',
+  };
+  const at = (h: number, m = 0) => new Date(2026, 9, 8, h, m);
+
+  it('holds only what the column lists and quiet hours alone keep back', () => {
+    expect(heldByQuietHours('desktop', 'needs_you', base, at(23))).toBe(true);
+    expect(heldByQuietHours('desktop', 'needs_you', base, at(12))).toBe(false);
+    expect(heldByQuietHours('desktop', 'failed', base, at(23))).toBe(false);
+    expect(heldByQuietHours('desktop', 'done', base, at(23))).toBe(false);
+  });
+
+  it('releases once after quiet hours, counting only what still waits', () => {
+    const hold = new QuietHold();
+    let bWaits = 1;
+    hold.hold('needs_you-1', 'dev-a', () => 1);
+    hold.hold('needs_you-2', 'dev-b', () => bWaits);
+    hold.hold('blocked-host-trn', 'trn is down · 3 sessions', () => 3);
+    expect(hold.release(base, at(3))).toBeNull();
+    expect(hold.size).toBe(3);
+    bWaits = 0;
+    expect(hold.release(base, at(7, 30))).toEqual({ count: 4, names: ['dev-a', 'trn is down · 3 sessions'] });
+    expect(hold.size).toBe(0);
+    expect(hold.release(base, at(8))).toBeNull();
+  });
+
+  it('words the summary', () => {
+    expect(quietSummary(1, ['dev-a'])).toEqual({ title: '1 session needs you', body: 'Held during quiet hours: dev-a' });
+    expect(quietSummary(5, ['a', 'b', 'c', 'd']).body).toBe('Held during quiet hours: a, b, c and 1 more');
+    expect(quietSummary(3, ['a', 'b', 'c']).title).toBe('3 sessions need you');
   });
 });
 

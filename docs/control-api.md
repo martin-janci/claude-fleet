@@ -359,7 +359,9 @@ Index by area (names only; see the reference for details):
   daily or monthly budget, for a caller that sees every session; `devices`,
   the paired device count with the caller's last seen and the hub's last
   sync; `playbooks_week`, playbook runs this week per kind; `decide.week`,
-  this week's decision counts),
+  this week's decision counts; `writing_help`, the keys of the Writing help
+  toggles that are on, for every caller, so a device that may not read the
+  settings offers Tune, Help and Draft as the hub would serve them),
   `usage_report` (estimated token
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `merge_host` (fold a renamed alias into another),

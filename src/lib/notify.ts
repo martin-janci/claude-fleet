@@ -1,13 +1,19 @@
 // Operator notifications for stuck transitions (PROD-3).
 //
-// No Tauri notification plugin is in the manifest, so OS-level alerts go
-// through the Web Notification API, which WKWebView / WebKitGTK expose behind
-// the usual permission prompt. The prompt can only be triggered from a user
-// gesture, so Settings owns the "enable" button; this module only reads the
-// prefs and fires. Every call is guarded — a webview without `Notification`
-// simply gets the in-app toast + aria-live announcement.
+// In the app, OS-level alerts go through `tauri-plugin-notification` (review
+// w11-11): WKWebView on macOS has no web `Notification`, so the plugin's init
+// script installs one that posts through the OS, and this module keeps using
+// that one constructor. What the shim cannot do, the plugin's JS API does: a
+// click reaches `onAction` by the notification's numeric id, and
+// `removeActive` takes it down (on Linux; macOS and Windows keep it). Outside
+// Tauri (a browser, the tests) it is the webview's own API, behind the usual
+// permission prompt. The prompt can only be triggered from a user gesture, so
+// Settings owns the "enable" button; this module only reads the prefs and
+// fires. Every call is guarded — a webview without `Notification` simply gets
+// the in-app toast + aria-live announcement.
 import { writable } from 'svelte/store';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { onAction, removeActive } from '@tauri-apps/plugin-notification';
 import { readPref, writePref } from './prefs';
 import { attentionState, classify, type AttentionOptions, type AttentionState } from './attention';
 import type { SessionRow } from './sessions';
@@ -41,6 +47,14 @@ type NotificationCtor = {
 function notificationApi(): NotificationCtor | null {
   const g = globalThis as { Notification?: NotificationCtor };
   return typeof g.Notification === 'function' ? g.Notification : null;
+}
+
+/** Whether this page runs in the app, where `tauri-plugin-notification` has
+ *  replaced `Notification` (review w11-11). The plugin answers "granted" on
+ *  every desktop without asking the OS, so Settings says the OS may still
+ *  hide them. */
+export function notificationsThroughPlugin(): boolean {
+  return '__TAURI_INTERNALS__' in globalThis && notificationApi() !== null;
 }
 
 export function notificationPermission(): NotificationPermissionState {
@@ -88,10 +102,45 @@ type ShownNotification = {
  *  `closeOsNotification` takes down once its row no longer waits. */
 const shown = new Map<string, ShownNotification>();
 
+/** Through the plugin: each tag's numeric id (the plugin's notifications
+ *  have no tag), and each id's click. */
+const pluginIds = new Map<string, number>();
+const pluginClicks = new Map<number, () => void>();
+let nextPluginId = 1;
+let listening = false;
+
+/** The plugin reports a click as an action (`tap`) on the notification's id,
+ *  once something listens. Registered at the first notification. */
+function listenForPluginClicks(): void {
+  if (listening) return;
+  listening = true;
+  try {
+    void onAction((a) => {
+      const id = a?.notification?.id;
+      const run = id === undefined ? undefined : pluginClicks.get(id);
+      run?.();
+    }).catch(() => {
+      listening = false;
+    });
+  } catch {
+    listening = false;
+  }
+}
+
 /** Take down the notification posted under `tag`, if it is still up: the
  *  session was answered elsewhere, so a later click would open a row that
  *  is working. */
 export function closeOsNotification(tag: string): void {
+  const id = pluginIds.get(tag);
+  if (id !== undefined) {
+    pluginIds.delete(tag);
+    pluginClicks.delete(id);
+    try {
+      void removeActive([{ id }]).catch(() => {});
+    } catch {
+      /* outside Tauri */
+    }
+  }
   const n = shown.get(tag);
   if (!n) return;
   shown.delete(tag);
@@ -108,6 +157,7 @@ export function closeOsNotification(tag: string): void {
 export function showOsNotification(title: string, body: string, tag?: string, onclick?: () => void): boolean {
   const api = notificationApi();
   if (!api || api.permission !== 'granted') return false;
+  if (notificationsThroughPlugin()) return showThroughPlugin(api, title, body, tag, onclick);
   try {
     const n = new api(title, { body, tag }) as ShownNotification | undefined;
     if (n && typeof n === 'object') {
@@ -128,6 +178,28 @@ export function showOsNotification(title: string, body: string, tag?: string, on
   } catch {
     return false;
   }
+}
+
+/** `showOsNotification` through the plugin's `Notification`: a numeric id per
+ *  notification, so a click and a removal can name it. A tag posted again
+ *  replaces the one before it, as the web API's tag does. */
+function showThroughPlugin(api: NotificationCtor, title: string, body: string, tag?: string, onclick?: () => void): boolean {
+  if (tag) closeOsNotification(tag);
+  const id = nextPluginId++;
+  try {
+    new (api as unknown as new (t: string, o: { body: string; id: number }) => unknown)(title, { body, id });
+  } catch {
+    return false;
+  }
+  if (tag) pluginIds.set(tag, id);
+  pluginClicks.set(id, () => {
+    focusAppWindow();
+    if (tag) closeOsNotification(tag);
+    else pluginClicks.delete(id);
+    onclick?.();
+  });
+  listenForPluginClicks();
+  return true;
 }
 
 // ── The hub's notifications matrix (Orbit Fleet 11.9) ──
@@ -173,6 +245,59 @@ export function notificationAllowed(
   if (!list(settings[`notify.${channel}`]).has(state)) return false;
   const quiet = inQuietHours(parseQuietHours(settings['notify.quiet_hours']), at.getHours() * 60 + at.getMinutes());
   return !quiet || list(settings['notify.quiet_except']).has(state);
+}
+
+/** Whether quiet hours alone keep `state` off `channel` now: the column
+ *  lists it and it is not an exception (review w11-12). */
+export function heldByQuietHours(
+  channel: NotifyChannel,
+  state: NotifyState,
+  settings: Record<string, string>,
+  at: Date = new Date(),
+): boolean {
+  return list(settings[`notify.${channel}`]).has(state) && !notificationAllowed(channel, state, settings, at);
+}
+
+/**
+ * What quiet hours held back from the Desktop column (review w11-12), by the
+ * notification's tag: a name for the summary, and how many sessions it still
+ * stands for (0 once answered, so a resolved one is not replayed). At the
+ * first look outside quiet hours, `release` sums up what still waits, once.
+ */
+export class QuietHold {
+  private held = new Map<string, { name: string; waiting: () => number }>();
+
+  hold(tag: string, name: string, waiting: () => number): void {
+    this.held.set(tag, { name, waiting });
+  }
+
+  get size(): number {
+    return this.held.size;
+  }
+
+  /** Outside quiet hours: what still waits, and forget the rest; `null`
+   *  while quiet hours last or nothing was held. */
+  release(settings: Record<string, string>, at: Date = new Date()): { count: number; names: string[] } | null {
+    if (this.held.size === 0) return null;
+    if (inQuietHours(parseQuietHours(settings['notify.quiet_hours']), at.getHours() * 60 + at.getMinutes())) return null;
+    let count = 0;
+    const names: string[] = [];
+    for (const h of this.held.values()) {
+      const n = h.waiting();
+      if (n <= 0) continue;
+      count += n;
+      names.push(h.name);
+    }
+    this.held.clear();
+    return { count, names };
+  }
+}
+
+/** The one notification at the end of quiet hours: "3 sessions need you". */
+export function quietSummary(count: number, names: readonly string[]): { title: string; body: string } {
+  const title = count === 1 ? '1 session needs you' : `${count} sessions need you`;
+  const shown = names.length > 3 ? `${names.slice(0, 3).join(', ')} and ${names.length - 3} more` : names.join(', ');
+  return { title, body: shown ? `Held during quiet hours: ${shown}` : 'Held during quiet hours' };
 }
 
 /** The matrix's row for an attention state (`attention.ts`); null for the

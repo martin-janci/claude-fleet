@@ -690,6 +690,30 @@ pub const WORK_CONTEXT_HELP: &str = "work.context_help";
 /// (`service::prompt_tune`).
 pub const WORK_PROMPT_TUNE: &str = "work.prompt_tune";
 
+/// Every Writing help toggle, in the order Settings lists them.
+pub const WRITING_HELP_TOGGLES: &[&str] = &[
+    WORK_DRAFT_COMMIT_MESSAGES,
+    WORK_DRAFT_BRIEFS,
+    WORK_DRAFT_TASK_TITLES,
+    WORK_DRAFT_RELEASE_NOTES,
+    WORK_DRAFT_MORNING_BRIEF,
+    WORK_DASHBOARD_SUMMARY,
+    WORK_CATCH_UP_SUMMARIES,
+    WORK_CONTEXT_HELP,
+    WORK_PROMPT_TUNE,
+];
+
+/// The Writing help toggles that are on, by key (review w19-2): what
+/// `fleet_health.writing_help` tells every device, including one that may
+/// not read the fleet's settings.
+pub fn writing_help_on(s: &Store) -> Vec<String> {
+    WRITING_HELP_TOGGLES
+        .iter()
+        .filter(|k| get_bool(s, k))
+        .map(|k| (*k).to_string())
+        .collect()
+}
+
 /// Task attachments: the largest file a task takes, in MiB (at most
 /// [`crate::store::ATTACHMENT_MAX_MB_CEILING`], what the desktop↔hub
 /// transport carries).

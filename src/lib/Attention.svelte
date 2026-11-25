@@ -18,6 +18,11 @@
   // as the Desktop and Sound columns and quiet hours say. Only while the
   // window is in the background: on screen, the app already shows it.
   //
+  // What quiet hours keep off the Desktop column is held (review w11-12):
+  // at the first look after they end, one notification says how many
+  // sessions still wait ("3 sessions need you"). One answered meanwhile is
+  // not counted, and nothing is replayed one by one.
+  //
   // Multi-hub Phase 2: an extra fleet's sessions notify the same way, by
   // the same table, named with their fleet. A fleet's first non-empty list
   // (`FleetRows.loaded`) is its baseline, as the primary's bootstrap fill is.
@@ -46,6 +51,9 @@
     notifyStuckOs,
     notifyStuckToast,
     playChime,
+    QuietHold,
+    heldByQuietHours,
+    quietSummary,
     showOsNotification,
     type NotifyState,
   } from './notify';
@@ -67,6 +75,31 @@
   function openRow(id: number) {
     const row = get(sessions).find((r) => r.id === id);
     if (row) selectSessionExplicitly(row);
+  }
+
+  /** What quiet hours held back from the Desktop column (review w11-12). */
+  const quietHold = new QuietHold();
+
+  /** A held notification: its name in the summary, and how many sessions it
+   *  still stands for. */
+  type Held = { name: string; waiting: () => number };
+
+  /** Post `title` on the Desktop column, or hold it while quiet hours alone
+   *  keep it back. */
+  function desktop(state: NotifyState, title: string, body: string, tag: string, onclick?: () => void, held?: Held) {
+    if (!get(notifyStuckOs)) return;
+    const settings = get(fleetSettings);
+    if (notificationAllowed('desktop', state, settings)) showOsNotification(title, body, tag, onclick);
+    else if (held && heldByQuietHours('desktop', state, settings)) quietHold.hold(tag, held.name, held.waiting);
+  }
+
+  /** At the first look after quiet hours: one summary of what still waits. */
+  function releaseQuiet() {
+    const out = quietHold.release(get(fleetSettings));
+    if (!out || out.count === 0) return;
+    if (typeof document !== 'undefined' && document.hasFocus()) return;
+    const { title, body } = quietSummary(out.count, out.names);
+    showOsNotification(title, body, 'quiet-summary', () => sidebarView.set('inbox'));
   }
 
   /** Latest announcement for the live region (screen readers read changes). */
@@ -91,11 +124,12 @@
     }
     // A stuck session is Blocked in the hub's notifications matrix (11.9):
     // the desktop column and quiet hours decide the OS notification.
-    if (get(notifyStuckOs) && notificationAllowed('desktop', 'blocked', get(fleetSettings))) {
-      for (let i = 0; i < rows.length; i++) {
-        const id = rows[i].id;
-        showOsNotification('Orbit Fleet: session stuck', messages[i], `stuck-${id}`, () => openRow(id));
-      }
+    for (let i = 0; i < rows.length; i++) {
+      const id = rows[i].id;
+      desktop('blocked', 'Orbit Fleet: session stuck', messages[i], `stuck-${id}`, () => openRow(id), {
+        name: friendly && rows[i].friendly_name ? rows[i].friendly_name! : rows[i].tmux_name,
+        waiting: () => (prev?.has(id) ? 1 : 0),
+      });
     }
     const away = typeof document !== 'undefined' && !document.hasFocus();
     if (away && notificationAllowed('sound', 'blocked', get(fleetSettings))) playChime();
@@ -118,11 +152,11 @@
     tag: string,
     mayChime: boolean,
     onclick?: () => void,
+    held?: Held,
   ): boolean {
     if (typeof document !== 'undefined' && document.hasFocus()) return false;
-    const settings = get(fleetSettings);
-    if (get(notifyStuckOs) && notificationAllowed('desktop', state, settings)) showOsNotification(title, body, tag, onclick);
-    return mayChime && notificationAllowed('sound', state, settings) && playChime();
+    desktop(state, title, body, tag, onclick, held);
+    return mayChime && notificationAllowed('sound', state, get(fleetSettings)) && playChime();
   }
 
   let prevStates: Map<number, AttentionState> | null = null;
@@ -130,6 +164,8 @@
   let prevOwn: Map<number, AttentionState> | null = null;
   /** The causes (a down host, a login at its limit) with a notification up. */
   let prevCauses = new Set<string>();
+  /** How many rows each of those causes holds, for a held summary. */
+  let causeCounts = new Map<string, number>();
   /** Whether usage had answered at the last look (review w11-2). */
   let hostsKnown = false;
   let usageKnown = false;
@@ -193,6 +229,7 @@
       const causesBefore = prevCauses;
       for (const key of causesBefore) if (!causesNow.has(key)) closeOsNotification(`blocked-${key}`);
       prevCauses = new Set(causesNow.keys());
+      causeCounts = new Map([...causesNow].map(([k, g]) => [k, g.rows.length]));
       if (before === null || !get(sessionsLoaded)) return;
       withdraw(before, prevStates, (state, id) => `${state}-${id}`);
       const friendly = get(showFriendlyNames);
@@ -201,8 +238,12 @@
       for (const { row, state } of single) {
         const name = friendly && row.friendly_name ? row.friendly_name : row.tmux_name;
         const id = row.id;
+        const waiting = () => (prevStates && notifyStateOf(prevStates.get(id) ?? 'idle') === state ? 1 : 0);
         chimed =
-          notifyMatrix(state, `${name} ${TITLES[state]}`, row.host_alias, `${state}-${id}`, !chimed, () => openRow(id)) || chimed;
+          notifyMatrix(state, `${name} ${TITLES[state]}`, row.host_alias, `${state}-${id}`, !chimed, () => openRow(id), {
+            name,
+            waiting,
+          }) || chimed;
       }
       for (const { cause, rows: held } of causes) {
         if (causesBefore.has(cause.key)) continue;
@@ -214,10 +255,12 @@
         if (cause.kind === 'host_down' ? hostsFirst : cause.kind === 'account_limit' ? usageFirst : hostsFirst || usageFirst) continue;
         const names = held.map((r) => (friendly && r.friendly_name ? r.friendly_name : r.tmux_name));
         const body = names.length > 3 ? `${names.slice(0, 3).join(', ')} and ${names.length - 3} more` : names.join(', ');
+        const title = causeTitle(cause, held.length, accountName);
         chimed =
-          notifyMatrix('blocked', causeTitle(cause, held.length, accountName), body, `blocked-${cause.key}`, !chimed, () =>
-            sidebarView.set('inbox'),
-          ) || chimed;
+          notifyMatrix('blocked', title, body, `blocked-${cause.key}`, !chimed, () => sidebarView.set('inbox'), {
+            name: title,
+            waiting: () => causeCounts.get(cause.key) ?? 0,
+          }) || chimed;
       }
     });
     const unsubRuns = failing.subscribe((list) => {
@@ -231,10 +274,12 @@
         if ((f.run.finished_at ?? f.run.started_at) < openedAt) continue;
         const title = `Routine ${f.routine.name} failed`;
         // A failed routine is listed in the Inbox, with its Fix and Retry.
+        const runId = f.run.id;
         chimed =
-          notifyMatrix('routine_failed', title, f.run.reason ?? '', `routine-${f.run.id}`, !chimed, () =>
-            sidebarView.set('inbox'),
-          ) || chimed;
+          notifyMatrix('routine_failed', title, f.run.reason ?? '', `routine-${runId}`, !chimed, () => sidebarView.set('inbox'), {
+            name: `Routine ${f.routine.name}`,
+            waiting: () => (get(failing).some((x) => x.run.id === runId) ? 1 : 0),
+          }) || chimed;
       }
     });
     const fleetPrev = new Map<string, Map<number, AttentionState>>();
@@ -276,10 +321,12 @@
         const { single, causes } = coalesceByCause(newlyNotifiable(before, list, opts, beforeOwn), list, opts);
         for (const { cause, rows: held } of causes) {
           if (up.has(cause.key)) continue;
+          const title = causeTitle(cause, held.length, accountName);
           chimed =
-            notifyMatrix('blocked', causeTitle(cause, held.length, accountName), label, `blocked-${fid}-${cause.key}`, !chimed, () =>
-              sidebarView.set('inbox'),
-            ) || chimed;
+            notifyMatrix('blocked', title, label, `blocked-${fid}-${cause.key}`, !chimed, () => sidebarView.set('inbox'), {
+              name: `${title} (${label})`,
+              waiting: () => (fleetCauses.get(fid)?.has(cause.key) ? held.length : 0),
+            }) || chimed;
         }
         for (const { row, state } of single) {
           const name = friendly && row.friendly_name ? row.friendly_name : row.tmux_name;
@@ -287,8 +334,10 @@
           // Review w17-6: a click opens the fleet's session, as the primary's does.
           chimed =
             notifyMatrix(state, `${name} ${TITLES[state]}`, `${label} · ${row.host_alias}`, `${state}-${fid}-${id}`, !chimed, () =>
-              openFleetSession(fid, id),
-            ) || chimed;
+              openFleetSession(fid, id), {
+              name,
+              waiting: () => (notifyStateOf(fleetPrev.get(fid)?.get(id) ?? 'idle') === state ? 1 : 0),
+            }) || chimed;
         }
         if (beforeStuck) {
           for (const row of newlyStuck(beforeStuck, list)) {
@@ -296,8 +345,10 @@
             const id = row.id;
             chimed =
               notifyMatrix('blocked', `${name} ${TITLES.blocked}`, `${label} · ${stuckMessage(row, friendly)}`, `stuck-${fid}-${id}`, !chimed, () =>
-                openFleetSession(fid, id),
-              ) || chimed;
+                openFleetSession(fid, id), {
+                name,
+                waiting: () => (fleetStuckPrev.get(fid)?.has(id) ? 1 : 0),
+              }) || chimed;
           }
         }
       }
@@ -311,7 +362,10 @@
         }
       }
     });
+    // Quiet hours end on the clock, not on a row event.
+    const quietTimer = setInterval(releaseQuiet, 30_000);
     return () => {
+      clearInterval(quietTimer);
       unsub();
       unsubStates();
       unsubRuns();

@@ -474,29 +474,47 @@ const TOGGLE_NEWER_THAN_FEATURE: ReadonlySet<string> = new Set([
   SETTING_KEYS.workDashboardSummary,
 ]);
 
+/** The Writing help toggles the hub says are on (`fleet_health.writing_help`,
+ *  review w19-2), which every device may read; `null` until a health read
+ *  carried it (an older hub never does). */
+export const hubWritingHelp = writable<ReadonlySet<string> | null>(null);
+
+/** Take a health read's `writing_help`; one without it (an older hub) leaves
+ *  the last answer. */
+export function setHubWritingHelp(on: readonly string[] | null | undefined): void {
+  if (Array.isArray(on)) hubWritingHelp.set(new Set(on));
+}
+
 /**
  * PURE: whether a Writing help feature the HUB switches is offered. The
  * value, default off, with one exception: the hub answered without the key
  * and the toggle is newer than the feature (a hub older than this build,
  * review r4 w03-6), where the hub serves the feature and has no such
- * setting. A device the hub REFUSED its settings keeps the compiled default
- * (off), as before: not every feature behind these toggles is refused by
- * the hub when it is off (the terminal's Context help runs on this device,
- * review r5-07-1), and on a default hub the buttons would only fail
- * (r5-07-6; w19-2 is open, a product call).
+ * setting. A device that could not read the settings (the hub refuses them
+ * to a colleague's or an org-bound device) goes by the hub's own list of the
+ * toggles that are on (`hubOn`, review w19-2), and keeps the compiled
+ * default (off) while it has none: on a default hub the buttons would only
+ * fail (r5-07-6), and the terminal's Context help runs on this device with
+ * no hub tool to refuse it (r5-07-1), so "not known" stays "off".
  */
-export function hubGatedOn(map: FleetSettings, keys: ReadonlySet<string> | null, key: SettingKey): boolean {
+export function hubGatedOn(
+  map: FleetSettings,
+  keys: ReadonlySet<string> | null,
+  key: SettingKey,
+  hubOn: ReadonlySet<string> | null = null,
+): boolean {
+  if (keys === null && hubOn !== null) return hubOn.has(key);
   if (keys !== null && !keys.has(key) && TOGGLE_NEWER_THAN_FEATURE.has(key)) return true;
   return settingBool(map, key);
 }
 
 /** `hubGatedOn` over the live stores: `$hubGated(SETTING_KEYS.workPromptTune)`.
- *  Only for a feature a hub tool enforces the toggle of. */
+ *  Only for a Writing help toggle. */
 export const hubGated = derived(
-  [fleetSettings, hubSettingKeys],
-  ([map, keys]) =>
+  [fleetSettings, hubSettingKeys, hubWritingHelp],
+  ([map, keys, hubOn]) =>
     (key: SettingKey) =>
-      hubGatedOn(map, keys, key),
+      hubGatedOn(map, keys, key, hubOn),
 );
 
 export function settingBool(map: FleetSettings, key: SettingKey): boolean {

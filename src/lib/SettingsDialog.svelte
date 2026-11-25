@@ -84,6 +84,7 @@
   import {
     attentionIdleMinutes,
     notificationPermission,
+    notificationsThroughPlugin,
     notifyStuckOs,
     notifyStuckToast,
     requestNotificationPermission,
@@ -469,6 +470,8 @@
 
   // --- Notifications (stuck transitions) ---
   let permission = $state<NotificationPermissionState>(notificationPermission());
+  /** Review w11-11: the plugin says "granted" without asking the OS. */
+  const throughPlugin = notificationsThroughPlugin();
   async function enableOsNotifications() {
     permission = await requestNotificationPermission();
     if (permission === 'granted') notifyStuckOs.set(true);
@@ -976,6 +979,11 @@
         <p class="hook-desc">This webview does not expose the Notification API; toasts and the live region still work.</p>
       {:else if permission === 'denied'}
         <p class="hook-desc">Notifications were denied at the OS level; allow them for Orbit Fleet (listed as claude-fleet) in your system settings.</p>
+      {:else if permission === 'granted' && throughPlugin}
+        <p class="hook-desc" data-testid="notify-os-hint">
+          Posted through the system's notification centre, which has the last word: if none appear, allow Orbit Fleet
+          (listed as claude-fleet) in your system settings.
+        </p>
       {/if}
       <div class="mcp-field">
         <span class="lbl">Idle</span>
