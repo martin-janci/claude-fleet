@@ -1341,6 +1341,7 @@ mod tests {
                 tmux_pane_id: None,
                 pending_input: None,
                 pane_working: false,
+                pane_idle: false,
                 pr_evidence: None,
             }],
             keep: &[name.to_string()],

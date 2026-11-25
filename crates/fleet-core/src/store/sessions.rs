@@ -2157,12 +2157,15 @@ impl Store {
         row_id: i64,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         let now = now_unix();
+        // The process is gone: so is its compaction (review r5-04-5).
         let changed = self.conn.execute(
-            "UPDATE sessions SET claude_status = 'stopped', last_turn_at = ?2, \
+            &format!(
+                "UPDATE sessions SET claude_status = 'stopped', last_turn_at = ?2, \
                  last_hook_at = ?2, idle_since = COALESCE(idle_since, ?2), \
                  stuck_kind = NULL, stuck_since = NULL, pending_input = NULL, \
-                 stale_working_at = NULL, stale_demoted_at = NULL, turn_outcome = NULL \
-                 WHERE id = ?1",
+                 stale_working_at = NULL, stale_demoted_at = NULL, turn_outcome = NULL\
+                 {END_COMPACTING} WHERE id = ?1"
+            ),
             rusqlite::params![row_id, now],
         )?;
         if changed == 0 {
