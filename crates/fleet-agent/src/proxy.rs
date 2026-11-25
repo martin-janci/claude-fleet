@@ -310,6 +310,30 @@ pub fn no_proxy_matches(list: &str, host: &str) -> bool {
     })
 }
 
+/// `url` with the `user[:pass]@` of its authority replaced by `***@`.
+fn without_userinfo(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some((a, b)) => (Some(a), b),
+        None => (None, url),
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let shown = match rest[..end].rfind('@') {
+        Some(at) => format!("***{}", &rest[at..]),
+        None => rest.to_string(),
+    };
+    match scheme {
+        Some(sc) => format!(
+            "{sc}://{shown}{}",
+            if rest[..end].contains('@') {
+                &rest[end..]
+            } else {
+                ""
+            }
+        ),
+        None => shown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,29 +514,5 @@ mod tests {
 
         let err = p.tunnel("denied.example", 443).await.unwrap_err();
         assert!(err.contains("HTTP 403"), "{err}");
-    }
-}
-
-/// `url` with the `user[:pass]@` of its authority replaced by `***@`.
-fn without_userinfo(url: &str) -> String {
-    let (scheme, rest) = match url.split_once("://") {
-        Some((a, b)) => (Some(a), b),
-        None => (None, url),
-    };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let shown = match rest[..end].rfind('@') {
-        Some(at) => format!("***{}", &rest[at..]),
-        None => rest.to_string(),
-    };
-    match scheme {
-        Some(sc) => format!(
-            "{sc}://{shown}{}",
-            if rest[..end].contains('@') {
-                &rest[end..]
-            } else {
-                ""
-            }
-        ),
-        None => shown,
     }
 }
