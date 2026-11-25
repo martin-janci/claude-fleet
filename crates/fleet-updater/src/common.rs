@@ -198,8 +198,8 @@ pub fn save_token(dir: &Path, name: &str, token: &str) -> Result<PathBuf, String
 /// it is the step most likely to fail (the volume already holds the
 /// database, its WAL and the backup), and a failure after the live files had
 /// been moved aside left no `state.db` at all, so the next start created a
-/// fresh, empty hub. A failed restore now leaves the database where it was
-/// and removes its own partial copy.
+/// fresh, empty hub. A restore that fails at any step leaves the database
+/// where it was and removes its own copy.
 pub fn restore_db(data: &Path, backup: &Path, failed_version: &str) -> Result<(), String> {
     let db = data.join("state.db");
     let owner = std::fs::metadata(&db).ok().map(|m| {
@@ -224,14 +224,31 @@ pub fn restore_db(data: &Path, backup: &Path, failed_version: &str) -> Result<()
         return Err(e);
     }
     let aside = data.join(format!("failed-{}-{}", safe(failed_version), stamp()));
-    std::fs::create_dir_all(&aside).map_err(|e| format!("{}: {e}", aside.display()))?;
-    for name in ["state.db", "state.db-wal", "state.db-shm"] {
-        let p = data.join(name);
-        if p.exists() {
-            std::fs::rename(&p, aside.join(name)).map_err(|e| format!("{}: {e}", p.display()))?;
+    // Every step after the copy is undone when one fails (review r5-05-3):
+    // the files already moved aside go back, and the full-size copy does not
+    // stay on a volume that may have just run out of room.
+    let mut moved: Vec<&str> = Vec::new();
+    let swapped = std::fs::create_dir_all(&aside)
+        .map_err(|e| format!("{}: {e}", aside.display()))
+        .and_then(|()| {
+            for name in ["state.db", "state.db-wal", "state.db-shm"] {
+                let p = data.join(name);
+                if p.exists() {
+                    std::fs::rename(&p, aside.join(name))
+                        .map_err(|e| format!("{}: {e}", p.display()))?;
+                    moved.push(name);
+                }
+            }
+            std::fs::rename(&tmp, &db).map_err(|e| format!("{}: {e}", db.display()))
+        });
+    if let Err(e) = swapped {
+        for name in moved {
+            let _ = std::fs::rename(aside.join(name), data.join(name));
         }
+        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_dir(&aside);
+        return Err(e);
     }
-    std::fs::rename(&tmp, &db).map_err(|e| format!("{}: {e}", db.display()))?;
     Ok(())
 }
 

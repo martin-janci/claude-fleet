@@ -67,7 +67,11 @@ SQLITE_MAJOR="${SQLITE_VERSION%%.*}"
 SQLITE_MINOR="${SQLITE_VERSION#*.}"; SQLITE_MINOR="${SQLITE_MINOR%%.*}"
 case "$SQLITE_MAJOR$SQLITE_MINOR" in ''|*[!0-9]*) SQLITE_MAJOR=0; SQLITE_MINOR=0;; esac
 if [ "$SQLITE_MAJOR" -gt 3 ] || { [ "$SQLITE_MAJOR" -eq 3 ] && [ "$SQLITE_MINOR" -ge 27 ]; }; then
-  if ! "$SQLITE" "$DB" "VACUUM INTO '${PART//\'/\'\'}'"; then
+  # Built outside the double quotes: before bash 4.3 a quote inside a
+  # quoted pattern substitution kept its backslash (macOS ships 3.2).
+  SQ="'"
+  SQL_PART=${PART//$SQ/$SQ$SQ}
+  if ! "$SQLITE" "$DB" "VACUUM INTO '$SQL_PART'"; then
     echo "backup: VACUUM INTO from $DB failed; removing $PART" >&2
     rm -f -- "$PART"
     exit 1
