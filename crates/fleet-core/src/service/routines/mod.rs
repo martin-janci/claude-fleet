@@ -512,7 +512,9 @@ fn check(
         )));
     }
     let offset = input.utc_offset_min.unwrap_or(0);
-    if offset.abs() > cron::MAX_OFFSET_MIN {
+    // `unsigned_abs`: `i64::MIN.abs()` overflows (a panic in a debug
+    // build, the store lock held; `i64::MIN` passing the check in release).
+    if offset.unsigned_abs() > cron::MAX_OFFSET_MIN.unsigned_abs() {
         return Err(invalid(format!(
             "utc_offset_min must be within ±{}",
             cron::MAX_OFFSET_MIN

@@ -213,7 +213,7 @@ pub fn pieces(bytes: &[u8], start: i64, since: i64, now: i64) -> (Vec<(i64, Stri
     let mut out: Vec<(i64, String, i64)> = Vec::new();
     let mut at = 0usize;
     for raw in bytes[..complete].split(|b| *b == b'\n') {
-        let line_offset = start + at as i64;
+        let line_offset = start.saturating_add(at as i64);
         at += raw.len() + 1;
         let Ok(line) = std::str::from_utf8(raw) else {
             continue;
@@ -358,7 +358,12 @@ pub async fn index_host(
                 })?;
                 written += 1;
             }
-            s.set_transcript_cursor(t.session_id, &read.source, read.offset + consumed, now)?;
+            s.set_transcript_cursor(
+                t.session_id,
+                &read.source,
+                read.offset.saturating_add(consumed),
+                now,
+            )?;
         }
         Ok(written)
     })

@@ -365,7 +365,9 @@ pub fn load_limits(s: &Store) -> HostLoadLimits {
 /// backwards (the host rebooted between them) or did not move.
 pub fn cpu_from_ticks(prev: Option<(i64, i64)>, now: Option<(i64, i64)>) -> Option<f64> {
     let ((pb, pt), (nb, nt)) = (prev?, now?);
-    let (db, dt) = (nb - pb, nt - pt);
+    // Checked: the counters are a host's to print, and an overflow here
+    // panics (debug) under the store lock or wraps into garbage (release).
+    let (db, dt) = (nb.checked_sub(pb)?, nt.checked_sub(pt)?);
     (dt > 0 && db >= 0).then(|| (db as f64 * 100.0 / dt as f64).clamp(0.0, 100.0))
 }
 
@@ -1417,6 +1419,24 @@ pub fn unready_health() -> Health {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Counters a host printed at the ends of the range give no reading,
+    /// and never overflow.
+    #[test]
+    fn cpu_from_extreme_ticks_is_none_not_a_panic() {
+        assert_eq!(
+            cpu_from_ticks(Some((i64::MAX, i64::MAX)), Some((-2, -2))),
+            None
+        );
+        assert_eq!(
+            cpu_from_ticks(Some((-2, -2)), Some((i64::MAX, i64::MAX))),
+            None
+        );
+        assert!(
+            crate::tmux::parse_proc_stat_cpu(&format!("cpu {} {} 0 0", i64::MAX, i64::MAX))
+                .is_none()
+        );
+    }
 
     /// The defaults `host_thresholds` falls back to.
     const THRESHOLDS: HostHealthThresholds = HostHealthThresholds {

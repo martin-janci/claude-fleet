@@ -937,9 +937,11 @@ pub fn parse_proc_stat_cpu(line: &str) -> Option<(i64, i64)> {
     if n.len() < 4 {
         return None;
     }
-    let total: i64 = n.iter().sum();
-    let idle = n[3] + n.get(4).copied().unwrap_or(0);
-    Some((total - idle, total))
+    // Checked throughout: a host prints these; a counter near `i64::MAX`
+    // overflowed (a panic in a debug build).
+    let total = n.iter().try_fold(0i64, |a, v| a.checked_add(*v))?;
+    let idle = n[3].checked_add(n.get(4).copied().unwrap_or(0))?;
+    Some((total.checked_sub(idle)?, total))
 }
 
 /// Parse [`HOST_IDENTITY_SCRIPT`] output. Requires BOTH a `tmuxrc=` line

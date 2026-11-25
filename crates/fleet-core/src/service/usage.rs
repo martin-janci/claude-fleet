@@ -684,7 +684,7 @@ pub fn plan_delta(
         reset: read.mode == ReadMode::Shrink,
         totals,
         model: read.last_model.clone(),
-        offset: read.start + advance,
+        offset: read.start.saturating_add(advance),
         source: read.source.clone(),
         last_msg_id: read.last_msg_id.clone(),
         last_msg_usage: read.last_msg_usage.clone(),
@@ -693,7 +693,11 @@ pub fn plan_delta(
         // A read from byte 0 marks the file's size at that moment: every
         // chunk below it is history. `chunk` bounds it for a reader that
         // did not print the size.
-        backfill_until: from_zero.then(|| read.size.unwrap_or(read.start + read.chunk).max(0)),
+        backfill_until: from_zero.then(|| {
+            read.size
+                .unwrap_or_else(|| read.start.saturating_add(read.chunk))
+                .max(0)
+        }),
     }
 }
 
