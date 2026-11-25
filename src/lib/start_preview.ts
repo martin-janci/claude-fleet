@@ -13,7 +13,7 @@ import type { StartRule } from './start_rules';
 
 /** What would stop or change a start. */
 export interface StartConflict {
-  /** `live_session` | `proposal` | `cross_org` | `worktree_busy` | `done`. */
+  /** `live_session` | `proposal` | `cross_org` | `worktree_busy` | `done` | `rule_host_down`. */
   kind: string;
   message: string;
   /** The session in the way, when it may be named. */

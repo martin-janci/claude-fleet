@@ -932,6 +932,25 @@ fn host_fence(h: &str) -> IpcError {
     )
 }
 
+/// `E_HOST_OFFLINE` for a start whose host start rule `r` names while that
+/// host is down (review r5-01-7): the rule, its host and the way out.
+fn rule_host_down(r: &crate::store::StartRuleRow, host: &str) -> IpcError {
+    let way_out = match r.fallback_host.as_deref() {
+        Some(f) => format!("its fallback host {f} is down too"),
+        None => {
+            "it has no fallback host; add one to the rule, or pick a host (host_alias)".to_string()
+        }
+    };
+    IpcError::new(
+        codes::E_HOST_OFFLINE,
+        format!(
+            "start rule {} runs its tasks on {host}, which is down; {way_out}",
+            r.pattern
+        ),
+    )
+    .with_details(serde_json::json!({ "start_rule_id": r.id, "host": host }))
+}
+
 /// `E_EXISTS` naming `row` (or not, when the caller cannot see it — an
 /// isolated org's session is not named to a host outside it, D7; another
 /// PERSON's session is not named to anybody, multi-user M1 T9b). `what`
@@ -1240,6 +1259,21 @@ pub fn plan_resolved(
     if let Some(h) = scope.host() {
         if host_alias != h {
             return Err(host_fence(h));
+        }
+    }
+    // A start rule's host is binding (review w06-1), so while it is down
+    // the start is refused here, naming the rule, rather than failing at
+    // the spawn: its fallback host is how a rule says "else there"
+    // (review r5-01-7).
+    if args.host_alias.is_none() && scope.host().is_none() && rule_names_host {
+        if let Some(r) = rule.as_ref() {
+            if !s
+                .list_hosts()?
+                .iter()
+                .any(|h| h.alias == host_alias && h.reachable)
+            {
+                return Err(rule_host_down(r, &host_alias));
+            }
         }
     }
     // Data integrity, for every caller (M5): a ticket of one org is not
@@ -2164,7 +2198,8 @@ pub async fn start_work_unprompted(
 /// made.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartConflict {
-    /// `live_session` | `proposal` | `cross_org` | `worktree_busy` | `done`.
+    /// `live_session` | `proposal` | `cross_org` | `worktree_busy` | `done` |
+    /// `rule_host_down`.
     pub kind: String,
     /// One plain sentence for the person.
     pub message: String,
@@ -2607,6 +2642,17 @@ pub async fn preview_start(
                 ..planned.clone()
             };
             plan_resolved(store, &forced, view, &ticket)?
+        }
+        Err(e) if e.code == codes::E_HOST_OFFLINE && planned.host_alias.is_none() => {
+            // The start rule's host is down (review r5-01-7): say so, naming
+            // the rule, and let the person pick a host.
+            preview.conflicts.push(StartConflict {
+                kind: "rule_host_down".into(),
+                message: e.message.clone(),
+                session_id: None,
+            });
+            preview.missing = Some("host".into());
+            return Ok(preview);
         }
         Err(e) if e.code == codes::E_EXISTS => {
             // A multi-repo sibling's branch already has a live session.
