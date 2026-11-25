@@ -23970,3 +23970,17 @@ async fn scan_leaves_an_unreachable_hosts_finding_alone() {
     assert!(live.iter().any(|r| r["id"].as_i64() == Some(id)), "{scan}");
     assert!(scan["fixed"].as_array().unwrap().is_empty(), "{scan}");
 }
+
+#[tokio::test]
+async fn only_the_owner_starts_control() {
+    let (tools, _guards, _store) = client_tools();
+    let mut colleague = trusted(client_caller("their-laptop", TokenMode::Full));
+    colleague.is_fleet_admin = false;
+    for c in [host_caller("web-1", TokenMode::Full), colleague] {
+        let err = tools
+            .ensure_operator(Extension(c))
+            .await
+            .expect_err("not the owner's call");
+        assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    }
+}

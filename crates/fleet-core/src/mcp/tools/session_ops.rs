@@ -1149,8 +1149,20 @@ impl FleetTools {
     #[tool(
         description = "Ensure the UX agent's operator session exists on a reachable host; returns its row."
     )]
-    pub(super) async fn ensure_operator(&self) -> Result<CallToolResult, McpError> {
+    pub(super) async fn ensure_operator(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
         audit("ensure_operator", "");
+        // Starting Control mints its token and writes it onto a host: the
+        // owner's call (their own device, the master, or Control itself),
+        // never a per-host token's or another person's device.
+        if !caller.is_control_or_owner() {
+            return Err(to_mcp_err(crate::ipc_error::IpcError::new(
+                crate::ipc_error::codes::E_FORBIDDEN,
+                "Control is started by the fleet's owner",
+            )));
+        }
         let row = crate::service::operator::ensure_operator(&self.store, &self.ssh, &self.reg)
             .await
             .map_err(to_mcp_err)?;
