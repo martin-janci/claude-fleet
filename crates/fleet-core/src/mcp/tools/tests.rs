@@ -556,6 +556,73 @@ fn the_owners_device_may_refresh_one_hosts_content_and_nothing_wider() {
 /// manages trackers; an untrusted or readonly one, a second person's and a
 /// host token do not, and a phone never reaches work_admin's org,
 /// retention, usage or bucket actions.
+/// A device that re-points a tracker decides where the hub sends its
+/// credential: `via_host:` pipes it to a login shell on that host. The phone
+/// may move a tracker whose stored secret it then sets again (the move drops
+/// it), never one whose credential is a reference the hub reads for itself.
+#[tokio::test]
+async fn a_device_that_moves_a_tracker_does_not_take_its_credential_along() {
+    let mut phone = client_caller("phone", TokenMode::Full);
+    phone.client.as_mut().unwrap().trusted = true;
+    let t = test_tools(Store::open_in_memory().unwrap());
+    let (stored, referenced) = {
+        let s = t.store.lock().unwrap();
+        let a = s
+            .add_tracker("jira", "a", "https://a.atlassian.net")
+            .unwrap()
+            .id;
+        let b = s
+            .add_tracker("jira", "b", "https://b.atlassian.net")
+            .unwrap()
+            .id;
+        s.set_tracker_credential(a, "basic", Some("u@x"), Some("stored-secret-1"), None)
+            .unwrap();
+        s.set_tracker_credential(b, "basic", Some("u@x"), None, Some("env:JIRA_TOKEN"))
+            .unwrap();
+        (a, b)
+    };
+    let update = |c: Caller, id: i64, transport: &str| {
+        let t = t.clone();
+        let args = serde_json::from_value(serde_json::json!({
+            "action": "update", "tracker_id": id, "transport": transport,
+        }))
+        .unwrap();
+        async move { t.work_admin(Extension(c), Parameters(args)).await }
+    };
+    // A reference stays where the operator put it.
+    let e = update(phone.clone(), referenced, "via_host:devbox")
+        .await
+        .unwrap_err();
+    assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    // Naming the transport it already has moves nothing and keeps the secret.
+    update(phone.clone(), stored, "direct").await.unwrap();
+    {
+        let s = t.store.lock().unwrap();
+        assert!(s.resolve_tracker_credential(stored).unwrap().is_some());
+        assert_eq!(s.require_tracker(referenced).unwrap().transport, "direct");
+    }
+    // A move drops the stored secret: nothing is sent along the new path.
+    update(phone.clone(), stored, "via_host:devbox")
+        .await
+        .unwrap();
+    {
+        let s = t.store.lock().unwrap();
+        let row = s.require_tracker(stored).unwrap();
+        assert_eq!(row.transport, "via_host:devbox");
+        assert!(!row.has_credential, "{row:?}");
+        assert!(s.resolve_tracker_credential(stored).unwrap().is_none());
+    }
+    // The master keeps moving either kind.
+    update(Caller::master(), referenced, "via_host:devbox")
+        .await
+        .unwrap();
+    let s = t.store.lock().unwrap();
+    assert_eq!(
+        s.require_tracker(referenced).unwrap().transport,
+        "via_host:devbox"
+    );
+}
+
 #[tokio::test]
 async fn the_owners_trusted_phone_administers_hosts_and_trackers_only() {
     let trusted = |mut c: Caller| {
@@ -651,6 +718,35 @@ async fn the_owners_trusted_phone_administers_hosts_and_trackers_only() {
             "{extra}: the master keeps it"
         );
     }
+    // The same two fields sent by POSITION: the settings struct reads an
+    // array in declaration order (repos, section_map, section_map_confirmed,
+    // extra_ca, allow_private_network), and an array has no keys for the
+    // fence to find. Refused for the phone on every tracker action that
+    // takes settings, and no shape of settings but an object is read at all.
+    let positional = serde_json::json!([[], {}, false, "-----BEGIN CERTIFICATE-----", true]);
+    for action in ["add", "update", "set_credential"] {
+        let t = t.clone();
+        let args = serde_json::from_value(serde_json::json!({
+            "action": action, "tracker_id": 1, "provider": "jira_dc",
+            "site_url": "https://jira.example.com", "auth_kind": "token",
+            "secret": "s3cret-value", "settings": positional.clone(),
+        }))
+        .unwrap();
+        let e = t
+            .work_admin(Extension(phone.clone()), Parameters(args))
+            .await
+            .unwrap_err();
+        assert!(
+            e.message.starts_with("E_INVALID") && e.message.contains("settings"),
+            "{action}: {}",
+            e.message
+        );
+    }
+    let s = t.store.lock().unwrap();
+    assert!(
+        s.list_trackers().unwrap().is_empty(),
+        "nothing was added on the way to the refusal"
+    );
 }
 
 #[test]

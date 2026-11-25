@@ -230,7 +230,7 @@ impl WorkAdminArgs {
         )
     }
 
-    fn tracker(&self) -> Result<i64, IpcError> {
+    pub(crate) fn tracker(&self) -> Result<i64, IpcError> {
         self.tracker_id.ok_or_else(|| {
             IpcError::new(
                 codes::E_INVALID,
@@ -478,10 +478,21 @@ fn github_hostname(
 }
 
 /// `settings` as a person sent it → validated for `provider`.
+///
+/// An object of named fields and nothing else. The derived struct would
+/// also read an ARRAY, field by field in declaration order, and every gate
+/// that judges a caller's settings (`work_admin`'s device fence on
+/// `extra_ca` and `allow_private_network`) looks the fields up by name.
 fn parse_settings(
     provider: &str,
     v: &serde_json::Value,
 ) -> Result<crate::store::TrackerSettings, IpcError> {
+    if !v.is_object() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "settings must be an object of named fields",
+        ));
+    }
     let s: crate::store::TrackerSettings = serde_json::from_value(v.clone())
         .map_err(|e| IpcError::new(codes::E_INVALID, format!("settings: {e}")))?;
     crate::store::validate_tracker_settings(provider, s)
@@ -841,6 +852,27 @@ pub(crate) mod tests {
         WorkAdminArgs {
             action: action.into(),
             ..Default::default()
+        }
+    }
+
+    /// `settings` is read as an object of named fields and as nothing else.
+    /// The derived struct takes an array too, by position, which named a
+    /// CA and a private network past a fence that looks fields up by name.
+    #[test]
+    fn settings_are_an_object_of_named_fields_or_refused() {
+        let ok = parse_settings("jira_dc", &json!({ "allow_private_network": true })).unwrap();
+        assert!(ok.allow_private_network);
+        for bad in [
+            json!([[], {}, false, "-----BEGIN CERTIFICATE-----", true]),
+            json!([]),
+            json!("allow_private_network"),
+            json!(true),
+            json!(1),
+            serde_json::Value::Null,
+        ] {
+            let e = parse_settings("jira_dc", &bad).unwrap_err();
+            assert_eq!(e.code, codes::E_INVALID, "{bad}");
+            assert!(e.message.contains("object"), "{bad}: {}", e.message);
         }
     }
 

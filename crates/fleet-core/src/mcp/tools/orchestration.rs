@@ -3237,6 +3237,20 @@ impl FleetTools {
                     None,
                 ));
             }
+            // The fence below looks keys up, so `settings` has to be an
+            // object for it to mean anything: an ARRAY has no keys, and the
+            // settings struct reads one position by position
+            // (`[[], {}, false, "<pem>", true]` set `extra_ca` and
+            // `allow_private_network` past this check). `parse_settings`
+            // refuses the shape for every caller; a device is refused here
+            // first, before anything is read from it.
+            if args.settings.as_ref().is_some_and(|s| !s.is_object()) {
+                return Err(mcp_err(
+                    "E_INVALID",
+                    "settings must be an object of named fields",
+                    None,
+                ));
+            }
             let fenced = |k: &str| {
                 args.settings
                     .as_ref()
@@ -3251,6 +3265,13 @@ impl FleetTools {
                     None,
                 ));
             }
+        }
+        // A device that re-points a tracker (`update { transport }`) decides
+        // where the hub sends that tracker's credential next: `via_host:`
+        // pipes it to a login shell on the named host, where whoever drives
+        // a session can read it. See `device_moves_tracker`.
+        if !caller.is_master() && action == AdminAction::Update && args.transport.is_some() {
+            return self.device_moves_tracker(&args);
         }
         match action {
             // M11.4's sync metrics and M12.3's retention (rows, dry run,
@@ -3502,6 +3523,50 @@ impl FleetTools {
         )?;
         let s = lock(&self.store).map_err(to_mcp_err)?;
         operator_owner_scope(&s).map_err(to_mcp_err)
+    }
+
+    /// `work_admin { update, transport }` from a device (not the master).
+    ///
+    /// Where a tracker's requests leave from is where the hub sends its
+    /// credential: `via_host:<alias>` pipes the Authorization header to a
+    /// login shell on that host, and whoever drives a session there can read
+    /// it. A device may set a tracker up that way with a secret of its own,
+    /// but a credential already on the hub is not its to move:
+    /// `owner_device_admin` promises that what a device sends is stored and
+    /// never answered back, and review r04 S1 keeps a hub-side reference the
+    /// operator's. So a move (the transport actually changes) is refused
+    /// for a tracker whose credential is a reference the hub reads for
+    /// itself, and drops a stored value: the tracker is `unconfigured`, as
+    /// after any transport change, and the device sets the credential again
+    /// for the new path. One lock from the look to the drop, so no sync pass
+    /// reads the old credential along the new path in between.
+    fn device_moves_tracker(
+        &self,
+        args: &crate::service::trackers::admin::WorkAdminArgs,
+    ) -> Result<CallToolResult, McpError> {
+        let id = args.tracker().map_err(to_mcp_err)?;
+        let to =
+            crate::store::validate_tracker_transport(args.transport.as_deref().unwrap_or_default())
+                .map_err(to_mcp_err)?;
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        let before = s.require_tracker(id).map_err(to_mcp_err)?;
+        let moves = to != before.transport;
+        if moves && s.tracker_credential_is_reference(id).map_err(to_mcp_err)? {
+            return Err(mcp_err(
+                "E_FORBIDDEN",
+                "this tracker's credential is a reference the hub reads for itself (env: or \
+                 file:); where it is sent is the hub operator's to change",
+                None,
+            ));
+        }
+        let mut out =
+            crate::service::trackers::admin::update_locked(args, &s).map_err(to_mcp_err)?;
+        if moves && s.forget_tracker_credential(id).map_err(to_mcp_err)? {
+            s.emit_tracker(id).map_err(to_mcp_err)?;
+            out = serde_json::to_value(s.require_tracker(id).map_err(to_mcp_err)?)
+                .map_err(|e| mcp_err("E_SERIALIZE", e.to_string(), None))?;
+        }
+        ok_json(&out)
     }
 }
 

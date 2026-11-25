@@ -1027,6 +1027,39 @@ impl Store {
         self.require_tracker(id)
     }
 
+    /// Whether a tracker's credential is a reference the hub reads for
+    /// itself (`env:` / `file:`), not a value it stores. `false` for a
+    /// tracker with no credential.
+    pub fn tracker_credential_is_reference(&self, id: i64) -> Result<bool, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT credential_ref IS NOT NULL FROM tracker_secrets WHERE tracker_id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    /// Drop a tracker's credential and leave it `unconfigured`, so nothing
+    /// is sent for it until one is set again. `false` when it held none.
+    pub fn forget_tracker_credential(&self, id: i64) -> Result<bool, IpcError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
+            "DELETE FROM tracker_secrets WHERE tracker_id = ?1",
+            rusqlite::params![id],
+        )?;
+        if n > 0 {
+            tx.execute(
+                "UPDATE trackers SET state = 'unconfigured', last_error = NULL WHERE id = ?1",
+                rusqlite::params![id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(n > 0)
+    }
+
     /// Rename a tracker.
     pub fn rename_tracker(&self, id: i64, name: &str) -> Result<TrackerRow, IpcError> {
         let name = validate_name(name)?;
