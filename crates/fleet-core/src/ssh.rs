@@ -844,8 +844,20 @@ impl SshClient {
             status = child.wait() => {
                 let status = status
                     .map_err(|e| IpcError::new(spawn_code, format!("ssh wait {host}: {e}")))?;
-                let stdout = stdout_task.await.unwrap_or_default();
-                let stderr = stderr_task.await.unwrap_or_default();
+                let (stdout, out_dropped) = stdout_task.await.unwrap_or_default();
+                let (stderr, err_dropped) = stderr_task.await.unwrap_or_default();
+                // An explicit cap means the caller wants the head and knows
+                // it may be cut; the ceiling of an uncapped call is no answer.
+                if max_output.is_none() && (out_dropped || err_dropped) {
+                    return Err(IpcError::new(
+                        codes::E_SSH,
+                        format!(
+                            "ssh {host}: the command printed more than {} MiB; \
+                             its output was refused",
+                            UNCAPPED_OUTPUT_CEILING / (1024 * 1024)
+                        ),
+                    ));
+                }
                 Ok(Output { status, stdout, stderr })
             }
         }
@@ -1257,35 +1269,40 @@ pub fn parse_toolchain(stdout: &str) -> Option<HostToolchain> {
     })
 }
 
-/// Drain `stream` to EOF, keeping at most `cap` bytes (all of them for
-/// `None`). Bytes past the cap are read and dropped so the child keeps
-/// running instead of blocking on a full pipe.
-async fn read_capped<R>(stream: Option<R>, cap: Option<usize>) -> Vec<u8>
+/// The most one stream of an UNcapped call may carry (`max_output: None`).
+/// Far above anything fleet reads in one call (an 8 MiB carry chunk, a
+/// 64 MiB sync file as base64), and what keeps a compromised host, or a
+/// login profile that prints forever, from streaming gigabytes into the
+/// hub for the whole wall clock. Past it the call fails (`E_SSH`) rather
+/// than handing back a silently short answer.
+pub const UNCAPPED_OUTPUT_CEILING: usize = 256 * 1024 * 1024;
+
+/// Drain `stream` to EOF, keeping at most `cap` bytes (at most
+/// [`UNCAPPED_OUTPUT_CEILING`] for `None`). Bytes past the cap are read and
+/// dropped so the child keeps running instead of blocking on a full pipe.
+/// The flag says whether anything was dropped.
+async fn read_capped<R>(stream: Option<R>, cap: Option<usize>) -> (Vec<u8>, bool)
 where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut buf = Vec::new();
+    let mut dropped = false;
     let Some(mut s) = stream else {
-        return buf;
+        return (buf, dropped);
     };
-    match cap {
-        None => {
-            let _ = tokio::io::AsyncReadExt::read_to_end(&mut s, &mut buf).await;
-        }
-        Some(cap) => {
-            let mut chunk = [0u8; 8192];
-            loop {
-                match tokio::io::AsyncReadExt::read(&mut s, &mut chunk).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let room = cap.saturating_sub(buf.len());
-                        buf.extend_from_slice(&chunk[..n.min(room)]);
-                    }
-                }
+    let cap = cap.unwrap_or(UNCAPPED_OUTPUT_CEILING);
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        match tokio::io::AsyncReadExt::read(&mut s, &mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let room = cap.saturating_sub(buf.len());
+                dropped |= n > room;
+                buf.extend_from_slice(&chunk[..n.min(room)]);
             }
         }
     }
-    buf
+    (buf, dropped)
 }
 
 /// Run `script` through `bash -lc` on `host`: a local spawn for `"local"`,
@@ -1406,8 +1423,8 @@ async fn run_local_with_stdin(
         status = child.wait() => {
             let status = status
                 .map_err(|e| IpcError::new(codes::E_SHELL, format!("wait bash: {e}")))?;
-            let stdout = stdout_task.await.unwrap_or_default();
-            let stderr = stderr_task.await.unwrap_or_default();
+            let (stdout, _) = stdout_task.await.unwrap_or_default();
+            let (stderr, _) = stderr_task.await.unwrap_or_default();
             Ok(Output { status, stdout, stderr })
         }
     }
@@ -2612,6 +2629,21 @@ mod tests {
         assert_eq!(out.status.code(), Some(3));
         assert_eq!(out.stdout, b"hello");
         assert_eq!(out.stderr, b"err");
+    }
+
+    /// Every stream is read under a cap: an explicit one keeps the head, and
+    /// an uncapped call's ceiling says when it dropped anything (the caller
+    /// then refuses the answer instead of returning a short one).
+    #[tokio::test]
+    async fn read_capped_says_when_it_dropped_bytes() {
+        let data = vec![b'x'; 300_000];
+        let (kept, dropped) = read_capped(Some(&data[..]), Some(1000)).await;
+        assert_eq!((kept.len(), dropped), (1000, true));
+        let (kept, dropped) = read_capped(Some(&data[..]), Some(300_000)).await;
+        assert_eq!((kept.len(), dropped), (300_000, false));
+        let (kept, dropped) = read_capped(Some(&data[..]), None).await;
+        assert_eq!((kept.len(), dropped), (300_000, false));
+        const { assert!(UNCAPPED_OUTPUT_CEILING >= 128 * 1024 * 1024) };
     }
 
     #[tokio::test]
