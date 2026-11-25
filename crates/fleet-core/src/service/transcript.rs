@@ -1742,9 +1742,27 @@ pub fn trim_conversation(
             truncated |= fit_last_turn(&mut turns[0], max_chars);
             break;
         }
+        let only_turn = turns.len() == 1;
         let first = &mut turns[0];
         if !first.items.is_empty() {
-            total -= item_chars(&first.items.remove(0));
+            // As many of the oldest items as the budget needs, in one drain:
+            // one `remove(0)` per item moved the whole tail each time, which
+            // a hostile turn of tens of thousands of blocks made quadratic
+            // (seconds per poll on an async worker). The last item of the
+            // only turn is left for `fit_last_turn`, as before.
+            let limit = if only_turn {
+                first.items.len() - 1
+            } else {
+                first.items.len()
+            };
+            let mut drop = 0;
+            let mut freed = 0;
+            while drop < limit && total - freed > max_chars {
+                freed += item_chars(&first.items[drop]);
+                drop += 1;
+            }
+            first.items.drain(..drop);
+            total -= freed;
         }
         if first.items.is_empty() {
             total -= prompt_chars(first) + reminder_chars(first);
