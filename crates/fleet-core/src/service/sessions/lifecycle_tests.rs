@@ -245,6 +245,51 @@ async fn an_unknown_project_id_is_not_found_for_a_new_worktree_too() {
     assert_eq!(err.message, "project 4242 not found");
 }
 
+/// Review r5-02-1: the base branch reaches `git fetch` as an argument, so a
+/// value git would read as an option or a refspec is refused up front.
+#[tokio::test]
+async fn a_base_branch_git_would_read_as_an_option_is_refused() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    let project_id = store
+        .lock()
+        .unwrap()
+        .upsert_project("acme", "repo", "/base/repo")
+        .unwrap();
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+    for base in ["--upload-pack=x", "+main:main", "a b"] {
+        let args = NewSessionArgs {
+            host_alias: "local".into(),
+            project_id,
+            worktree_id: None,
+            name: "r5basebranch".into(),
+            call_id: None,
+            new_worktree: Some("some-branch".into()),
+            base_branch: Some(base.into()),
+            kind: Some("shell".into()),
+            start_command: None,
+            friendly_name: None,
+            resume_claude_session_id: None,
+            model: None,
+            effort: None,
+            profile: None,
+            agent: None,
+            origin: None,
+            over_limit_ok: false,
+            owner_person_id: None,
+            start_token: None,
+            env: None,
+        };
+        let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
+        assert_eq!(
+            err.code,
+            crate::ipc_error::codes::E_INVALID,
+            "{base}: {}",
+            err.message
+        );
+    }
+}
+
 /// `fetch_owner_repo` is the shared lookup behind `new_bg_session`,
 /// `spawn_review` and every remote-host path.
 /// `new_session` on a system project: the row's `base_path` verbatim, no

@@ -3077,7 +3077,14 @@ async fn move_session_inner(
     progress.start(MoveStep::Replay);
 
     let tmux_name = pick_target_name(&snap.row.tmux_name, &snap.target_taken)?;
-    crate::validate::tmux_name(&tmux_name)?;
+    // The session's own name is held to the rule for a name that exists
+    // (it may be older than the length limit, and the commits are already
+    // carried: review r5-02-4); only a name picked here is a new one.
+    if tmux_name == snap.row.tmux_name {
+        crate::validate::tmux_name_lookup(&tmux_name)?;
+    } else {
+        crate::validate::tmux_name(&tmux_name)?;
+    }
     let pane_cmd = crate::service::sessions::recreate_pane_command(
         "work",
         crate::store::AGENT_CLAUDE,

@@ -208,6 +208,22 @@ fn a_name_another_start_is_still_creating_is_passed_over() {
     assert!(name.starts_with("dev-o-r--"), "{name}");
 }
 
+/// Review r5-02-4: a name nobody typed fits the limit whatever the branch
+/// is called, plain or with a pair, and is cut at a char boundary.
+#[test]
+fn an_auto_picked_name_fits_the_limit_for_a_very_long_branch() {
+    let (s, _, _) = seeded();
+    for branch in ["b".repeat(300), "\u{17e}".repeat(200)] {
+        let a = args(None, Some(&branch), Some("shell"));
+        let plain = fill_session_name(&s, &a).unwrap();
+        crate::validate::tmux_name(&plain).unwrap();
+        assert!(plain.starts_with("dev-o-r--"), "{plain}");
+        let paired = fill_session_name_avoiding(&s, &a, &|n| n == plain).unwrap();
+        assert_ne!(paired, plain);
+        crate::validate::tmux_name(&paired).unwrap();
+    }
+}
+
 #[test]
 fn a_start_name_and_a_resume_are_held_until_the_start_ends() {
     let owner = 0xfeed;

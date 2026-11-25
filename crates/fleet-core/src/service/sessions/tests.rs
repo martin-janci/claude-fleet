@@ -4811,12 +4811,12 @@ fn worktree_add_script_resolves_requested_base_with_default_fallback() {
 fn worktree_add_script_starts_from_a_fresh_default() {
     let script = worktree_add_script("/repo/root", "feat-x", None);
     assert!(
-        script.contains("timeout 20 git fetch -q origin \"$1\" >/dev/null 2>&1"),
+        script.contains("timeout 20 git fetch -q origin \"refs/heads/$1\" >/dev/null 2>&1"),
         "{script}"
     );
     // Review w02-3: macOS has no `timeout`; perl bounds the fetch there.
     assert!(
-        script.contains("perl -e 'alarm 20; exec @ARGV' git fetch -q origin \"$1\""),
+        script.contains("perl -e 'alarm 20; exec @ARGV' git fetch -q origin \"refs/heads/$1\""),
         "{script}"
     );
     assert!(script.contains("fleet_fetch \"$def\""), "{script}");
@@ -6308,7 +6308,11 @@ fn a_projects_identity_is_its_github_origin_and_a_worktree_is_its_projects() {
         .upsert_project("acme", "app-v2", "/p/acme/app-v2")
         .unwrap();
     let infra = s.upsert_project("local", "infra", "/p/infra").unwrap();
-    assert_eq!(fetch_repo_identity(&s, app).unwrap(), None, "not read yet");
+    // Review r5-02-3: not read yet, it is held to its own name.
+    assert_eq!(
+        fetch_repo_identity(&s, app).unwrap().as_deref(),
+        Some("git@github.com:acme/app-v2.git")
+    );
     s.set_project_github_origin(app, Some("git@github.com:acme/app.git"))
         .unwrap();
     s.set_project_github_origin(infra, Some("git@github.com:x/y.git"))

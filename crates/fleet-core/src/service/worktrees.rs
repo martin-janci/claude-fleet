@@ -94,6 +94,12 @@ const ORIGIN_MARKER: &str = "__FLEET_ORIGIN__ ";
 
 /// The checkout's `origin`, from the scan script's [`ORIGIN_MARKER`] line
 /// ahead of its `root ` line, when it names a github.com repository.
+/// Whether the GitHub URL `origin` names `owner/repo` (case-insensitively).
+fn origin_names(origin: &str, owner: &str, repo: &str) -> bool {
+    crate::repo_url::parse_repo_url(origin)
+        .is_some_and(|(o, r)| o.eq_ignore_ascii_case(owner) && r.eq_ignore_ascii_case(repo))
+}
+
 fn scan_github_origin(stdout: &str) -> Option<String> {
     stdout
         .lines()
@@ -333,8 +339,12 @@ pub async fn list_host_worktrees_with(
         }
         s.delete_host_worktrees_not_in(host, pid, &names)?;
         // Only ever fills a missing origin: what the local scan recorded,
-        // or an earlier read, stays.
-        if let Some(origin) = scan_github_origin(&stdout) {
+        // or an earlier read, stays. And only with the project's own
+        // repository: under the flat layout the checkout at this path can
+        // be another project's (a fork's upstream), and its origin must
+        // not become this project's identity for good (review r5-02-3).
+        if let Some(origin) = scan_github_origin(&stdout).filter(|o| origin_names(o, &owner, &repo))
+        {
             s.fill_project_github_origin(pid, &origin)?;
         }
         rows
@@ -786,6 +796,12 @@ mod tests {
         );
 
         let (store, pid, fake) = scan("https://gitlab.com/o/r");
+        run(&store, pid, &fake).await;
+        assert_eq!(origin_of(&store, pid), None);
+
+        // Review r5-02-3: another repository's checkout at the layout path
+        // (a fork's upstream) does not become this project's origin.
+        let (store, pid, fake) = scan("git@github.com:upstream/r.git");
         run(&store, pid, &fake).await;
         assert_eq!(origin_of(&store, pid), None);
     }
