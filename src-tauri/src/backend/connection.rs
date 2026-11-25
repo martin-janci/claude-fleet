@@ -96,7 +96,22 @@ pub trait ConnectionReporter: Send + Sync {
     /// sees it. Only the multi-hub registry reads it (design D8: one hub
     /// added twice under two URLs); a reporter that does not care ignores it.
     fn hub_fleet_id(&self, _fleet_id: Option<String>) {}
+
+    /// The hub's clock a `ready` frame named (`now`, unix seconds; `None`
+    /// from a hub older than the field). Reported before
+    /// [`HubConnection::Connected`], which then carries the difference to
+    /// the window (review w15-3). A reporter that does not care ignores it.
+    fn hub_clock(&self, _hub_now: Option<i64>) {}
 }
+
+/// A difference between the hub's clock and this machine's below this many
+/// seconds is not reported: it is within the frame's own travel time, and
+/// nothing the window shows turns on it.
+pub const CLOCK_SKEW_FLOOR_SECS: i64 = 5;
+
+/// The field `Connected` carries when the hub's clock differs from this
+/// machine's: hub time minus local time, seconds.
+pub const CLOCK_SKEW_FIELD: &str = "clock_skew_secs";
 
 /// The reading half: where the connection stands, for the code that must
 /// *consult* it rather than report into it — [`super::remote::HubBackend`],
@@ -192,6 +207,9 @@ pub struct HubConnectionStatus {
     /// The fleet id the hub's last `ready` frame named, if any. See
     /// [`ConnectionReporter::hub_fleet_id`].
     fleet_id: Mutex<Option<String>>,
+    /// Hub time minus this machine's, seconds, by the last `ready` frame;
+    /// 0 when it named no clock. See [`ConnectionReporter::hub_clock`].
+    clock_skew_secs: std::sync::atomic::AtomicI64,
 }
 
 /// Hand-written: the token is here only to be redacted, and a `{:?}` must not
@@ -216,6 +234,7 @@ impl HubConnectionStatus {
             token: String::new(),
             retry: Arc::new(tokio::sync::Notify::new()),
             fleet_id: Mutex::new(None),
+            clock_skew_secs: std::sync::atomic::AtomicI64::new(0),
         }
     }
 
@@ -229,7 +248,29 @@ impl HubConnectionStatus {
             token: token.to_string(),
             retry: Arc::new(tokio::sync::Notify::new()),
             fleet_id: Mutex::new(None),
+            clock_skew_secs: std::sync::atomic::AtomicI64::new(0),
         }
+    }
+
+    /// The latest state as the window reads it: the state, and beside
+    /// `connected` the hub's clock difference when there is one worth
+    /// correcting for ([`CLOCK_SKEW_FIELD`]). What `hub:connection` carries
+    /// and what the `hub_connection` command answers.
+    pub fn current_payload(&self) -> serde_json::Value {
+        self.payload_of(&self.current())
+    }
+
+    fn payload_of(&self, state: &HubConnection) -> serde_json::Value {
+        let mut payload = serde_json::to_value(state).unwrap_or(serde_json::Value::Null);
+        let skew = self
+            .clock_skew_secs
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if matches!(state, HubConnection::Connected) && skew.abs() >= CLOCK_SKEW_FLOOR_SECS {
+            if let Some(map) = payload.as_object_mut() {
+                map.insert(CLOCK_SKEW_FIELD.to_string(), skew.into());
+            }
+        }
+        payload
     }
 
     /// The latest state, for a window that mounted after it was emitted.
@@ -320,6 +361,19 @@ impl ConnectionReporter for HubConnectionStatus {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = fleet_id;
     }
 
+    fn hub_clock(&self, hub_now: Option<i64>) {
+        let local = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let skew = match hub_now {
+            Some(now) if local > 0 => now - local,
+            _ => 0,
+        };
+        self.clock_skew_secs
+            .store(skew, std::sync::atomic::Ordering::SeqCst);
+    }
+
     fn report(&self, state: HubConnection) {
         // Standalone runs no bridge; nothing may move it off `Standalone`.
         let Some(sink) = &self.sink else { return };
@@ -379,9 +433,11 @@ impl ConnectionReporter for HubConnectionStatus {
             }
             HubConnection::Standalone => {}
         }
-        match serde_json::to_value(&state) {
-            Ok(payload) => sink.emit_remote(CONNECTION_EVENT, payload),
-            Err(e) => tracing::warn!(error = %e, "[hub events] unserialisable connection state"),
+        match self.payload_of(&state) {
+            serde_json::Value::Null => {
+                tracing::warn!("[hub events] unserialisable connection state");
+            }
+            payload => sink.emit_remote(CONNECTION_EVENT, payload),
         }
     }
 }

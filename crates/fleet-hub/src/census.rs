@@ -151,15 +151,22 @@ pub fn run(
             Ok(ExitCode::SUCCESS)
         }
         CensusCmd::Limits { days, db, json } => {
-            let o =
-                limit_census::LimitCensusOptions::new(days, now_unix()).map_err(|e| e.message)?;
             let store = open_read_only(&db_path(db.as_deref(), opts, env)?)?;
+            let now = now_unix();
+            // A copy (`--db`) is counted to its newest reading, not to the
+            // wall clock (review w07-7).
+            let cut = match db {
+                Some(_) => limit_census::copy_window_end(&store, now).map_err(|e| e.message)?,
+                None => None,
+            };
+            let o = limit_census::LimitCensusOptions::new(days, cut.unwrap_or(now))
+                .map_err(|e| e.message)?;
             let report = limit_census::limit_census(&store, &o).map_err(|e| e.message)?;
-            print(
-                json,
-                || serde_json::to_string_pretty(&report),
-                report.lines(),
-            )?;
+            let mut lines = report.lines();
+            if let Some(end) = cut {
+                lines.insert(1.min(lines.len()), limit_census::copy_window_note(end));
+            }
+            print(json, || serde_json::to_string_pretty(&report), lines)?;
             Ok(ExitCode::SUCCESS)
         }
     }

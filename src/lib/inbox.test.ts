@@ -136,6 +136,12 @@ describe('review w08-3 (option a): a share counts only at Answer or Steer', () =
     const theirs = session('mac', 'theirs', { claude_status: 'blocked', owner_person_id: 7 });
     sessions.set([theirs]);
     try {
+      // Review w11-1: seen through team reach, with no grant at all.
+      myGrants.set(new Map());
+      expect(get(inboxCount)).toBe(0);
+      sessions.set([{ ...theirs, owner_person_id: 3 }]);
+      expect(get(inboxCount)).toBe(1);
+      sessions.set([theirs]);
       myGrants.set(new Map([[theirs.id, 'watch']]));
       expect(get(inboxCount)).toBe(0);
       myGrants.set(new Map([[theirs.id, 'answer']]));

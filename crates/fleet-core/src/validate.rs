@@ -282,6 +282,11 @@ fn tmux_name_with(value: &str, allow_colon: bool, allow_hash: bool) -> Result<()
     Ok(())
 }
 
+/// The longest name [`tmux_name`] takes for a session fleet creates or
+/// renames, in bytes. The lookup variants have no limit: a session that
+/// already exists stays addressable.
+pub const TMUX_NAME_MAX: usize = 240;
+
 /// Validate a tmux session name. tmux forbids `.`, `:` and whitespace in
 /// session names; we additionally reject control characters and a leading
 /// `-` (which a `tmux -t <name>` target would parse as an option).
@@ -294,6 +299,16 @@ fn tmux_name_with(value: &str, allow_colon: bool, allow_hash: bool) -> Result<()
 /// the MCP API reach here with padding, and they get a clear `E_INVALID`.
 pub fn tmux_name(value: &str) -> Result<(), IpcError> {
     tmux_name_with(value, false, false)?;
+    // A name is the row's key, rides in every row event and names the
+    // staging folder `~/.claude-fleet/uploads/<name>`: over a file name's
+    // 255 bytes a dropped file fails with "File name too long" (review
+    // w16-5). A terminal's `--sh<N>` suffix must still fit.
+    if value.len() > TMUX_NAME_MAX {
+        return Err(invalid(format!(
+            "session name is {} bytes; the limit is {TMUX_NAME_MAX}",
+            value.len()
+        )));
+    }
     // A name ending `--sh<N>` is a shell terminal's (step 5.3), which every
     // session list leaves out: a session created under one would vanish.
     if crate::tmux::is_shell_terminal_name(value) {
@@ -459,6 +474,22 @@ pub fn remote_worktree_path(label: &str, value: &str) -> Result<(), IpcError> {
     path_component("worktree name", name)
 }
 
+/// The furthest ahead a "not before" / "until" unix time may lie.
+pub const MAX_AHEAD_SECS: i64 = 366 * 86_400;
+
+/// `{label}` is a unix time in SECONDS no more than a year ahead of `now`.
+/// A value in milliseconds (`Date.now()`) lies tens of thousands of years
+/// out: it would be accepted and never come due (reviews w15-5, w16-4).
+pub fn unix_seconds_ahead(label: &str, value: i64, now: i64) -> Result<(), IpcError> {
+    if value > now.saturating_add(MAX_AHEAD_SECS) {
+        return Err(IpcError::new(
+            codes::E_VALIDATE,
+            format!("{label} is unix seconds, not milliseconds: {value} is more than a year away"),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,6 +653,17 @@ mod tests {
         assert!(tmux_name("").is_err());
     }
 
+    /// Review w16-5: a created or renamed session's name has a length
+    /// limit; a lookup of an existing one has none.
+    #[test]
+    fn tmux_name_has_a_length_limit() {
+        assert!(tmux_name(&"a".repeat(TMUX_NAME_MAX)).is_ok());
+        let long = "a".repeat(TMUX_NAME_MAX + 1);
+        assert_eq!(tmux_name(&long).unwrap_err().code, codes::E_INVALID);
+        assert!(tmux_name_lookup(&long).is_ok());
+        assert!(tmux_name_addressable(&long).is_ok());
+    }
+
     #[test]
     fn tmux_name_rejects_tmux_format_sequences() {
         // tmux expands these in a NEW name; `#(...)` runs a command.
@@ -766,5 +808,16 @@ mod tests {
             let err = remote_worktree_path("worktree_path", bad).expect_err(bad);
             assert_eq!(err.code, "E_INVALID", "{bad}");
         }
+    }
+
+    #[test]
+    fn a_time_in_milliseconds_is_refused_and_a_year_ahead_is_not() {
+        let now = 1_795_514_400;
+        assert!(unix_seconds_ahead("not_before", now + 3600, now).is_ok());
+        assert!(unix_seconds_ahead("not_before", now + MAX_AHEAD_SECS, now).is_ok());
+        assert!(unix_seconds_ahead("not_before", 5, now).is_ok());
+        let e = unix_seconds_ahead("not_before", now * 1000, now).unwrap_err();
+        assert_eq!(e.code, codes::E_VALIDATE);
+        assert!(e.message.contains("not milliseconds"), "{}", e.message);
     }
 }

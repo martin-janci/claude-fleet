@@ -3,7 +3,7 @@
 // list, defaults and validation; this module mirrors the keys so the Settings
 // dialog and tests can address them by name, and keeps the last map the
 // backend returned in a store.
-import { writable } from 'svelte/store';
+import { derived, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 
 export const SETTING_KEYS = {
@@ -466,6 +466,38 @@ export async function setFleetSetting(key: SettingKey, value: string): Promise<R
 export function hubHasSetting(keys: ReadonlySet<string> | null, key: SettingKey): boolean {
   return keys?.has(key) ?? false;
 }
+
+/** Writing help toggles that came after the features they switch: a hub
+ *  from before them serves the feature and has no such key. */
+const TOGGLE_NEWER_THAN_FEATURE: ReadonlySet<string> = new Set([
+  SETTING_KEYS.workDraftMorningBrief,
+  SETTING_KEYS.workDashboardSummary,
+]);
+
+/**
+ * PURE: whether a Writing help feature the HUB switches is offered. The
+ * value, default off, with one exception: the hub answered without the key
+ * and the toggle is newer than the feature (a hub older than this build,
+ * review r4 w03-6), where the hub serves the feature and has no such
+ * setting. A device the hub REFUSED its settings keeps the compiled default
+ * (off), as before: not every feature behind these toggles is refused by
+ * the hub when it is off (the terminal's Context help runs on this device,
+ * review r5-07-1), and on a default hub the buttons would only fail
+ * (r5-07-6; w19-2 is open, a product call).
+ */
+export function hubGatedOn(map: FleetSettings, keys: ReadonlySet<string> | null, key: SettingKey): boolean {
+  if (keys !== null && !keys.has(key) && TOGGLE_NEWER_THAN_FEATURE.has(key)) return true;
+  return settingBool(map, key);
+}
+
+/** `hubGatedOn` over the live stores: `$hubGated(SETTING_KEYS.workPromptTune)`.
+ *  Only for a feature a hub tool enforces the toggle of. */
+export const hubGated = derived(
+  [fleetSettings, hubSettingKeys],
+  ([map, keys]) =>
+    (key: SettingKey) =>
+      hubGatedOn(map, keys, key),
+);
 
 export function settingBool(map: FleetSettings, key: SettingKey): boolean {
   return (map[key] ?? SETTING_DEFAULTS[key]) === 'true';

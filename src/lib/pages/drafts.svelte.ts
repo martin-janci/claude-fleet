@@ -5,6 +5,7 @@
 // toggles never come here: they save at once and offer Undo.
 import type { Result } from '../result';
 import { errorText } from '../error_copy';
+import { push } from '../toasts';
 
 export type DraftWriter = (key: string, value: string) => Promise<Result<unknown>>;
 
@@ -66,4 +67,26 @@ export class SettingDrafts {
     }
     return Object.keys(errors).length;
   }
+}
+
+/**
+ * Settings is closing with typed values still staged (review r4 w13-2):
+ * say so, with Save in the toast, instead of dropping them without a word.
+ * Before the Save bar the same fields wrote on change, so a person expects
+ * them to have been saved.
+ */
+export function announceUnsaved(drafts: SettingDrafts, write: DraftWriter): void {
+  const n = drafts.count;
+  if (n === 0 || drafts.saving) return;
+  push({
+    message: `${n} settings ${n === 1 ? 'change was' : 'changes were'} not saved`,
+    kind: 'warning',
+    action: {
+      label: 'Save',
+      run: () =>
+        void drafts.save(write).then((refused) => {
+          if (refused > 0) push({ message: Object.values(drafts.errors)[0] ?? 'Could not save the settings', kind: 'error' });
+        }),
+    },
+  });
 }

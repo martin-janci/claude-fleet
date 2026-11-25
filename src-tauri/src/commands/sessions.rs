@@ -1069,7 +1069,9 @@ pub(crate) mod routed {
                 let _: serde_json::Value = hub.route("send_prompt", &args).await?;
                 Ok(())
             }
-            None => sessions::send_prompt(args, store, ssh).await,
+            // In the session's typing lane, as the hub's tool types
+            // (review w09-5).
+            None => sessions::send_prompt_in_lane(args, store, ssh).await,
         }
     }
 

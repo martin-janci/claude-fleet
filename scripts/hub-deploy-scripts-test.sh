@@ -57,11 +57,44 @@ B2="$ROOT/loose"; mkdir -m 755 "$B2"
 FLEET_HUB_DATA="$D/data" FLEET_HUB_BACKUPS="$B2" bash "$REPO/deploy/hub/backup.sh" >/dev/null 2>&1
 check "an existing 0755 backup dir is tightened to 0700" test "$(mode "$B2")" = 700
 check "…and the copy in it is 0600" test "$(mode "$(ls -1 "$B2"/state-*.db)")" = 600
-# A `'`, a `"` and a `\` in the path: the .backup argument is escaped, not cut.
+# A `'`, a `"` and a `\` in the path: the VACUUM INTO target is escaped, not cut.
 BQ="$ROOT/it's \"q\" \\n dir"
 FLEET_HUB_DATA="$D/data" FLEET_HUB_BACKUPS="$BQ" bash "$REPO/deploy/hub/backup.sh" >"$ROOT/backup-quote.log" 2>&1
 check "a backup dir with quotes and a backslash works" test $? = 0
 check "…and the copy lands in it, whole" test "$(sqlite3 "$(ls -1 "$BQ"/state-*.db)" 'SELECT COUNT(*) FROM t')" = 3
+check "…with no stray file beside it" test "$(count "$BQ"/*)" = 1
+# A space in the directory's path: retention still prunes (it used to split
+# the path and prune nothing), and removes nothing outside the directory.
+BS="$ROOT/fleet hub/backups"; mkdir -p "$BS"
+for s in 20260101-000000 20260102-000000 20260103-000000; do sqlite3 "$BS/state-$s.db" 'CREATE TABLE t(x)'; done
+mkdir "$ROOT/fleet"
+FLEET_HUB_DATA="$D/data" FLEET_HUB_BACKUPS="$BS" KEEP=2 bash "$REPO/deploy/hub/backup.sh" >"$ROOT/backup-space.log" 2>&1
+check "a backup dir with a space in its path exits 0" test $? = 0
+check "…and retention prunes down to KEEP there" test "$(count "$BS"/state-*.db)" = 2
+check "…keeping the copy just taken" test "$(sqlite3 "$(ls -1t "$BS"/state-*.db | head -1)" 'SELECT COUNT(*) FROM t')" = 3
+# A sqlite3 older than 3.27 has no VACUUM INTO: the script falls back to
+# `.backup`, under `timeout`, and a copy that passes the limit is a failure
+# that leaves nothing behind.
+OLD="$ROOT/oldsqlite"; mkdir -p "$OLD"
+cat >"$OLD/sqlite3" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  -version) echo "3.22.0 2018-01-22 00:00:00 fake"; exit 0 ;;
+  *"VACUUM INTO"*) echo "near \"INTO\": syntax error" >&2; exit 1 ;;
+  *".backup "*) [ "${FAKE_BACKUP_HANG:-0}" = 1 ] && exec sleep 30 ;;
+esac
+exec "$FAKE_REAL_SQLITE" "$@"
+EOF
+chmod +x "$OLD/sqlite3"
+BO="$ROOT/old-backups"
+FAKE_REAL_SQLITE="$(command -v sqlite3)" SQLITE="$OLD/sqlite3" FLEET_HUB_DATA="$D/data" FLEET_HUB_BACKUPS="$BO" bash "$REPO/deploy/hub/backup.sh" >"$ROOT/backup-old.log" 2>&1
+check "an old sqlite3 falls back to .backup and exits 0" test $? = 0
+check "…and the copy holds the rows" test "$(sqlite3 "$(ls -1 "$BO"/state-*.db)" 'SELECT COUNT(*) FROM t')" = 3
+if command -v timeout >/dev/null 2>&1; then
+  FAKE_BACKUP_HANG=1 BACKUP_TIMEOUT=1 FAKE_REAL_SQLITE="$(command -v sqlite3)" SQLITE="$OLD/sqlite3" FLEET_HUB_DATA="$D/data" FLEET_HUB_BACKUPS="$BO" bash "$REPO/deploy/hub/backup.sh" >"$ROOT/backup-hang.log" 2>&1
+  check "a .backup that passes BACKUP_TIMEOUT exits 1" test $? = 1
+  check "…and leaves no copy or .part behind" test "$(count "$BO"/*)" = 1
+fi
 # PREFIX=pre-1.0.0 prunes its own files only, not pre-1.0.0-rc1-*.
 BP="$ROOT/prefix"; mkdir -p "$BP"
 for s in 20260101-000000 20260102-000000 20260103-000000; do sqlite3 "$BP/pre-1.0.0-rc1-$s.db" 'CREATE TABLE t(x)'; done
@@ -115,11 +148,11 @@ tag="$(sed -n 's/^FLEET_HUB_TAG=//p' "$FAKE_DIR/.env")"
 printf '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\\"version\\":\\"%s\\",\\"db_ready\\":true}"}]}}' "$tag"
 EOF
 # sqlite3 as backup.sh runs it: logged (so the backup's place in the order
-# is visible), and `.backup` fails on FAKE_BACKUP_FAIL=1.
+# is visible), and the copy (`VACUUM INTO`) fails on FAKE_BACKUP_FAIL=1.
 cat >"$FAKE/sqlite3" <<'EOF'
 #!/usr/bin/env bash
 echo "sqlite3 $*" >>"$FAKE_LOG"
-case "$*" in *".backup "*) [ "${FAKE_BACKUP_FAIL:-0}" = 1 ] && { echo "disk I/O error" >&2; exit 1; } ;; esac
+case "$*" in *"VACUUM INTO "*) [ "${FAKE_BACKUP_FAIL:-0}" = 1 ] && { echo "disk I/O error" >&2; exit 1; } ;; esac
 exec "$FAKE_REAL_SQLITE" "$@"
 EOF
 FAKE_REAL_SQLITE="$(command -v sqlite3)"; export FAKE_REAL_SQLITE
@@ -152,8 +185,8 @@ check "one pre-upgrade backup was taken" test "$(count "$U"/backups/pre-0.3.1-*.
 check "every compose call reads .env through --env-file" test -z "$(grep '^docker compose ' "$FAKE_LOG" | grep -v -- "^docker compose --env-file $U/.env ")"
 check "pull precedes stop" before ' pull fleet-hub' ' stop fleet-hub'
 check "the running image is noted before the stop" before 'docker inspect' ' stop fleet-hub'
-check "stop precedes the backup (an exact, offline copy)" before ' stop fleet-hub' '^sqlite3 .*\.backup'
-check "the backup precedes up" before '^sqlite3 .*\.backup' ' up -d fleet-hub'
+check "stop precedes the backup (an exact, offline copy)" before ' stop fleet-hub' '^sqlite3 .*VACUUM INTO'
+check "the backup precedes up" before '^sqlite3 .*VACUUM INTO' ' up -d fleet-hub'
 check "the running image is named" grep -q 'runs image sha256:0ld1d (ghcr.io/x/fleet-hub@sha256:d1g)' "$ROOT/upgrade1.log"
 check "up precedes the healthcheck" before ' up -d fleet-hub' 'healthcheck'
 check "the healthcheck precedes --version" before 'healthcheck' '--version'

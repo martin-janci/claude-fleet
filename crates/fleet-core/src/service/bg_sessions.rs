@@ -663,6 +663,7 @@ where
     let fp_keys = Store::fingerprint_keys_of_project(store, args.project_id);
     let s = lock(store)?;
     s.delete_project(args.project_id, &fp_keys)?;
+    crate::service::work::detect::forget_project_trust(&s, args.project_id, None);
     // The transcripts are gone: the work those conversations belonged to
     // can no longer be *continued*, only restarted with a brief (M2.2).
     if let Err(e) = s.mark_purged_work_unresumable(args.project_id, &args.host_aliases) {

@@ -1907,7 +1907,14 @@ pub(crate) fn target_login_in(
     };
     let Some(account) = account else {
         // The session's account is unknown: it keeps its login name, held to
-        // the rules like any start.
+        // the rules like any start, when the target has that login. A name
+        // the target does not have would be created empty and open at
+        // `/login` (review w06-6): the move takes the target's own choice.
+        if let Some(p) = profile.map(str::trim).filter(|p| !p.is_empty()) {
+            if !crate::service::account_limits::login_listed_on(s, target, p, now)? {
+                return run_login::choose(s, Some(project_id), target, None, now);
+            }
+        }
         run_login::refuse(s, Some(project_id), target, profile, now)?;
         return Ok(profile.map(str::to_string));
     };
@@ -3070,7 +3077,14 @@ async fn move_session_inner(
     progress.start(MoveStep::Replay);
 
     let tmux_name = pick_target_name(&snap.row.tmux_name, &snap.target_taken)?;
-    crate::validate::tmux_name(&tmux_name)?;
+    // The session's own name is held to the rule for a name that exists
+    // (it may be older than the length limit, and the commits are already
+    // carried: review r5-02-4); only a name picked here is a new one.
+    if tmux_name == snap.row.tmux_name {
+        crate::validate::tmux_name_lookup(&tmux_name)?;
+    } else {
+        crate::validate::tmux_name(&tmux_name)?;
+    }
     let pane_cmd = crate::service::sessions::recreate_pane_command(
         "work",
         crate::store::AGENT_CLAUDE,
@@ -3926,6 +3940,31 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("max2")
+        );
+    }
+
+    /// Review w06-6: a session whose account fleet does not know keeps its
+    /// login name only where the target has that login; elsewhere it takes
+    /// the target's own choice, never an empty profile at `/login`.
+    #[test]
+    fn a_move_with_no_known_account_keeps_its_login_name_only_where_it_exists() {
+        use crate::service::account_limits::seed_usage;
+        let now = 1_000;
+        let s = Store::open_in_memory().unwrap();
+        seed_usage(&s, "htz", None, "acct-own", 20.0, now);
+        seed_usage(&s, "htz", Some("max2"), "acct-max", 30.0, now);
+        let p = s.upsert_project("acme", "api", "/srv/acme/api").unwrap();
+        let pick = |profile: Option<&str>| target_login_in(&s, p, "htz", profile, None, now);
+        assert_eq!(pick(Some("work")).unwrap(), None, "htz has no `work`");
+        assert_eq!(pick(Some("max2")).unwrap().as_deref(), Some("max2"));
+        assert_eq!(pick(None).unwrap(), None);
+        // A target whose logins fleet has not read yet: nothing to judge.
+        s.upsert_host("new").unwrap();
+        assert_eq!(
+            target_login_in(&s, p, "new", Some("work"), None, now)
+                .unwrap()
+                .as_deref(),
+            Some("work")
         );
     }
 

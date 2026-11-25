@@ -6,7 +6,7 @@ import { invoke } from '@tauri-apps/api/core';
 import SummaryWidget from './SummaryWidget.svelte';
 import { summaryKey, type Widget } from './dashboards';
 import { expectAccessible } from './a11y_check';
-import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
+import { fleetSettings, hubSettingKeys, SETTING_DEFAULTS } from './fleet_settings';
 
 const mock = invoke as ReturnType<typeof vi.fn>;
 const widget: Extract<Widget, { kind: 'summary' }> = {
@@ -23,6 +23,19 @@ beforeEach(() => {
 });
 
 describe('SummaryWidget', () => {
+  // r4 w03-6: a hub older than the toggle serves summaries and has no key.
+  it('offers Write when the hub answered without the toggle', () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS });
+    hubSettingKeys.set(new Set(['work.prompt_tune']));
+    try {
+      const r = render(SummaryWidget, { props: { dashId: 'dash.r42', widget } });
+      expect(r.queryByTestId('summary-off')).toBeNull();
+      expect(r.getByTestId('summary-write')).toBeTruthy();
+    } finally {
+      hubSettingKeys.set(null);
+    }
+  });
+
   it('offers no Write while Dashboard summaries is off (review 23b w12-8)', () => {
     fleetSettings.set({ ...SETTING_DEFAULTS });
     const r = render(SummaryWidget, { props: { dashId: 'dash.r42', widget } });

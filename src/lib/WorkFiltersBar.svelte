@@ -247,7 +247,10 @@
   }
   function clearAll() {
     cancelSearch();
-    workViewFilters.set({});
+    // Group and Sort arrange the tree rather than narrow it
+    // (`activeFilterCount`), so Clear leaves them (review w12-8).
+    const { group_by, sort } = normalizeFilters(get(workViewFilters));
+    workViewFilters.set(normalizeFilters({ group_by, sort }));
     search = '';
   }
 

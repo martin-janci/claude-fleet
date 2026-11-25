@@ -1255,6 +1255,21 @@ impl Store {
         Ok(())
     }
 
+    /// Drop only the login NAME of an ended row whose profile was removed
+    /// (Remove login). Its account link stays: the row ran on that account,
+    /// and usage booked late for it belongs there (review r5-01-3).
+    pub fn clear_session_profile_name(&self, id: i64) -> Result<(), rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET claude_profile = NULL \
+             WHERE id = ?1 AND claude_profile IS NOT NULL",
+            [id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(())
+    }
+
     /// Drop the account link of a session on the HOST's own login
     /// (`claude_profile IS NULL`), after its `claude` was relaunched. A
     /// relaunched `claude` reads whatever login the host holds now (a `/login`
@@ -2157,12 +2172,15 @@ impl Store {
         row_id: i64,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         let now = now_unix();
+        // The process is gone: so is its compaction (review r5-04-5).
         let changed = self.conn.execute(
-            "UPDATE sessions SET claude_status = 'stopped', last_turn_at = ?2, \
+            &format!(
+                "UPDATE sessions SET claude_status = 'stopped', last_turn_at = ?2, \
                  last_hook_at = ?2, idle_since = COALESCE(idle_since, ?2), \
                  stuck_kind = NULL, stuck_since = NULL, pending_input = NULL, \
-                 stale_working_at = NULL, stale_demoted_at = NULL, turn_outcome = NULL \
-                 WHERE id = ?1",
+                 stale_working_at = NULL, stale_demoted_at = NULL, turn_outcome = NULL\
+                 {END_COMPACTING} WHERE id = ?1"
+            ),
             rusqlite::params![row_id, now],
         )?;
         if changed == 0 {
@@ -5251,6 +5269,32 @@ mod tests {
                 .stale_working_at,
             Some(1)
         );
+    }
+
+    /// Review w08-7: a genuine start ends `stopped` as it ends `failed`;
+    /// a row with nothing to end keeps its status.
+    #[test]
+    fn a_genuine_start_ends_stopped_and_failed() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        for (was, then) in [
+            ("stopped", "idle"),
+            ("failed", "idle"),
+            ("blocked", "blocked"),
+        ] {
+            let id = s
+                .upsert_session(was, "local", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_status = ?2 WHERE id = ?1",
+                    rusqlite::params![id, was],
+                )
+                .unwrap();
+            s.clear_ended_turn_state(id).unwrap();
+            let row = s.get_session_by_id(id).unwrap().unwrap();
+            assert_eq!(row.claude_status.as_deref(), Some(then), "{was}");
+        }
     }
 
     /// Final review of the acknowledgement: `stale_demoted_at` (the veto's

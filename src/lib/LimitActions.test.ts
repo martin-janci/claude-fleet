@@ -247,6 +247,8 @@ describe('signed-out logins', () => {
     expect(headroomForAccount(h, 'acc-own').suggestion?.profile).toBe('spare');
     expect(freestLogin(logins)?.profile).toBe('spare');
     expect(usedText(logins[1])).toBe('signed out');
+    // Review w07-9: the meter's rounding (63.5% used is 37% left there).
+    expect(usedText({ profile: null, account_uuid: 'a', used_pct: 63.5 })).toBe('37% left');
   });
 });
 
@@ -326,6 +328,24 @@ describe('switchCheck', () => {
     };
     const next = nextReset({ pause_at_pct: 90, chosen: logins[0], over: true, suggestion: null, logins }, usage, 1000);
     expect(next).toEqual({ login: logins[0], at: 5000 });
+  });
+
+  // r4 w07-5: over only on its Opus window, for a session launched on Opus.
+  it('counts the launch model\'s own weekly window in the next reset', () => {
+    const logins = [{ profile: null, account_uuid: 'a', used_pct: 95 }];
+    const usage = {
+      a: {
+        usage: {
+          five_hour: { utilization: 10, resets_at: 5000 },
+          seven_day: { utilization: 20, resets_at: 9000 },
+          seven_day_opus: { utilization: 100, resets_at: 7000 },
+        },
+      },
+    };
+    const h = { pause_at_pct: 90, chosen: logins[0], over: true, suggestion: null, logins };
+    expect(nextReset(h, usage, 1000, 'opus')).toEqual({ login: logins[0], at: 7000 });
+    expect(nextReset(h, usage, 1000, 'sonnet')).toBeNull();
+    expect(nextReset(h, usage, 1000)).toBeNull();
   });
 });
 

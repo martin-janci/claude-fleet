@@ -192,6 +192,11 @@ impl Store {
         let merged_at = ev
             .and_then(|e| e.merged_at)
             .or_else(|| (state == Some("MERGED")).then_some(now));
+        // A PR whose opener was released (`session_id` NULL) takes the next
+        // session's id, name and host together (w02-6): the name and host
+        // of the deleted opener over a link to another session, maybe
+        // another person's, named nobody rightly. SQLite reads the row's
+        // old values in every SET expression, so the order does not matter.
         tx.execute(
             "INSERT INTO pull_requests (url, repo, number, title, head_ref, state, draft, \
                ci_status, review_decision, merge_state, merged_at, session_id, session_name, \
@@ -210,8 +215,12 @@ impl Store {
                merged_at = CASE WHEN COALESCE(?6, state) = 'MERGED' \
                  THEN COALESCE(merged_at, excluded.merged_at) ELSE NULL END, \
                session_id = COALESCE(session_id, excluded.session_id), \
-               session_name = COALESCE(session_name, excluded.session_name), \
-               host_alias = COALESCE(host_alias, excluded.host_alias), \
+               session_name = CASE WHEN session_id IS NULL \
+                 THEN COALESCE(excluded.session_name, session_name) \
+                 ELSE COALESCE(session_name, excluded.session_name) END, \
+               host_alias = CASE WHEN session_id IS NULL \
+                 THEN COALESCE(excluded.host_alias, host_alias) \
+                 ELSE COALESCE(host_alias, excluded.host_alias) END, \
                project_id = COALESCE(project_id, excluded.project_id)",
             params![
                 url,
@@ -264,8 +273,9 @@ impl Store {
     /// transaction that deletes their rows (w05-2). `session_id` has no FK
     /// and a session id is reused once its row is gone, so a PR would
     /// otherwise put its events on, and fire the routines of, whichever
-    /// session takes the id next. `session_name` stays as the snapshot, and
-    /// the next session seen on the PR becomes its opener.
+    /// session takes the id next. `session_name` stays as the snapshot until
+    /// the next session seen on the PR becomes its opener, name and host
+    /// with it.
     pub(crate) fn release_pr_openers_in(
         tx: &rusqlite::Connection,
         session_ids: &[i64],
@@ -497,10 +507,10 @@ mod tests {
             200,
         )
         .unwrap();
-        assert_eq!(
-            s.pull_request_by_url(URL).unwrap().unwrap().session_id,
-            Some(resumed)
-        );
+        let row = s.pull_request_by_url(URL).unwrap().unwrap();
+        assert_eq!(row.session_id, Some(resumed));
+        // w02-6: the new opener's name comes with its id.
+        assert_eq!(row.session_name.as_deref(), Some("ana-2"));
         let on = |sid: i64| -> i64 {
             s.conn
                 .query_row(

@@ -538,7 +538,26 @@ pub(crate) fn detect_stuck(text: &str) -> Option<StuckKind> {
             || l.contains("trust this folder")
     });
     let no_live_input_below = |at: usize| !lines[at + 1..].iter().any(|l| is_live_input_line(l));
-    if trust_cue.is_some_and(no_live_input_below) {
+    // And the words are the dialog's only when one of its own choice rows
+    // follows them with no tool call or permission question in between: a
+    // permission dialog takes the input box's place too, and one drawn
+    // under a sentence that says "trust this folder" is not a trust prompt
+    // (review w08-2).
+    let trust_choice_follows = |at: usize| {
+        let choice = |l: &&str| {
+            l.contains("yes, i trust")
+                || l.contains("yes, proceed")
+                || l.contains("no, exit")
+                || l.contains("trust and continue")
+        };
+        lines[at..].iter().position(choice).is_some_and(|off| {
+            !lines[at..at + off].iter().any(|l| {
+                let t = l.trim_start();
+                t.starts_with('●') || t.starts_with('⏺') || l.contains("do you want to")
+            })
+        })
+    };
+    if trust_cue.is_some_and(|at| no_live_input_below(at) && trust_choice_follows(at)) {
         return Some(StuckKind::TrustPrompt);
     }
 
@@ -557,13 +576,46 @@ pub(crate) fn detect_stuck(text: &str) -> Option<StuckKind> {
         return Some(StuckKind::AuthMenu);
     }
 
-    // Transport reconnecting.
-    if lower.contains("reconnecting") || lower.contains("connection lost, retrying") {
+    // Transport reconnecting, and the generic "press enter to continue"
+    // wait. Both are read as the two above are: a live input line below the
+    // LAST such words means a session printed them (a diff of reconnect
+    // code, its own summary), and a pane with its input box up is not
+    // waiting on either (review w08-1; `codex.rs::stuck` reads the same way).
+    //
+    // Nor are words IN or BELOW the input box (review r5-04-3): a draft that
+    // says "why does it keep reconnecting", a wrapped row of it, or a status
+    // line under the box that prints a branch name. The box is the last `❯`
+    // row drawn right under a rule; a past prompt echoed in the scrollback
+    // has no rule above it.
+    let is_rule = |l: &str| {
+        let l = l.trim();
+        !l.is_empty() && l.chars().all(|c| c == '─')
+    };
+    let input_row = |l: &str| {
+        let l = clean_line(l);
+        l.starts_with('❯') && parse_choice(l).is_none() && !is_focused_submit_row(l)
+    };
+    let input_box = (1..lines.len()).rev().find(|&i| {
+        input_row(lines[i])
+            && lines[..i]
+                .iter()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .is_some_and(|l| is_rule(l))
+    });
+    let own_screen = |at: usize| {
+        no_live_input_below(at) && !input_row(lines[at]) && input_box.is_none_or(|b| at < b)
+    };
+    let reconnect_cue = lines
+        .iter()
+        .rposition(|l| l.contains("reconnecting") || l.contains("connection lost, retrying"));
+    if reconnect_cue.is_some_and(own_screen) {
         return Some(StuckKind::Reconnect);
     }
-
-    // Generic "press enter to continue" wait.
-    if lower.contains("press enter to continue") || lower.contains("press enter to retry") {
+    let enter_cue = lines
+        .iter()
+        .rposition(|l| l.contains("press enter to continue") || l.contains("press enter to retry"));
+    if enter_cue.is_some_and(own_screen) {
         return Some(StuckKind::PressEnter);
     }
 
@@ -1462,6 +1514,47 @@ mod tests {
         assert_eq!(intel.derived_status, Some(ClaudeStatus::Blocked));
     }
 
+    /// Review w08-1: the words in a session's own output, over a live input
+    /// box (idle) or a running spinner (working), are not a stuck pane.
+    #[test]
+    fn reconnect_and_press_enter_in_prose_over_a_live_input_are_not_stuck() {
+        for words in ["+  log(\"reconnecting…\")", "Then press Enter to continue."] {
+            let idle = format!("● I changed the SSE code.\n  {words}\n\n❯ \n  ? for shortcuts\n");
+            let intel = analyze(&idle);
+            assert_eq!(intel.stuck, None, "{idle}");
+            assert_ne!(intel.derived_status, Some(ClaudeStatus::Blocked), "{idle}");
+            let working =
+                format!("● Bash(git diff)\n  {words}\n✻ Thinking… (esc to interrupt)\n\n❯ \n");
+            let intel = analyze(&working);
+            assert_eq!(intel.stuck, None, "{working}");
+            assert_ne!(
+                intel.derived_status,
+                Some(ClaudeStatus::Blocked),
+                "{working}"
+            );
+        }
+    }
+
+    /// Review r5-04-3: the words in the draft in the input box, or in a
+    /// status line under it, are not a stuck pane (a real capture).
+    #[test]
+    fn reconnect_and_press_enter_in_or_below_the_input_box_are_not_stuck() {
+        let pane = include_str!("testdata/pane_intel/working_draft_in_input_box.txt");
+        let draft = "and then also check the tests";
+        assert!(pane.contains(draft));
+        for words in [
+            "why does it keep reconnecting",
+            "then press enter to continue",
+        ] {
+            let drafted = pane.replace(draft, words);
+            assert_eq!(analyze(&drafted).stuck, None, "{words}: in the box");
+            let footer = format!("{}\n  fix/{}\n", pane.trim_end(), words.replace(' ', "-"));
+            assert_eq!(analyze(&footer).stuck, None, "{words}: under the box");
+        }
+        let footer = format!("{}\n  press enter to continue\n", pane.trim_end());
+        assert_eq!(analyze(&footer).stuck, None, "under the box");
+    }
+
     #[test]
     fn auth_menu_is_blocked() {
         let intel =
@@ -2311,6 +2404,21 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
         );
         assert_eq!(intel.stuck, Some(StuckKind::TrustPrompt));
         assert_eq!(intel.derived_status, Some(ClaudeStatus::Blocked));
+    }
+
+    /// Review w08-2: a permission dialog under a sentence that names the
+    /// trust prompt is a permission dialog, with its choices.
+    #[test]
+    fn a_permission_dialog_under_trust_words_is_not_a_trust_prompt() {
+        let pane = include_str!("testdata/pane_intel/permission_bash.txt").replace(
+            "● Bash(ls)",
+            "● The other session stopped at trust this folder, so I answered it.\n\n● Bash(ls)",
+        );
+        assert!(pane.contains("trust this folder"));
+        let intel = analyze(&pane);
+        assert_eq!(intel.stuck, None);
+        assert_eq!(intel.waiting_for, Some(WaitingFor::Permission));
+        assert!(intel.pending_input.is_some());
     }
 
     #[test]

@@ -8,7 +8,15 @@ import { invoke } from '@tauri-apps/api/core';
 import App from './App.svelte';
 import { onboardingDismissed } from './lib/onboarding';
 import { clearToasts } from './lib/toasts';
-import { workBoardOpen, requestHostsView, settingsOpen, requestAssetsView, shortcutSheetOpen } from './lib/app_views';
+import {
+  workBoardOpen,
+  requestHostsView,
+  settingsOpen,
+  requestAssetsView,
+  shortcutSheetOpen,
+  workViewToggleRequest,
+} from './lib/app_views';
+import { sessions } from './lib/sessions';
 import { toolkitTab } from './lib/toolkit_skills';
 import { sidebarView } from './lib/work_view';
 import { destination, leave } from './lib/destination';
@@ -386,6 +394,52 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     await fireEvent.click(getByTestId('rail-settings'));
     await waitFor(() => expect(queryByTestId('settings-page')).not.toBeNull());
     settingsOpen.set(false);
+  });
+
+  // Review r4 w04-5: the two App fixes below had no test of what was broken.
+  it('Pop back in closes Settings, so the terminal handed back is in sight (review w14-3)', async () => {
+    const { listen } = await import('@tauri-apps/api/event');
+    const lis = listen as ReturnType<typeof vi.fn>;
+    const before = lis.getMockImplementation();
+    let popBack: ((e: { payload: unknown }) => void) | null = null;
+    lis.mockImplementation(async (name: string, handler: (e: { payload: unknown }) => void) => {
+      if (name === 'terminal-pop-back-in') popBack = handler;
+      return () => {};
+    });
+    try {
+      const { queryByTestId, getByTestId } = render(App);
+      await waitFor(() => expect(popBack).not.toBeNull());
+      const row = session('mac', 'api', { id: 41 });
+      sessions.set([row]);
+      await fireEvent.click(getByTestId('rail-settings'));
+      await waitFor(() => expect(queryByTestId('settings-page')).not.toBeNull());
+      popBack!({ payload: { sessionId: 41, shell: null } });
+      await waitFor(() => expect(get(settingsOpen)).toBe(false));
+      await waitFor(() => expect(queryByTestId('settings-page')).toBeNull());
+      expect(get(destination)).toBe('session');
+    } finally {
+      lis.mockImplementation(before ?? (async () => () => {}));
+      sessions.set([]);
+      settingsOpen.set(false);
+    }
+  });
+
+  it('the palette\'s "Switch Sessions and Work" opens a collapsed list (review w14-4)', async () => {
+    const { getByTestId, queryByTestId } = render(App);
+    // The collapsed rail is a remembered pref: an earlier test may have left it so.
+    const wasCollapsed = queryByTestId('sidebar-expand') !== null;
+    if (!wasCollapsed) await fireEvent.click(getByTestId('sidebar-collapse'));
+    await waitFor(() => expect(queryByTestId('sidebar-expand')).not.toBeNull());
+    const was = get(sidebarView);
+    workViewToggleRequest.update((n) => n + 1);
+    await waitFor(() => expect(queryByTestId('sidebar-expand')).toBeNull());
+    expect(get(sidebarView)).not.toBe(was);
+    expect(get(workViewToggleRequest)).toBe(0);
+    if (wasCollapsed) {
+      sidebarView.set(was);
+      await waitFor(() => expect(queryByTestId('sidebar-collapse')).not.toBeNull());
+      await fireEvent.click(getByTestId('sidebar-collapse'));
+    }
   });
 
   it('UX audit S1: Settings is a page in place of the list, and the rail or Esc leaves it', async () => {

@@ -1167,7 +1167,6 @@ fn work_items_has_held_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 228.
 /// `already_applied` guard of migration 230: both creator columns exist.
 fn rows_have_creators(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1179,6 +1178,7 @@ fn rows_have_creators(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n == 2)
 }
 
+/// `already_applied` guard of migration 228.
 fn hosts_has_login_fingerprints(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'login_fingerprints'",
@@ -2753,14 +2753,26 @@ fn is_realm_projection_error(e: &rusqlite::Error) -> bool {
     )
 }
 
-/// The advice an opener adds to a failure to open `state.db`: none for the
-/// downgrade refusal and migration 181's projection refusal (their messages
-/// say what to do, and the file is intact), else `corrupt`.
+/// The advice an opener adds to a failure to open `state.db`: `corrupt`
+/// when SQLite says the file is damaged or is not a database, else none.
+/// A locked database, a full disk, a file this account cannot open, a
+/// failed migration, the downgrade refusal and migration 181's projection
+/// refusal all leave the file intact, and their own messages say what is
+/// wrong: advice to delete it there costs a hub its master token, every
+/// pairing and the work graph for nothing (review w14-2).
 pub fn open_failure_advice<'a>(e: &rusqlite::Error, corrupt: &'a str) -> &'a str {
-    if is_newer_schema_error(e) || is_realm_projection_error(e) {
-        ""
-    } else {
+    let damaged = matches!(
+        e,
+        rusqlite::Error::SqliteFailure(f, _)
+            if matches!(
+                f.code,
+                rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+            )
+    );
+    if damaged && !is_newer_schema_error(e) && !is_realm_projection_error(e) {
         corrupt
+    } else {
+        ""
     }
 }
 
@@ -3144,6 +3156,21 @@ impl Store {
         } in pending
         {
             let tx = self.immediate_transaction()?;
+            // `pending` was worked out before this transaction took the
+            // write lock. Another process opening the store at the same
+            // moment (a `fleet-hub settings set` beside a starting hub) may
+            // have run this migration while this one waited: read the
+            // version again under the lock, or the SQL runs twice and fails
+            // with "duplicate column name" (review w14-5).
+            let recorded: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_version WHERE version = ?1)",
+                rusqlite::params![version],
+                |r| r.get(0),
+            )?;
+            if recorded {
+                tx.commit()?;
+                continue;
+            }
             if already_applied
                 .map(|applied| applied(&tx))
                 .transpose()?
@@ -5036,6 +5063,47 @@ mod tests {
     /// the open, naming the person, writes nothing (the flag stays unset,
     /// so the next open checks again), and is not advised away as a corrupt
     /// file.
+    /// Review w14-2: only a damaged file gets the "it is corrupt" advice.
+    #[test]
+    fn only_a_damaged_file_gets_the_corrupt_advice() {
+        let failure = |code: i32, msg: &str| {
+            rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), Some(msg.into()))
+        };
+        for (code, msg) in [
+            (rusqlite::ffi::SQLITE_BUSY, "database is locked"),
+            (rusqlite::ffi::SQLITE_FULL, "database or disk is full"),
+            (
+                rusqlite::ffi::SQLITE_CANTOPEN,
+                "unable to open database file",
+            ),
+            (rusqlite::ffi::SQLITE_ERROR, "duplicate column name: x"),
+        ] {
+            assert_eq!(
+                super::open_failure_advice(&failure(code, msg), "advice"),
+                "",
+                "{msg}"
+            );
+        }
+        for code in [rusqlite::ffi::SQLITE_CORRUPT, rusqlite::ffi::SQLITE_NOTADB] {
+            assert_eq!(
+                super::open_failure_advice(&failure(code, "malformed"), "advice"),
+                "advice"
+            );
+        }
+    }
+
+    /// Review w14-5: a migration another process recorded while this one
+    /// waited for the write lock is not run again.
+    #[test]
+    fn a_migration_recorded_meanwhile_is_not_run_again() {
+        let s = store_at_version(KNOWN_SCHEMA_VERSION);
+        let again = Migration::plain(KNOWN_SCHEMA_VERSION, "THIS IS NOT SQL;");
+        assert!(s.apply_migrations(&[again]).unwrap().is_empty());
+        // One that is not recorded still runs (and here fails).
+        let next = Migration::plain(KNOWN_SCHEMA_VERSION + 1, "THIS IS NOT SQL;");
+        assert!(s.apply_migrations(&[next]).is_err());
+    }
+
     #[test]
     fn migration_181_refuses_an_org_members_row_its_groups_do_not_give() {
         let s = store_at_version(181);

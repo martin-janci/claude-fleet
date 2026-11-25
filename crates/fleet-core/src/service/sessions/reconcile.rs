@@ -1131,7 +1131,10 @@ fn write_reachable_host(
         let claude_status = stale_working_veto(
             stale,
             status_candidate(
-                probe.agent_rows.is_some(),
+                // A row read by its own adapter (Codex, Hermes) has no hooks
+                // and no `claude agents` entry: its pane is the only source,
+                // on every pass (review w08-4).
+                probe.agent_rows.is_some() || own_read.is_some(),
                 agent_status_typed,
                 pane_status,
                 prior_row.is_some_and(|p| p.claude_status.as_deref() == Some("blocked")),
@@ -1183,6 +1186,7 @@ fn write_reachable_host(
             // this pass must not demote a row its pane shows working (F2's
             // demote-lift-demote flap during one long tool call).
             pane_working: pane_status == Some(crate::service::pane_intel::ClaudeStatus::Working),
+            pane_idle: pane_status == Some(crate::service::pane_intel::ClaudeStatus::Idle),
         });
     }
     let now = now_unix();

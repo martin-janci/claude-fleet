@@ -1158,8 +1158,26 @@ impl Store {
              WHERE alias = ?2 AND org_id IS NULL",
             rusqlite::params![from, into],
         )?;
+        // Local workspace links follow the host (w02-7); one `into` already
+        // has for the same worktree keeps `into`'s, and the `from` one stops
+        // (its files stay), as a removed host's does.
+        let mut workspaces: Vec<i64> = {
+            let mut stmt = tx.prepare(
+                "UPDATE OR IGNORE local_workspaces SET host_alias = ?2 \
+                  WHERE host_alias = ?1 RETURNING id",
+            )?;
+            let ids = stmt
+                .query_map(rusqlite::params![from, into], |r| r.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            ids
+        };
+        workspaces.extend(Self::pause_local_workspaces_in(&tx, from)?);
         tx.execute("DELETE FROM hosts WHERE alias = ?1", [from])?;
         tx.commit()?;
+        for id in workspaces {
+            self.bus
+                .emit(&crate::events::RowChange::LocalWorkspaceChanged(id));
+        }
         for killed in dropped_killed {
             self.bus.session_killed(killed);
         }
@@ -1174,6 +1192,22 @@ impl Store {
             sessions_dropped: dropped.len(),
             usage_days_merged,
         })
+    }
+
+    /// Pause every local workspace link synced from `alias` that still
+    /// runs; returns their ids, for the caller to announce after its commit.
+    fn pause_local_workspaces_in(
+        tx: &rusqlite::Connection,
+        alias: &str,
+    ) -> Result<Vec<i64>, rusqlite::Error> {
+        let mut stmt = tx.prepare(
+            "UPDATE local_workspaces SET paused = 1, state = 'paused' \
+              WHERE host_alias = ?1 AND paused = 0 RETURNING id",
+        )?;
+        let ids = stmt
+            .query_map(rusqlite::params![alias], |r| r.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ids)
     }
 
     pub fn delete_host(&self, alias: &str) -> Result<(), rusqlite::Error> {
@@ -1297,16 +1331,7 @@ impl Store {
         )?;
         // A local workspace synced from it stops (its files stay): the sync
         // would keep reaching the alias, which may name another machine.
-        let paused_workspaces: Vec<i64> = {
-            let mut stmt = tx.prepare(
-                "UPDATE local_workspaces SET paused = 1, state = 'paused' \
-                  WHERE host_alias = ?1 AND paused = 0 RETURNING id",
-            )?;
-            let ids = stmt
-                .query_map(rusqlite::params![alias], |r| r.get::<_, i64>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            ids
-        };
+        let paused_workspaces = Self::pause_local_workspaces_in(&tx, alias)?;
         tx.commit()?;
         for killed in orphan_killed {
             self.bus.session_killed(killed);
@@ -2996,6 +3021,45 @@ mod tests {
             count("SELECT COUNT(*) FROM local_workspaces WHERE paused = 1 AND state = 'paused'"),
             1,
             "the workspace link stops and stays"
+        );
+    }
+
+    /// w02-7: a merge moves the workspace links to the host that stays; a
+    /// link `into` already has for the same worktree keeps `into`'s and the
+    /// other one stops.
+    #[test]
+    fn a_merge_moves_the_workspace_links() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("mac-old", None).unwrap();
+        s.insert_host("mac", None).unwrap();
+        let c = s.conn_for_test();
+        for (host, repo, local) in [
+            ("mac-old", "r", "/l/r"),
+            ("mac-old", "twin", "/l/twin-old"),
+            ("mac", "twin", "/l/twin"),
+        ] {
+            c.execute(
+                "INSERT INTO local_workspaces (host_alias, owner, repo, worktree_key, \
+                   remote_path, local_path, created_at) VALUES (?1, 'o', ?2, 'main', '/r', ?3, 1)",
+                rusqlite::params![host, repo, local],
+            )
+            .unwrap();
+        }
+        s.merge_host_alias("mac-old", "mac").unwrap();
+        let rows: Vec<(String, String, i64)> = c
+            .prepare("SELECT host_alias, local_path, paused FROM local_workspaces ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("mac".to_string(), "/l/r".to_string(), 0),
+                ("mac-old".to_string(), "/l/twin-old".to_string(), 1),
+                ("mac".to_string(), "/l/twin".to_string(), 0),
+            ]
         );
     }
 

@@ -451,6 +451,7 @@ impl Store {
         reconciled_at: Option<i64>,
         pane_working: bool,
         pr_evidence: Option<&str>,
+        pane_idle: bool,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         // Read the prior row (not just its id) before the write: it tells us
@@ -704,7 +705,23 @@ impl Store {
                                        OR ?12 IS NOT pr_url
                                        OR ?19 - pr_checked_at >= ?27 THEN ?19
                                   ELSE pr_checked_at END,
-               current_activity=COALESCE(excluded.current_activity, current_activity),
+               -- PreCompact's `compacting` is a hook's fact, and the pane's
+               -- last line must not replace it on the next pass (review
+               -- w08-9). PostCompact, Stop, UserPromptSubmit, SessionEnd and
+               -- a resetting SessionStart end it. A pass ends it too (review
+               -- r5-04-5) when the pane itself reads idle (?28: Esc during a
+               -- compaction fires no hook, and the status candidate is NULL
+               -- on a pass that did not ask `claude agents`) or the row is
+               -- no longer in a turn; the pane's line then takes its place,
+               -- an absent one included.
+               current_activity=CASE WHEN current_activity = 'compacting'
+                                          AND NOT ?28
+                                          AND COALESCE(excluded.claude_status, claude_status)
+                                              IN ('working', 'blocked')
+                                     THEN current_activity
+                                     WHEN current_activity = 'compacting'
+                                     THEN excluded.current_activity
+                                     ELSE COALESCE(excluded.current_activity, current_activity) END,
                -- The pane footer is a fallback (spec §1.5): it applies only
                -- when no fresh hook/transcript value exists, and a missing
                -- footer never overwrites anything.
@@ -802,7 +819,8 @@ impl Store {
                 crate::service::playbooks::OOM_RECREATE_MIN_SPACING_SECS,
                 pane_working,
                 pr_evidence,
-                crate::service::outcome::PR_CHECKED_REFRESH_SECS
+                crate::service::outcome::PR_CHECKED_REFRESH_SECS,
+                pane_idle
             ],
         )?;
         if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
@@ -1202,6 +1220,7 @@ impl Store {
                         spec.reconciled_at,
                         sess.pane_working,
                         pr_evidence_json.as_deref(),
+                        sess.pane_idle,
                         &mut out,
                     )?;
                     // Redesign 6.4: the PR this pass saw on the session's
@@ -1636,6 +1655,73 @@ mod tests {
         }
     }
 
+    /// Review w08-9: PreCompact's `compacting` outlives a pass that reads
+    /// the pane's last line, and ends on a pass that reads the pane idle.
+    #[test]
+    fn a_compacting_activity_survives_a_pass_until_the_pane_reads_idle() {
+        let (mut store, _bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let pid = store.upsert_project("o", "r", "/base/r").unwrap();
+        let pass = |store: &mut Store, ts: i64, status: &str| {
+            let sessions = vec![ReconcileSession {
+                claude_status: Some(status.to_string()),
+                current_activity: Some("? for shortcuts".into()),
+                ..live_session("s1", pid, ts)
+            }];
+            store
+                .apply_host_reconcile(HostReconcile {
+                    sessions: &sessions,
+                    keep: &["s1".to_string()],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+            store.get_session("s1", "alpha").unwrap().unwrap()
+        };
+        let id = pass(&mut store, 1, "working").id;
+        store.set_current_activity(id, Some("compacting")).unwrap();
+        assert_eq!(
+            pass(&mut store, 2, "working").current_activity.as_deref(),
+            Some("compacting")
+        );
+        assert_eq!(
+            pass(&mut store, 3, "idle").current_activity.as_deref(),
+            Some("? for shortcuts"),
+            "an aborted compaction ends when the pane reads idle"
+        );
+        // Review r5-04-5: a pass that did not ask `claude agents` proposes
+        // no status for an idle pane; the pane's own reading ends it.
+        let quiet = |store: &mut Store, ts: i64, pane_idle: bool| {
+            let sessions = vec![ReconcileSession {
+                claude_status: None,
+                current_activity: None,
+                pane_idle,
+                ..live_session("s1", pid, ts)
+            }];
+            store
+                .apply_host_reconcile(HostReconcile {
+                    sessions: &sessions,
+                    keep: &["s1".to_string()],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+            store.get_session("s1", "alpha").unwrap().unwrap()
+        };
+        pass(&mut store, 4, "working");
+        store.set_current_activity(id, Some("compacting")).unwrap();
+        assert_eq!(
+            quiet(&mut store, 5, false).current_activity.as_deref(),
+            Some("compacting"),
+            "still in its turn, the pane not read idle"
+        );
+        assert_eq!(quiet(&mut store, 6, true).current_activity, None);
+        // And SessionEnd ends it: a process killed mid-compaction.
+        pass(&mut store, 7, "working");
+        store.set_current_activity(id, Some("compacting")).unwrap();
+        let ended = store.record_session_end_hook_for_row(id).unwrap().unwrap();
+        assert_eq!(ended.claude_status.as_deref(), Some("stopped"));
+        assert_eq!(ended.current_activity, None);
+    }
+
     /// Redesign 6.4: reconcile records the PR a session's probe saw in
     /// `pull_requests`, marks it merged when the probe says so, and the row
     /// outlives the session.
@@ -1879,6 +1965,7 @@ mod tests {
                         None,
                         false,
                         None,
+                        false,
                         &mut out,
                     )?;
                     Ok(out)
@@ -1941,6 +2028,7 @@ mod tests {
                         None,
                         false,
                         None,
+                        false,
                         &mut out,
                     )?;
                     Ok(out)
@@ -4034,6 +4122,7 @@ mod tests {
                     None,
                     false,
                     None,
+                    false,
                     &mut out,
                 )?;
                 Ok(out)

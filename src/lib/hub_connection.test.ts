@@ -266,3 +266,20 @@ describe('when the link was lost (step 3.14)', () => {
     expect(screen.queryByTestId('hub-lost-loader')).toBeNull();
   });
 });
+
+describe("the hub's clock (review w15-3)", () => {
+  it('keeps the difference the connected state names, and none standalone', async () => {
+    const { hubClockSkew } = await import('./hub_connection');
+    const { nowTick } = await import('./now_tick');
+    hubConnection.set({ state: 'connected', clock_skew_secs: -360 });
+    expect(get(hubClockSkew)).toBe(-360);
+    const local = Math.floor(Date.now() / 1000);
+    expect(Math.abs(get(nowTick) - (local - 360))).toBeLessThanOrEqual(1);
+    // A reconnect keeps it; a hub that names none clears it.
+    hubConnection.set({ state: 'reconnecting', attempt: 1, retry_in_secs: 1, reason: 'x' });
+    expect(get(hubClockSkew)).toBe(-360);
+    hubConnection.set({ state: 'connected' });
+    expect(get(hubClockSkew)).toBe(0);
+    hubConnection.set({ state: 'standalone' });
+  });
+});

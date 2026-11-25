@@ -8,6 +8,9 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
   hubHasSetting,
+  hubGatedOn,
+  hubGated,
+  hubSettingKeys,
   fleetSettings,
   basePathError,
   hoursToSecs,
@@ -179,5 +182,38 @@ describe('hubHasSetting', () => {
     expect(hubHasSetting(null, 'recovery.auto_restore')).toBe(false);
     expect(hubHasSetting(new Set(['control.auto_continue']), 'recovery.auto_restore')).toBe(false);
     expect(hubHasSetting(new Set(['recovery.auto_restore']), 'recovery.auto_restore')).toBe(true);
+  });
+});
+
+// r4 w03-6: a hub older than a toggle is not a hub with it off.
+describe('hubGatedOn', () => {
+  const off = { 'work.prompt_tune': 'false', 'work.draft_morning_brief': 'false' };
+
+  it('is the value when the hub answered with the key', () => {
+    const keys = new Set(['work.prompt_tune', 'work.draft_morning_brief']);
+    expect(hubGatedOn(off, keys, 'work.prompt_tune')).toBe(false);
+    expect(hubGatedOn({ ...off, 'work.prompt_tune': 'true' }, keys, 'work.prompt_tune')).toBe(true);
+    expect(hubGatedOn(off, null, 'work.prompt_tune')).toBe(false);
+  });
+
+  it('offers a feature whose toggle an older hub does not have', () => {
+    const older = new Set(['work.prompt_tune']);
+    expect(hubGatedOn(off, older, 'work.draft_morning_brief')).toBe(true);
+    expect(hubGatedOn(off, older, 'work.dashboard_summary')).toBe(true);
+    // A toggle as old as its feature stays at its default.
+    expect(hubGatedOn(off, older, 'work.context_help')).toBe(false);
+  });
+
+  // r5-07-1 / r5-07-6: a refused read is not "on"; the defaults stand.
+  it('a refused get_fleet_settings leaves every toggle at its default', async () => {
+    const mock = mockedInvoke as ReturnType<typeof vi.fn>;
+    hubSettingKeys.set(null);
+    fleetSettings.set({ ...SETTING_DEFAULTS });
+    mock.mockRejectedValueOnce({ code: 'E_FORBIDDEN', message: 'not this device' });
+    await loadFleetSettings();
+    expect(get(hubSettingKeys)).toBeNull();
+    for (const key of ['work.context_help', 'work.prompt_tune', 'work.draft_morning_brief'] as const) {
+      expect(get(hubGated)(key)).toBe(false);
+    }
   });
 });

@@ -947,6 +947,60 @@ async fn a_finished_runs_reused_session_id_is_never_closed() {
     assert_eq!(closed, 0, "neither reused row is closed");
 }
 
+/// w02-5: deleting a routine leaves its runs (with no routine) and their
+/// sessions; the idle ones still close, all but the newest few.
+#[tokio::test]
+async fn a_deleted_routines_idle_sessions_still_close() {
+    use super::tick::{RUN_SESSIONS_KEPT, RUN_SESSION_IDLE_SECS};
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    let runs = RUN_SESSIONS_KEPT + 2;
+    for n in 0..runs {
+        let at = OCT8 + n * 600;
+        let run = run_now(&f.deps, &ana, r.id, at).await.unwrap();
+        let sid = run.session_id.unwrap();
+        let s = lock(&f.store).unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE routine_runs SET state = 'done', finished_at = ?1, outcome = 'did_work' \
+                 WHERE id = ?2",
+                rusqlite::params![at + 300, run.id],
+            )
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'idle', idle_since = ?1, \
+                 last_activity_at = ?1 WHERE id = ?2",
+                rusqlite::params![at + 300, sid],
+            )
+            .unwrap();
+    }
+    {
+        let s = lock(&f.store).unwrap();
+        s.conn_ref()
+            .execute("UPDATE hosts SET reachable = 1 WHERE alias = 'mac'", [])
+            .unwrap();
+        assert!(s.delete_routine(r.id).unwrap());
+        let orphaned: i64 = s
+            .conn_ref()
+            .query_row(
+                "SELECT COUNT(*) FROM routine_runs WHERE routine_id IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphaned, runs, "the runs stay, with no routine");
+    }
+    let later = OCT8 + runs * 600 + RUN_SESSION_IDLE_SECS;
+    tick_once(&f.deps, later).await;
+    assert_eq!(
+        f.fake.closed.lock().unwrap().len(),
+        2,
+        "all but the newest {RUN_SESSIONS_KEPT}"
+    );
+}
+
 #[tokio::test]
 async fn a_run_over_its_budget_fails_and_pauses_the_routine() {
     let f = fx();

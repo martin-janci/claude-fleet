@@ -3,6 +3,7 @@ import {
   findMatches,
   turnIndex,
   rowKey,
+  rowIdentities,
   scrollMemory,
   rememberScroll,
   recallScroll,
@@ -39,6 +40,33 @@ const ev = (id: number, label: string, detail: string | null = null): InlineEven
   label,
   detail,
   tone: 'info',
+});
+
+// r4 w10-6: the `{#each}` key names the turn, not its place in the window.
+describe('rowIdentities', () => {
+  const a = turn('a', [], '2026-01-01T00:00:00Z');
+  const b = turn('b', [], '2026-01-01T01:00:00Z');
+  const c = turn('c', [], '2026-01-01T02:00:00Z');
+  const rows = (turns: ConvTurn[]): ThreadRow[] => turns.map((t, index) => ({ kind: 'turn', turn: t, index }));
+
+  it('a turn keeps its key when the window slides or grows', () => {
+    const before = rowIdentities(rows([a, b]));
+    const slid = rowIdentities(rows([b, c]));
+    const grown = rowIdentities(rows([a, b, c]));
+    expect(slid[0]).toBe(before[1]);
+    expect(grown.slice(0, 2)).toEqual(before);
+    // The address the panel looks rows up by is still the position.
+    expect(rows([b, c]).map(rowKey)).toEqual(['t0', 't1']);
+  });
+
+  it('is unique: a shared anchor is numbered, no anchor falls back to the place, events keep their id', () => {
+    const keys = rowIdentities([
+      ...rows([a, { ...a, prompt: 'again' }, turn(null, [])]),
+      { kind: 'event', event: ev(7, 'moved') },
+    ]);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(keys[3]).toBe('e7');
+  });
 });
 
 describe('conversation_nav', () => {

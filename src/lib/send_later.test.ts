@@ -31,6 +31,8 @@ describe('Send later times (G2.7 on G1.8)', () => {
     const p = sendLaterPlan('at', NOW, '2026-10-12T08:30', false, 'en-US');
     expect(p.timing).toEqual({ notBefore: sec(new Date(2026, 9, 12, 8, 30)) });
     expect(p.when).toBe('at Mon 08:30');
+    // r4 w15-6: six days or more ahead, a weekday alone reads as this week's.
+    expect(sendLaterPlan('at', NOW, '2026-10-31T09:00', false, 'en-US').when).toBe('at Sat Oct 31 09:00');
     expect(sendLaterPlan('at', NOW, '2026-10-10T14:00', false).error).toBe('That time has passed. Pick a later one.');
     expect(sendLaterPlan('at', NOW, '', false).error).toBe('Pick a day and a time.');
   });

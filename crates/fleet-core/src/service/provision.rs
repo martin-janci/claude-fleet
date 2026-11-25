@@ -1359,14 +1359,26 @@ pub async fn provision_host_with_token(
         // converges every file on the committed token.
         if minted && landed {
             commit_host_token(store, host, &token, minted)?;
-            return Err(IpcError::new(
-                &e.code,
-                format!(
-                    "{host} was partly provisioned with its new token, which is now the one \
-                     in use; provision {host} again to finish: {}",
-                    e.message
-                ),
-            ));
+            let message = format!(
+                "{host} was partly provisioned with its new token, which is now the one \
+                 in use; provision {host} again to finish: {}",
+                e.message
+            );
+            // The files the run did not reach (hook headers, the login
+            // profiles' MCP entries) still carry the revoked token, so the
+            // host's hooks are refused. The row says so and owes a retry:
+            // the stale pass rewrites them with the committed token, and
+            // Host detail shows why (reviews w01-2 / w03-4). Best effort:
+            // the error below is returned either way.
+            if let Err(err) = lock(store)?.record_host_provision_outcome(host, Some(&message), true)
+            {
+                tracing::warn!(
+                    host,
+                    error = %err,
+                    "[provision] could not mark a partly rotated host as owing a retry"
+                );
+            }
+            return Err(IpcError::new(&e.code, message));
         }
         return Err(e);
     }
@@ -1643,6 +1655,23 @@ pub async fn provision_hosts(
             provision_host_with_token(store, ssh, tunnels, &h.alias, base, scope.rotate).await
         };
         match outcome {
+            // A content-only pass over a host that never had a full run
+            // refreshes its content and leaves it unprovisioned (w13-1).
+            // "provisioned" would read as done ("h re-provisioned") for a
+            // host with no MCP entry (review r4 w03-2): it is `skipped`,
+            // with the reason.
+            Ok(Some(warning))
+                if scope.content_only
+                    && !lock(store)?
+                        .get_host_row(&h.alias)?
+                        .is_some_and(|row| row.provisioned) =>
+            {
+                results.push(HostProvisionResult {
+                    host: h.alias,
+                    status: "skipped".into(),
+                    detail: Some(warning),
+                });
+            }
             Ok(warning) => {
                 // A warning is appended: the host still needs (or not) its
                 // Claude restart, whatever else went wrong.
@@ -5122,6 +5151,18 @@ mod tests {
             .filter_map(Call::stdin_str)
             .any(|u| u.contains(&committed)));
         let first = committed;
+        // Reviews w01-2 / w03-4: the row owes a retry and says why, so the
+        // stale pass rewrites the hooks with the committed token.
+        {
+            let row = store.lock().unwrap().get_host_row("h").unwrap().unwrap();
+            assert!(row.provisioned && row.provision_stale, "{row:?}");
+            assert!(
+                row.provision_warning
+                    .as_deref()
+                    .is_some_and(|w| w.contains("partly provisioned")),
+                "{row:?}"
+            );
+        }
 
         // Rotation that succeeds persists the new token the host received.
         let ok = provisioned_host();
@@ -5718,6 +5759,43 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(plain, "restart Claude on this host to load the MCP server");
+        tunnels.stop_all();
+    }
+
+    /// Review r4 w03-2: a content-only pass over a host with a token and no
+    /// full run leaves it unprovisioned, so the answer must not say
+    /// "provisioned" (the desktop then toasts "re-provisioned").
+    #[tokio::test]
+    async fn content_only_over_a_never_provisioned_host_is_skipped_with_the_reason() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("h", Some("h")).unwrap();
+            s.update_host_probe("h", true, None, None, 1).unwrap();
+            s.upsert_host_token("h", "tok-h-0123456789abcdef").unwrap();
+        }
+        let tunnels = quiet_tunnels();
+        let results = provision_hosts(
+            &store,
+            &fresh_host(),
+            &tunnels,
+            &base(),
+            ProvisionScope {
+                content_only: true,
+                ..ProvisionScope::default()
+            },
+        )
+        .await
+        .unwrap();
+        let r = results.into_iter().find(|r| r.host == "h").unwrap();
+        assert_eq!(r.status, "skipped");
+        assert!(
+            r.detail
+                .as_deref()
+                .is_some_and(|d| d.contains("never had a full provisioning")),
+            "{:?}",
+            r.detail
+        );
         tunnels.stop_all();
     }
 }

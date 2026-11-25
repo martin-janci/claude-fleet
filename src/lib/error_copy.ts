@@ -1,4 +1,5 @@
 import type { IpcError } from './result';
+import { leftOfUsed } from './account_usage';
 
 /**
  * Review round 13 (error states): what a person reads when a backend call
@@ -77,7 +78,7 @@ function accountLimitText(details: unknown): string | undefined {
     | null
     | undefined;
   if (typeof d?.used_pct !== 'number') return undefined;
-  const left = (used: number) => Math.max(0, 100 - Math.round(used));
+  const left = leftOfUsed;
   const line = typeof d.pause_at_pct === 'number' ? ` (fleet pauses a login at ${left(d.pause_at_pct)}% left)` : '';
   const head = `This login has ${left(d.used_pct)}% left${line}.`;
   if (typeof d.suggested_host !== 'string') return `${head} No other login has room right now`;

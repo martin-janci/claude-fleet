@@ -4,6 +4,7 @@
      active missions and today's spend and opens the Automation screen; Pause
      all is `automation.paused`, and Resume clears it. -->
 <script lang="ts">
+  import { hubNowSecs } from './now_tick';
   import { onMount } from 'svelte';
   import AppHeader from './kit/AppHeader.svelte';
   import Icon from './kit/Icon.svelte';
@@ -21,7 +22,7 @@
 
   let { mac }: { mac?: boolean } = $props();
 
-  let nowSec = $state(Math.floor(Date.now() / 1000));
+  let nowSec = $state(hubNowSecs());
   let active = $state<number | null>(null);
   let spend = $state<number | null>(null);
   let pausing = $state(false);
@@ -40,7 +41,7 @@
     void read();
     // Usage readings age out; the pills re-read them on the same cadence as
     // the status bar's mark.
-    const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 30_000);
+    const t = setInterval(() => (nowSec = hubNowSecs()), 30_000);
     return () => {
       gone = true;
       clearTimeout(retry);

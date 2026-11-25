@@ -31,7 +31,7 @@
   import NewBranchSheet from './NewBranchSheet.svelte';
   import { hubStatus, hubBlock } from './hub';
   import { pushError } from './toasts';
-  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
+  import { SETTING_KEYS, hubGated } from './fleet_settings';
 
   // `visible`: false while another fleet's session or Settings covers the
   // panel, so its window chord stands aside (review w17-1).
@@ -399,7 +399,7 @@
     listPx = Math.max(160, Math.min(560, listPx + delta));
   }
   /** Writing help's "Draft commit messages" (G4.6), off by default. */
-  const draftsCommits = $derived(settingBool($fleetSettings, SETTING_KEYS.workDraftCommitMessages));
+  const draftsCommits = $derived($hubGated(SETTING_KEYS.workDraftCommitMessages));
 </script>
 
 <svelte:window onkeydown={onWindowKeydown} />

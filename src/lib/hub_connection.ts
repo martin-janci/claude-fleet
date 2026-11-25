@@ -12,7 +12,10 @@ import { listen } from '@tauri-apps/api/event';
 import { invokeCmd } from './result';
 
 export type HubConnection =
-  | { state: 'standalone' | 'connecting' | 'connected' }
+  | { state: 'standalone' | 'connecting' }
+  // `clock_skew_secs`: the hub's clock minus this machine's, when its
+  // `ready` frame showed a difference worth correcting for (review w15-3).
+  | { state: 'connected'; clock_skew_secs?: number }
   | { state: 'reconnecting' | 'offline'; attempt: number; retry_in_secs: number; reason: string }
   // The hub's `ready` frame named a wire-contract revision this app does not
   // accept (`src-tauri/src/backend/contract.rs`). While in either state the
@@ -24,6 +27,12 @@ export const hubConnection = writable<HubConnection>({ state: 'standalone' });
 
 export const isLost = (c: HubConnection): c is Extract<HubConnection, { state: 'reconnecting' | 'offline' }> =>
   c.state === 'reconnecting' || c.state === 'offline';
+
+/** The hub's clock minus this machine's, in seconds: what to add to a local
+ *  "now" before comparing it with a timestamp the hub wrote (a usage
+ *  reading's age, a countdown's due time). 0 standalone, and until a
+ *  `ready` frame says otherwise; kept across a reconnect. */
+export const hubClockSkew = writable<number>(0);
 
 /** Redesign step 3.14: when this window lost its link to the hub (ms since
  *  the epoch), or null while it holds one. Stamped by the first
@@ -39,6 +48,8 @@ export const SIGNAL_LOST_AFTER_MS = 6000;
 // Follows the store whoever sets it (the bridge's events, the query at
 // mount, a test), so the two can never disagree.
 hubConnection.subscribe((c) => {
+  if (c.state === 'connected') hubClockSkew.set(Number.isFinite(c.clock_skew_secs) ? (c.clock_skew_secs as number) : 0);
+  else if (c.state === 'standalone') hubClockSkew.set(0);
   if (isLost(c)) lostSince.update((t) => t ?? Date.now());
   else if (c.state === 'connected' || c.state === 'standalone') lostSince.set(null);
 });

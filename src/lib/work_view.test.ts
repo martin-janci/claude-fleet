@@ -660,6 +660,14 @@ describe('the Work view org chord and archived tasks', () => {
     }
     expect(seen).toEqual([1, 2, 'none', undefined]);
     expect(get(workViewFilters).status).toBe('open');
+    // Review w12-6: a chip the Filters panel ticked is where the chord
+    // starts, and it never stays beside the single org (the hub ANDs them).
+    workViewFilters.set({ orgs: [1] });
+    cycleWorkOrg();
+    expect(get(workViewFilters)).toEqual({ org: 2 });
+    workViewFilters.set({ orgs: [1, 2] });
+    cycleWorkOrg();
+    expect(get(workViewFilters)).toEqual({ org: 1 });
     workViewFilters.set({});
   });
 

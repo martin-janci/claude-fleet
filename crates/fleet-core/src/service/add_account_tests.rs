@@ -1782,10 +1782,76 @@ async fn a_login_a_live_session_uses_is_not_removed() {
     assert_eq!(profiles_of(&store, "mercury"), vec!["api", "ci", "work"]);
 
     a.profile = "work".into();
-    run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
+    let out = run(&a, &store, ssh.as_ref(), &tmux(&ssh), &http, NOW)
         .await
         .unwrap();
     assert_eq!(profiles_of(&store, "mercury"), vec!["api", "ci"]);
+    // Review w06-4: the ended row lets go of the removed name, so a Resume
+    // or a Restore of it does not recreate the profile empty; the live
+    // row under another profile is untouched.
+    assert_eq!(out["sessions_reset"], serde_json::json!(["old"]));
+    let s = store.lock().unwrap();
+    let rows = s.list_sessions_for_host("mercury").unwrap();
+    let profile_of = |name: &str| {
+        rows.iter()
+            .find(|r| r.tmux_name == name)
+            .unwrap()
+            .claude_profile
+            .clone()
+    };
+    assert_eq!(profile_of("old"), None);
+    assert_eq!(profile_of("build").as_deref(), Some("ci"));
+    // Review r5-01-3: only the name goes; the ended row keeps the account
+    // it ran on.
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.tmux_name == "old")
+            .unwrap()
+            .account_uuid
+            .as_deref(),
+        Some("6f1c-real-login")
+    );
+}
+
+/// Review r5-01-4: a profile the host lists with no account fleet can read
+/// (Bedrock, an `apiKeyHelper`) is still a login a start may name; a name
+/// the host does not list, or one that is signed out, is not.
+#[test]
+fn a_listed_login_with_no_readable_account_still_counts_as_listed() {
+    use crate::service::account_limits::{login_carried_to, login_listed_on};
+    let store = store_with_removable_logins();
+    let s = store.lock().unwrap();
+    let mut rows = s
+        .get_host_row("mercury")
+        .unwrap()
+        .unwrap()
+        .claude_profiles
+        .unwrap();
+    rows.push(crate::store::HostProfileRow {
+        name: "bedrock".into(),
+        account_uuid: None,
+        email: None,
+        credential: None,
+    });
+    s.set_host_profiles("mercury", &rows).unwrap();
+    assert!(login_listed_on(&s, "mercury", "bedrock", NOW).unwrap());
+    assert!(!login_listed_on(&s, "mercury", "nope", NOW).unwrap());
+    assert_eq!(
+        login_carried_to(&s, None, "venus", "mercury", "bedrock", NOW)
+            .unwrap()
+            .as_deref(),
+        Some("bedrock")
+    );
+    s.set_host_signed_out_logins(
+        "mercury",
+        &[crate::store::SignedOutLogin {
+            profile: Some("bedrock".into()),
+            since: NOW,
+            checked_at: NOW,
+        }],
+    )
+    .unwrap();
+    assert!(!login_listed_on(&s, "mercury", "bedrock", NOW).unwrap());
 }
 
 /// w03-4: a routine that names the profile on its host keeps it: its next

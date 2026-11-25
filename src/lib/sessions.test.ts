@@ -579,14 +579,40 @@ describe('queuePrompt (Send later, M15 G1.8)', () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ session_id: 4, delivered: true });
     const r = await queuePrompt(4, 'status?');
     expect(r.ok).toBe(true);
-    expect(sent()).toEqual([['queue_prompt', { session_id: 4, prompt: 'status?' }]]);
+    expect(sent()).toEqual([['queue_prompt', { session_id: 4, prompt: 'status?', client_msg_id: expect.any(String) }]]);
   });
 
   it('carries the time, the limit wait and skip-if-archived when chosen', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ session_id: 4, delivered: false, queued_id: 2 });
     await queuePrompt(4, 'rebase', { notBefore: 1_800_003_600.7, untilLimitReset: true, skipIfArchived: true });
     expect(sent()).toEqual([
-      ['queue_prompt', { session_id: 4, prompt: 'rebase', not_before: 1_800_003_600, until_limit_reset: true, skip_if_archived: true }],
+      [
+        'queue_prompt',
+        {
+          session_id: 4,
+          prompt: 'rebase',
+          not_before: 1_800_003_600,
+          until_limit_reset: true,
+          skip_if_archived: true,
+          client_msg_id: expect.any(String),
+        },
+      ],
     ]);
+  });
+
+  // r4 w01-4 / w09-3: the hub dedupes on `client_msg_id`, so a retry after a
+  // lost answer must carry the id of the first attempt.
+  it('a retry after a failure carries the same client_msg_id; a repeat after success a new one', async () => {
+    const mock = mockedInvoke as ReturnType<typeof vi.fn>;
+    const idOf = (n: number) => (mock.mock.calls[n][1] as { args: { client_msg_id: string } }).args.client_msg_id;
+    mock.mockRejectedValueOnce({ code: 'E_HUB_UNREACHABLE', message: 'cut' });
+    mock.mockResolvedValueOnce({ session_id: 4, delivered: true });
+    mock.mockResolvedValueOnce({ session_id: 4, delivered: true });
+    const base = mock.mock.calls.length;
+    expect((await queuePrompt(4, 'ship it')).ok).toBe(false);
+    expect((await queuePrompt(4, 'ship it')).ok).toBe(true);
+    expect((await queuePrompt(4, 'ship it')).ok).toBe(true);
+    expect(idOf(base)).toBe(idOf(base + 1));
+    expect(idOf(base + 2)).not.toBe(idOf(base));
   });
 });

@@ -2,12 +2,27 @@
 // reads it: a view that derives from `now` (a usage reading's reset, its
 // age) reads this store so it re-derives on time, not only when an event
 // happens to arrive. One interval for every subscriber.
-import { readable } from 'svelte/store';
+//
+// Paired with a hub, the timestamps a view compares against are the hub's,
+// so the clock is too: this machine's plus the difference the hub's `ready`
+// frame showed (`hubClockSkew`, review w15-3). A desktop six minutes ahead
+// otherwise read every usage figure as stale for good.
+import { derived, get, readable } from 'svelte/store';
+import { hubClockSkew } from './hub_connection';
 
 export const NOW_TICK_MS = 30_000;
 
-export const nowTick = readable(Math.floor(Date.now() / 1000), (set) => {
+/** "Now" on the hub's clock, unix seconds: what a view passes where it
+ *  compares against a timestamp the hub wrote (review r5-06-1: `nowTick`
+ *  carried the hub's time, and every reader went back to `Date.now()`). */
+export function hubNowSecs(): number {
+  return Math.floor(Date.now() / 1000) + get(hubClockSkew);
+}
+
+const localTick = readable(Math.floor(Date.now() / 1000), (set) => {
   set(Math.floor(Date.now() / 1000));
   const t = setInterval(() => set(Math.floor(Date.now() / 1000)), NOW_TICK_MS);
   return () => clearInterval(t);
 });
+
+export const nowTick = derived([localTick, hubClockSkew], ([$now, $skew]) => $now + $skew);

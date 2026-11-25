@@ -55,7 +55,7 @@
   import PromptTune from '../PromptTune.svelte';
   import { tuneRoutinePrompt } from '../prompt_tune';
   import { helpModel } from '../context_help';
-  import { fleetSettings, settingBool, SETTING_KEYS } from '../fleet_settings';
+  import { fleetSettings, SETTING_KEYS, hubGated } from '../fleet_settings';
 
   let {
     draft = $bindable(),
@@ -110,7 +110,7 @@
   const seenOffered = $derived(draft.track_seen !== undefined || (isNew && seenServed === true));
   // The prompt tuner (`prompt_tune.ts`): a model rewrites the prompt on the
   // routine's host and profile, saved or not; "Use this" writes draft.prompt.
-  const tuneOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workPromptTune));
+  const tuneOn = $derived($hubGated(SETTING_KEYS.workPromptTune));
   let tuneOpen = $state(false);
   let promptBox: HTMLTextAreaElement | undefined = $state();
   // One editor serves every draft RoutinesPanel opens (a template picked

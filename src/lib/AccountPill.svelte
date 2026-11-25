@@ -7,11 +7,11 @@
   import { accountByUuid } from './accounts';
   import { accountUsage } from './account_usage_store';
   import { accountPill, openAccount } from './account_pill';
-  import { nowTick } from './now_tick';
+  import { hubNowSecs, nowTick } from './now_tick';
 
   let {
     uuid,
-    clock = () => Math.floor(Date.now() / 1000),
+    clock = hubNowSecs,
     testid = 'account-pill',
     onopen,
   }: {

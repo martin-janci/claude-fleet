@@ -999,7 +999,7 @@ Parameters (* required): `kinds`, `limit`, `query`*
 
 ### `send_file`
 
-Send a file from a session's host to the user's phone and desktop (copied in the background, ≤ downloads.max_file_mb; zip a folder first). Your session_id: whoami. path: absolute or relative to the session's worktree root. E_NOTFOUND, E_LIMIT.
+Send a file from a session's host to the user's phone and desktop (copied in the background, ≤ downloads.max_file_mb; zip a folder first). Your session_id: whoami. path: absolute, ~/… (the host account's home) or relative to the session's worktree root. E_NOTFOUND, E_LIMIT.
 
 Access: the master, a paired device or a per-host token · deadline 60 s.
 

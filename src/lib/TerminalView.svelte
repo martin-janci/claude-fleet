@@ -370,6 +370,9 @@
   // followed by Enter.
   let helpOpen = $state(false);
   /** Writing help's "Context help" toggle, off by default. */
+  // The value itself, never `$hubGated` (review r5-07-1): this Help runs
+  // `context_help` on this device, with no hub tool in its path to refuse
+  // it when the toggle is off, so "not known" must stay "off" here.
   const helpOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workContextHelp));
   $effect(() => {
     void activeShell;

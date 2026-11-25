@@ -31,7 +31,7 @@
     compact?: boolean;
   } = $props();
 
-  const fresh = $derived(win ? freshness(window, fetchedAt, win.resets_at, now) : 'expired');
+  const fresh = $derived(win ? freshness(window, fetchedAt, win.resets_at, now, win.utilization) : 'expired');
   const known = $derived(win !== null && fresh !== 'expired');
   const left = $derived(win && known ? leftPct(win) : null);
   const used = $derived(left === null ? null : 100 - left);

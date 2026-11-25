@@ -895,6 +895,47 @@ fn when_a_rollback_restores_the_database() {
     ));
 }
 
+/// Review w14-3: a restore whose copy fails leaves the database where it
+/// was, with nothing moved aside and no partial copy.
+#[test]
+fn a_restore_that_cannot_copy_leaves_the_database_in_place() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("state.db"), "141").unwrap();
+    std::fs::write(d.path().join("state.db-wal"), "wal").unwrap();
+    let missing = d.path().join("backups/pre-0.5.4-1.db");
+    assert!(restore_db(d.path(), &missing, "0.5.4").is_err());
+    assert_eq!(
+        std::fs::read_to_string(d.path().join("state.db")).unwrap(),
+        "141"
+    );
+    assert!(d.path().join("state.db-wal").exists());
+    assert!(!d.path().join("state.db.restore").exists());
+    assert!(!std::fs::read_dir(d.path())
+        .unwrap()
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().starts_with("failed-")));
+}
+
+/// Review r5-05-3: a restore that fails AFTER its copy (here the aside
+/// directory cannot be created: its name is too long for a file name)
+/// leaves the database in place and removes its full-size copy.
+#[test]
+fn a_restore_that_fails_after_its_copy_removes_the_copy() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("state.db"), "141").unwrap();
+    std::fs::write(d.path().join("state.db-wal"), "wal").unwrap();
+    std::fs::create_dir(d.path().join("backups")).unwrap();
+    let b = d.path().join("backups/pre-0.5.4-1.db");
+    std::fs::write(&b, "140").unwrap();
+    assert!(restore_db(d.path(), &b, &"9".repeat(300)).is_err());
+    assert_eq!(
+        std::fs::read_to_string(d.path().join("state.db")).unwrap(),
+        "141"
+    );
+    assert!(d.path().join("state.db-wal").exists());
+    assert!(!d.path().join("state.db.restore").exists());
+}
+
 #[test]
 fn restore_moves_the_database_aside_and_copies_the_backup_in() {
     let d = tempfile::tempdir().unwrap();

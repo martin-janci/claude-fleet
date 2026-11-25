@@ -39,6 +39,7 @@
   import { startTour } from './tour';
   import { collectDiagnostics, copyDiagnostics, openLogFolder } from './diagnostics';
   import { pushError } from './toasts';
+  import { SettingDrafts, announceUnsaved } from './pages/drafts.svelte';
   import WizardDialog from './forms/WizardDialog.svelte';
   import { WIZARDS } from './forms/wizards';
   import type { Values } from './forms/forms';
@@ -56,6 +57,7 @@
     fleetSettings,
     loadFleetSettings,
     setFleetSetting,
+    type SettingKey,
     SETTING_KEYS,
     PROJECTS_LOCAL_ENV_KEY,
     settingPathMap,
@@ -245,7 +247,12 @@
   onDestroy(() => {
     destroyed = true;
     unlistenSettings?.();
+    // Closed with typed values still on the Save bar: say so, with Save.
+    announceUnsaved(drafts, (key, value) => setFleetSetting(key as SettingKey, value));
   });
+  // One draft for the whole dialog: a typed value stays staged, and the
+  // Save bar stays up, when the person picks another section (r4 w13-2).
+  const drafts = new SettingDrafts();
 
   // Opened at a section (a "Reconnect Jira (acme)" Attention item, work
   // graph M12.4): a leaf id, a page id or one of the old General panels'
@@ -1164,6 +1171,7 @@
         {/if}
         {#key view}
           <PageView
+            {drafts}
             readonly={!ownsFleet && !$settingsWritable}
             remote={!ownsFleet}
             page={currentPage}

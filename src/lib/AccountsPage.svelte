@@ -9,6 +9,7 @@
   // (`account_spend`, the `usage_daily_account` roll-up of step 4.2; local
   // only, so a paired desktop shows no $), and how many sessions its limit
   // paused, with Show and a one-click Switch to the account with headroom.
+  import { hubNowSecs } from './now_tick';
   import { accounts, accountsLoad, loadAccounts } from './accounts';
   import ListGate from './states/ListGate.svelte';
   import { hosts } from './hosts';
@@ -76,7 +77,7 @@
   import { get } from 'svelte/store';
 
   let {
-    clock = () => Math.floor(Date.now() / 1000),
+    clock = hubNowSecs,
     locale,
     timeZone,
   }: {
@@ -360,7 +361,7 @@
     }
     // As `compactWindow`: a number past its reset or freshness limit is
     // withheld, never shown as `0% left` with a LIMIT badge.
-    if (freshness(kind, a.usage?.fetched_at ?? null, w.resets_at, now) === 'expired') {
+    if (freshness(kind, a.usage?.fetched_at ?? null, w.resets_at, now, w.utilization) === 'expired') {
       return { kind, title, left: null, level: 'none', badge: null, reset: '', resetShort: '', unknown: true };
     }
     const left = leftPct(w);
@@ -622,7 +623,7 @@
             {/each}
           {/if}
           {#if spend && (spend.get(a.uuid) ?? 0) > 0}
-            <div class="sub" data-testid="account-spend">{spendText(a.uuid)} today</div>
+            <div class="sub" data-testid="account-spend">{spendText(a.uuid)} today (UTC)</div>
           {/if}
 
           {#each ['5h', 'weekly'] as const as kind (kind)}

@@ -11,6 +11,12 @@ import type { SessionRow } from './sessions';
  *  stopped panes are ordinary rows, not a mass loss. */
 export const MASS_LOSS_MIN = 3;
 
+/** A lost row as every hub writes it: `status='ghost'` with `lost_at` set
+ *  (no hub writes a status of `lost`; review w12-1). */
+export function isLostRow(s: Pick<SessionRow, 'status' | 'lost_at'>): boolean {
+  return s.status === 'ghost' || s.lost_at != null;
+}
+
 /** A row `restore_host_sessions` can bring back: marked lost by the backend,
  *  with a Claude conversation to resume, and a fleet-managed tmux pane to
  *  restore into (`bg` and `external` rows have none). HostDetail's "Restore

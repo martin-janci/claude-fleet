@@ -34,7 +34,7 @@
         "level": "none"
       },
       "default": "20",
-      "help": "Seconds between background reconcile passes, which refresh session state on every host.",
+      "help": "Seconds between background reconcile passes, which refresh session state on every host. Everything fleet does by itself runs after a pass: recovery, stuck-session fixes, queued prompts, cleanup, usage and budgets, autofix, account switching, agents. 0 stops all of that too.",
       "key": "reconcile.interval_secs",
       "kind": {
         "max": 315360000,

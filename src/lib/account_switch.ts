@@ -5,6 +5,7 @@
 // (`auto_switch_account`, the Accounts page's toggle). Each attempt lands on
 // the session's timeline as `account_switched` / `account_switch_failed`;
 // this module reads those for the toast and the conversation thread.
+import { leftOfUsed } from './account_usage';
 import { get, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import type { SessionEvent } from './timeline';
@@ -123,7 +124,7 @@ export function switchLines(
       sub: `Switching to ${to} failed${d.error ? ` (${d.error})` : ''}; it stays paused`,
     };
   }
-  const used = d.used_pct == null ? '' : ` · ${Math.max(0, 100 - Math.round(d.used_pct))}% left`;
+  const used = d.used_pct == null ? '' : ` · ${leftOfUsed(d.used_pct)}% left`;
   const carry = d.continued ? ' · told to continue' : '';
   return { message: `${name} resumed under ${to}`, sub: `${from} ran out${used}${carry}` };
 }

@@ -22,7 +22,7 @@
     waitOut,
     type HostLogin,
   } from './account_limits';
-  import { nowTick } from './now_tick';
+  import { hubNowSecs, nowTick } from './now_tick';
   import { accountUsage } from './account_usage_store';
   import { get } from 'svelte/store';
   import { autoSwitchState, loadAutoSwitch, switchesAutomatically } from './account_switch';
@@ -82,7 +82,7 @@
     const w = $waitingOut.get(sess.id);
     if (w == null) return undefined;
     void $nowTick;
-    const now = Math.floor(Date.now() / 1000);
+    const now = hubNowSecs();
     return w > now || (resetsAt != null && w >= resetsAt) ? w : undefined;
   });
 
@@ -111,7 +111,7 @@
       return;
     }
     const next = r.value.headroom
-      ? nextReset(r.value.headroom, get(accountUsage), Math.floor(Date.now() / 1000))
+      ? nextReset(r.value.headroom, get(accountUsage), hubNowSecs(), sess.launch_model)
       : null;
     push({
       kind: 'info',

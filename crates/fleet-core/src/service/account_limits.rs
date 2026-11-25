@@ -747,6 +747,89 @@ pub fn login_with_headroom_on(
     .map_or_else(|| profile.map(str::to_string), |l| l.profile))
 }
 
+/// The login on `host` that stands for the login `profile`, which a rule or
+/// a grant named for the host `named_for`, when the start lands on `host`
+/// instead (a fallback host, the caller's host, the host of earlier work;
+/// review w06-2 / w06-3). The login there on the same account, the same name
+/// first; with the account not known at `named_for`, the same name when it
+/// is signed in to a known account on `host`; else the login nobody named
+/// would take ([`login_with_headroom_for`] from the host's own). Never a
+/// name `host` does not list: `PROFILE_LINKS` would create it empty and the
+/// session would wait at `/login`. Kept as named on the host it was named
+/// for, and on a host whose logins fleet has not read yet.
+pub fn login_carried_to(
+    s: &Store,
+    project_id: Option<i64>,
+    named_for: &str,
+    host: &str,
+    profile: &str,
+    now: i64,
+) -> Result<Option<String>, IpcError> {
+    let keep = || Ok(Some(profile.to_string()));
+    if named_for == host {
+        return keep();
+    }
+    let Some(row) = s.get_host_row(host)? else {
+        return keep();
+    };
+    if row.claude_profiles.is_none() && row.account_uuid.is_none() {
+        return keep();
+    }
+    let there: Vec<HostLogin> = login_accounts(s, host, now)?
+        .into_iter()
+        .map(|l| l.login)
+        .filter(|l| !l.signed_out)
+        .collect();
+    let same_name = |l: &&HostLogin| l.profile.as_deref() == Some(profile);
+    match login_account(s, named_for, Some(profile), now)?.map(|a| a.login.account_uuid) {
+        Some(account) => {
+            let mut on = there.iter().filter(|l| l.account_uuid == account);
+            let first = on.clone().find(same_name).or_else(|| on.next());
+            if let Some(l) = first {
+                return Ok(l.profile.clone());
+            }
+        }
+        // No account to map by: the same name is kept where the host
+        // lists it, account read or not (review r5-01-4).
+        None => {
+            if login_listed_on(s, host, profile, now)? {
+                return keep();
+            }
+        }
+    }
+    login_with_headroom_for(s, project_id, host, None, now)
+}
+
+/// Whether a start may name the login `profile` on `host`: the host lists
+/// the profile and it is not signed out. A listed profile with no account
+/// fleet can read (Bedrock, Vertex, an `apiKeyHelper`) cannot be judged
+/// and counts as listed (review r5-01-4). `true` as well for a host fleet
+/// has not read the logins of (or does not know).
+pub fn login_listed_on(s: &Store, host: &str, profile: &str, now: i64) -> Result<bool, IpcError> {
+    let Some(row) = s.get_host_row(host)? else {
+        return Ok(true);
+    };
+    if row.claude_profiles.is_none() && row.account_uuid.is_none() {
+        return Ok(true);
+    }
+    let profile = profile.trim();
+    if !row
+        .claude_profiles
+        .iter()
+        .flatten()
+        .any(|p| p.name == profile)
+    {
+        return Ok(false);
+    }
+    Ok(match login_account(s, host, Some(profile), now)? {
+        Some(l) => !l.login.signed_out,
+        None => !row
+            .signed_out_logins
+            .iter()
+            .any(|n| n.profile.as_deref() == Some(profile)),
+    })
+}
+
 /// Step 4.4 on a start that did not come through the desktop's own dialog
 /// (an MCP or hub `new_session`): refuse a login at or past
 /// `accounts.pause_at` with `E_ACCOUNT_LIMIT`, naming its account and the
@@ -889,11 +972,23 @@ pub fn refuse_over_limit_on(
 /// "when the limit resets" (M15 step G1.8) holds a prompt only while the
 /// limit is known to be hit.
 pub fn account_over_line(s: &Store, account_uuid: &str, now: i64) -> Result<bool, IpcError> {
+    account_over_line_on(s, account_uuid, now, None)
+}
+
+/// [`account_over_line`] for a session launched on `launch_model`: that
+/// model's own weekly window counts as well, as it does where the row is
+/// paused (`Facts::limit_for`).
+pub fn account_over_line_on(
+    s: &Store,
+    account_uuid: &str,
+    now: i64,
+    launch_model: Option<&str>,
+) -> Result<bool, IpcError> {
     let used = s
         .latest_usage_snapshots()?
         .into_iter()
         .find(|r| r.account_uuid == account_uuid)
-        .and_then(|r| used_pct_of(&r.usage, Some(r.fetched_at), now));
+        .and_then(|r| used_pct_on(&r.usage, Some(r.fetched_at), now, launch_model));
     Ok(used.is_some_and(|u| u >= pause_at_pct(s)))
 }
 

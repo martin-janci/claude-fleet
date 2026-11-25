@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { hubNowSecs } from './now_tick';
   import Icon from './kit/Icon.svelte';
   import { viewKey } from './shortcuts';
   // The Hosts view: a master–detail screen for every host, grouped by Claude
@@ -60,7 +61,7 @@
     onFilterSidebar,
     onNewSession,
     onSelectionChange,
-    clock = () => Math.floor(Date.now() / 1000),
+    clock = hubNowSecs,
     locale,
     timeZone,
   }: {

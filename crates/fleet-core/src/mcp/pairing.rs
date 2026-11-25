@@ -704,6 +704,38 @@ pub async fn handle_pair(
             // laptop" the same command. A `peer` link and an `updater`
             // token are nobody's device; `pair_client` refuses `person` for
             // both.
+            // A fleet admin's code is checked against the person again at
+            // REDEEM (review w01-1): between the mint and now the person can
+            // have gained a device, a login, an org or sessions, and the
+            // device would then BE them. An org admin's code
+            // (`fenced_org`) has its own rule below; the operator's and the
+            // owner's name anybody.
+            // The rule is about the MINTER: every code a person other than
+            // the owner minted is judged again, whatever role they hold NOW
+            // (a fleet admin demoted since the mint must not keep a code
+            // that still binds, review r5-01-5). The rule itself lets a
+            // person pairing their own device through.
+            let judged = match (req.minted_by_person, req.fenced_org) {
+                (Some(minter), None) if s.personal_owner_id()? != Some(minter) => Some(minter),
+                _ => None,
+            };
+            if let Some(minter) = judged {
+                let named = match req.person_id {
+                    Some(id) => s.get_person(id)?.map(|p| p.name),
+                    None => req.person.clone(),
+                };
+                if let Some(named) = named.filter(|_| req.person.is_some()) {
+                    crate::service::org_admin::require_may_hand_a_device_to(
+                        s,
+                        crate::service::org_admin::Me {
+                            device: None,
+                            person: Some(minter),
+                            authority: crate::service::org_admin::Authority::Fleet,
+                        },
+                        &named,
+                    )?;
+                }
+            }
             let row = match (req.person.as_deref(), req.person_id) {
                 // A code minted for a live person binds to that row, and
                 // never to a new person of the same name: one disabled

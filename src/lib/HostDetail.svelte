@@ -50,7 +50,7 @@
   import type { HostTidyHint } from './hosts_table';
   import EmbedSlot from './pages/EmbedSlot.svelte';
   import { inventory } from './assets';
-  import { provisionHost } from './mcp';
+  import { provisionHost, provisionWarning } from './mcp';
   import { CHECK_GLYPH, checklistLoaderText, checklistRows, hostChecks, needsReprovision, runHostCheck } from './host_check';
   import Loader from './Loader.svelte';
   import AgentInstallAction from './AgentInstallAction.svelte';
@@ -192,7 +192,11 @@
       });
       return;
     }
-    push({ kind: 'success', message: `${host.alias} re-provisioned` });
+    // The detail past the stock sentence is a warning the run left (the ag
+    // launcher, WSL, a step to retry): shown, not dropped (review r4 w03-2).
+    const warning = provisionWarning(mine.detail);
+    if (warning) push({ kind: 'warning', message: `${host.alias} re-provisioned, with a warning`, sub: warning });
+    else push({ kind: 'success', message: `${host.alias} re-provisioned`, sub: mine.detail ?? undefined });
     if (checkBlocked === null) void runChecks();
   }
 

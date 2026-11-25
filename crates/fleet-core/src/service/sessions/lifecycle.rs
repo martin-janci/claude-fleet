@@ -165,12 +165,16 @@ pub(super) fn reject_foreign_worktree(
 /// user can diagnose (missing SSH key, private-repo auth, etc.) — except a
 /// worktree whose branch was never pushed, which gets an actionable
 /// `E_GIT_SETUP` ("push it first") instead of git's `invalid reference`.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn ensure_remote_project(
     ssh: &dyn SshExec,
     host: &str,
     owner: &str,
     repo: &str,
     project_root: &str,
+    // The repository a checkout already at `project_root` must be
+    // (`paths::fetch_repo_identity`); `None`: it is not judged.
+    identity: Option<&str>,
     worktree: Option<&RemoteWorktree<'_>>,
     token: CancellationToken,
 ) -> Result<(), IpcError> {
@@ -188,7 +192,7 @@ pub(super) async fn ensure_remote_project(
         crate::validate::remote_abs_path("worktree path", wt.path)?;
     }
     let clone_url = format!("git@github.com:{owner}/{repo}.git");
-    let script = ensure_remote_project_script(project_root, &clone_url, worktree);
+    let script = ensure_remote_project_script_as(project_root, &clone_url, identity, worktree);
     // Wrap in bash -lc so $PATH (git on Homebrew/Linuxbrew) is sourced. Use
     // the same single-quote-the-whole-script trick as RemoteTmux::remote_bash
     // to avoid the ssh argv-joining bug.
@@ -242,9 +246,22 @@ pub(super) fn mirrored_branch<'a>(worktree: Option<&RemoteWorktree<'a>>) -> Opti
 ///
 /// Both steps are guarded so a re-run on an already-set-up host is a no-op.
 /// Pure, so tests pin its shape without a host.
+#[cfg(test)]
 pub(super) fn ensure_remote_project_script(
     project_root: &str,
     clone_url: &str,
+    worktree: Option<&RemoteWorktree<'_>>,
+) -> String {
+    ensure_remote_project_script_as(project_root, clone_url, Some(clone_url), worktree)
+}
+
+/// [`ensure_remote_project_script`] with the repository an existing
+/// checkout must be given apart from the clone URL (`identity`, see
+/// [`same_repo_check`]; `None`: no check).
+pub(super) fn ensure_remote_project_script_as(
+    project_root: &str,
+    clone_url: &str,
+    identity: Option<&str>,
     worktree: Option<&RemoteWorktree<'_>>,
 ) -> String {
     let root = quote(project_root);
@@ -258,7 +275,7 @@ pub(super) fn ensure_remote_project_script(
            git clone {url} \"$tmp\" && {{ [ ! -e {root} ] || rmdir {root}; }} && mv \"$tmp\" {root} || {{ rm -rf \"$tmp\"; exit 1; }}; \
          {same_repo}fi\n",
         url = quote(clone_url),
-        same_repo = same_repo_check(project_root, clone_url),
+        same_repo = identity.map_or_else(String::new, |i| same_repo_check(project_root, i)),
     );
     if let Some(wt) = worktree {
         if let Some(branch) = mirrored_branch(worktree) {
@@ -290,14 +307,17 @@ pub(super) fn ensure_remote_project_script(
 /// must be THIS repository. Under the flat layout a fork and its upstream
 /// (`me/app`, `org/app`) share `<root>/app`, and a start of one would
 /// otherwise run in the other's clone. Its `origin` is compared with the
-/// GitHub `owner/repo` the clone URL names (case-insensitively, any URL
-/// form); a checkout with no `origin`, or a clone URL that is not a GitHub
-/// one, is not judged. Empty when there is nothing to compare.
-fn same_repo_check(project_root: &str, clone_url: &str) -> String {
-    let Some(want) = clone_url
-        .strip_prefix("git@github.com:")
-        .map(|r| r.trim_end_matches(".git").to_ascii_lowercase())
-        .filter(|r| r.split('/').count() == 2)
+/// GitHub `owner/repo` that `identity` names (case-insensitively, any URL
+/// form); a checkout with no `origin`, or an identity that is not a GitHub
+/// URL, is not judged. Empty when there is nothing to compare.
+///
+/// `identity` is the project's `github_origin`, not a URL built from its
+/// `owner`/`repo` (review w02-4): those are a name (an adopted non-GitHub
+/// checkout is `local/<dir>`, a second clone `acme/app-v2` of `acme/app`),
+/// and comparing against them refused checkouts that were the right one.
+fn same_repo_check(project_root: &str, identity: &str) -> String {
+    let Some(want) = crate::repo_url::parse_repo_url(identity)
+        .map(|(owner, repo)| format!("{owner}/{repo}").to_ascii_lowercase())
     else {
         return String::new();
     };
@@ -383,9 +403,13 @@ pub(super) fn worktree_add_script(root: &str, name: &str, base: Option<&str>) ->
          {WORKTREE_BASE_SNIPPET}\
          wt=\"$base/$dir\"\n\
          if [ ! -e \"$wt\" ]; then\n\
+         {BOUNDED_FETCH_SNIPPET}\
          def=\"$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')\"\n\
          [ -z \"$def\" ] && def=\"$(git rev-parse --abbrev-ref HEAD 2>/dev/null)\"\n\
+         [ -n \"$basebr\" ] && fleet_fetch \"$basebr\"\n\
          if [ -n \"$basebr\" ] && git show-ref --verify --quiet \"refs/heads/$basebr\"; then start=\"$basebr\"\n\
+         if [ \"$basebr\" != \"$name\" ] && git show-ref --verify --quiet \"refs/remotes/origin/$basebr\" \
+         && git merge-base --is-ancestor \"$basebr\" \"origin/$basebr\" 2>/dev/null; then start=\"origin/$basebr\"; fi\n\
          elif [ -n \"$basebr\" ] && git show-ref --verify --quiet \"refs/remotes/origin/$basebr\"; then start=\"origin/$basebr\"\n\
          else start=\"$def\"\n\
          {FRESH_DEFAULT_SNIPPET}\
@@ -394,7 +418,8 @@ pub(super) fn worktree_add_script(root: &str, name: &str, base: Option<&str>) ->
          git worktree add \"$wt\" \"$name\" 1>&2\n\
          else\n\
          git worktree add \"$wt\" -b \"$name\" \"$start\" 1>&2\n\
-         [ \"$start\" = \"origin/$def\" ] && git -C \"$wt\" branch --unset-upstream >/dev/null 2>&1 || true\n\
+         if [ \"${{start#origin/}}\" != \"$start\" ] && [ \"$start\" != \"origin/$name\" ]; then \
+         git -C \"$wt\" branch --unset-upstream >/dev/null 2>&1 || true; fi\n\
          fi\n\
          echo {WORKTREE_CREATED_MARK}\n\
          fi\n\
@@ -405,16 +430,43 @@ pub(super) fn worktree_add_script(root: &str, name: &str, base: Option<&str>) ->
     )
 }
 
-/// The default-branch arm of [`worktree_add_script`] (w10-7): the host's
-/// local default branch is often the commit it was cloned at (nobody works
-/// in a remote base checkout, and `ensure_remote_project` never pulls), so
-/// a best-effort, bounded fetch runs first (no prompt; skipped where there
-/// is no `timeout`, offline it simply fails), and the new branch starts from
-/// `origin/<default>` when the local one is behind it or equal. A local
-/// default with commits of its own is kept. The branch tracks nothing: its
-/// upstream is unset after the add, so a push never aims at the default.
-const FRESH_DEFAULT_SNIPPET: &str = "if [ -n \"$def\" ] && command -v timeout >/dev/null 2>&1; then \
-     GIT_TERMINAL_PROMPT=0 timeout 20 git fetch -q origin \"$def\" >/dev/null 2>&1 || true; fi\n\
+/// `fleet_fetch <branch>` for [`worktree_add_script`]: a best-effort fetch
+/// of one branch from `origin`, with no prompt and bounded to 20 s by
+/// `timeout`, or by perl's `alarm` where there is none (macOS ships no
+/// `timeout`, so a Mac host never fetched: review w02-3). Offline it simply
+/// fails; after one fetch failed or ran out of time the next is skipped, so
+/// two fetches never eat the start's own time limit. ssh runs in batch mode
+/// with a connect timeout: a key that needs a passphrase fails at once
+/// instead of waiting on a prompt nobody sees (review r5-02-5). The branch
+/// is fetched as `refs/heads/<branch>`, which git can read neither as an
+/// option nor as a two-sided refspec (review r5-02-1).
+const BOUNDED_FETCH_SNIPPET: &str = "fleet_fetch() {\n\
+     [ -z \"$fleet_fetch_slow\" ] || return 0\n\
+     fleet_rc=0\n\
+     fleet_ssh=\"${GIT_SSH_COMMAND:-ssh} -o BatchMode=yes -o ConnectTimeout=10\"\n\
+     if command -v timeout >/dev/null 2>&1; then \
+     GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND=\"$fleet_ssh\" timeout 20 git fetch -q origin \"refs/heads/$1\" >/dev/null 2>&1 || fleet_rc=$?\n\
+     elif command -v perl >/dev/null 2>&1; then \
+     GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND=\"$fleet_ssh\" perl -e 'alarm 20; exec @ARGV' git fetch -q origin \"refs/heads/$1\" >/dev/null 2>&1 || fleet_rc=$?\n\
+     fi\n\
+     [ \"$fleet_rc\" = 0 ] || fleet_fetch_slow=1\n\
+     return 0\n\
+     }\n";
+
+/// The start point of [`worktree_add_script`] is fetched first (w10-7,
+/// w02-3, w17-1): the host's local branches are often the commit they were
+/// cloned at (nobody works in a remote base checkout, and
+/// `ensure_remote_project` never pulls), and a branch pushed from another
+/// machine today is not in yesterday's clone at all. A named base is
+/// fetched before it is looked for, so one that only origin has is found
+/// there instead of the start silently cutting a new branch off the
+/// default; a local base (other than the worktree's own branch, which is
+/// checked out as it is) gives way to `origin/<base>` when it is behind it
+/// or equal. This is the default-branch arm: the same for `origin/<default>`.
+/// A local branch with commits of its own is kept. The new branch tracks
+/// nothing unless it is origin's branch of the same name: its upstream is
+/// unset after the add, so a push never aims at the base.
+const FRESH_DEFAULT_SNIPPET: &str = "[ -n \"$def\" ] && fleet_fetch \"$def\"\n\
      if [ -n \"$def\" ] && git show-ref --verify --quiet \"refs/remotes/origin/$def\" \
      && git merge-base --is-ancestor \"$def\" \"origin/$def\" 2>/dev/null; then start=\"origin/$def\"; fi\n";
 
@@ -637,6 +689,13 @@ pub async fn new_session(
 
     if let Some(name) = args.new_worktree.as_deref() {
         validate_new_worktree_name(name)?;
+        // The base reaches `git fetch` and `git worktree add` as an
+        // argument (review r5-02-1).
+        if let Some(base) = args.base_branch.as_deref().map(str::trim) {
+            if !base.is_empty() {
+                crate::validate::branch_name(base)?;
+            }
+        }
     }
     // Two starts creating the same worktree at once would both run `git
     // worktree add` into one directory and share whatever it became.
@@ -1075,6 +1134,10 @@ pub(crate) fn fill_session_name(s: &Store, args: &NewSessionArgs) -> Result<Stri
     fill_session_name_avoiding(s, args, &|_| false)
 }
 
+/// Bytes kept free for the `--<adjective>-<noun>` an auto-picked name gains
+/// when the plain one is taken.
+const AUTO_NAME_PAIR_ROOM: usize = 48;
+
 /// The name `fill_session_name` mints, also passing over one `in_flight`
 /// says another start is creating (it has no row yet).
 pub(crate) fn fill_session_name_avoiding(
@@ -1103,11 +1166,24 @@ pub(crate) fn fill_session_name_avoiding(
     } else {
         None
     };
+    // A name nobody typed must fit the limit by itself: the worktree part
+    // gives way, cut at a char boundary, with room left for a `--<pair>`
+    // (review r5-02-4).
+    let wt = wt.map(|w| {
+        let room = crate::validate::TMUX_NAME_MAX
+            .saturating_sub(base.len() + term.len() + 2 + AUTO_NAME_PAIR_ROOM)
+            .max(1);
+        let mut end = w.len().min(room);
+        while !w.is_char_boundary(end) {
+            end -= 1;
+        }
+        w[..end].to_string()
+    });
     // `derive_tmux_name` (`discover.rs`) mints the same `dev-<owner>-<repo>`
     // / `dev-<owner>-<repo>--<worktree>` shape from a worktree key, "main"
     // meaning the repo root — the same convention `wt: None` encodes here.
-    // `tmux_safe` is idempotent (it only ever removes `.`/`:`), so applying
-    // it again after appending `term` is safe.
+    // `tmux_safe` is idempotent, so applying it again after appending
+    // `term` is safe.
     let worktree_key = wt.as_deref().unwrap_or("main");
     let deterministic = tmux_safe(&format!(
         "{}{term}",
@@ -1209,9 +1285,10 @@ pub(crate) async fn project_checkout_on(
         let s = lock(store)?;
         return fetch_base_path(&s, project_id);
     }
-    let (owner, repo) = {
+    let (owner, repo, identity) = {
         let s = lock(store)?;
-        fetch_owner_repo(&s, project_id)?
+        let (owner, repo) = fetch_owner_repo(&s, project_id)?;
+        (owner, repo, fetch_repo_identity(&s, project_id)?)
     };
     let home = ssh.remote_home(host).await?;
     let (root, _) = {
@@ -1224,6 +1301,7 @@ pub(crate) async fn project_checkout_on(
         &owner,
         &repo,
         &root,
+        identity.as_deref(),
         None,
         CancellationToken::new(),
     )
@@ -1320,6 +1398,7 @@ pub(super) async fn new_session_inner(
                 // machine.
                 let (name, _, row_host, path) = fetch_worktree(&s, wid)?;
                 reject_foreign_worktree(&args.host_alias, &row_host, &name)?;
+                reject_worktree_of_another_project(&s, wid, args.project_id)?;
                 PathBuf::from(path)
             } else {
                 PathBuf::from(fetch_base_path(&s, args.project_id)?)
@@ -1329,9 +1408,10 @@ pub(super) async fn new_session_inner(
         // Remote path: derive from owner/repo, then ensure-on-remote.
         if let Some(ref name) = args.new_worktree {
             // NEW WORKTREE on remote: ensure clone exists, then create worktree.
-            let (owner, repo) = {
+            let (owner, repo, identity) = {
                 let s = lock(store)?;
-                fetch_owner_repo(&s, args.project_id)?
+                let (owner, repo) = fetch_owner_repo(&s, args.project_id)?;
+                (owner, repo, fetch_repo_identity(&s, args.project_id)?)
             };
             let home = ssh.remote_home(&args.host_alias).await?;
             let (project_root, _) = {
@@ -1344,6 +1424,7 @@ pub(super) async fn new_session_inner(
                 &owner,
                 &repo,
                 &project_root,
+                identity.as_deref(),
                 None,
                 token.clone(),
             )
@@ -1369,20 +1450,22 @@ pub(super) async fn new_session_inner(
             setup_base = worktree_was_created(&out.stdout).then_some(project_root);
             PathBuf::from(worktree_path_from_stdout(&out.stdout)?)
         } else {
-            let (owner, repo, wt_info) = {
+            let (owner, repo, identity, wt_info) = {
                 let s = lock(store)?;
                 let (owner, repo) = fetch_owner_repo(&s, args.project_id)?;
+                let identity = fetch_repo_identity(&s, args.project_id)?;
                 let wt = if let Some(wid) = args.worktree_id {
                     // (name, branch, host_alias, path) — the row names a
                     // checkout on ONE host; refuse it before it's used to
                     // derive anything for a different target host.
                     let (name, branch, row_host, path) = fetch_worktree(&s, wid)?;
                     reject_foreign_worktree(&args.host_alias, &row_host, &name)?;
+                    reject_worktree_of_another_project(&s, wid, args.project_id)?;
                     Some((name, branch, path))
                 } else {
                     None
                 };
-                (owner, repo, wt)
+                (owner, repo, identity, wt)
             };
             let home = ssh.remote_home(&args.host_alias).await?;
             // `remote_project_path_for`'s project root does not depend on the
@@ -1412,6 +1495,7 @@ pub(super) async fn new_session_inner(
                 &owner,
                 &repo,
                 &project_root,
+                identity.as_deref(),
                 worktree_for_clone.as_ref(),
                 token.clone(),
             )
@@ -3346,9 +3430,10 @@ pub(super) async fn reclone_project_root(
     let project_id = spec
         .project_id
         .ok_or_else(|| IpcError::new(codes::E_NOREPO, "session has no project to clone"))?;
-    let (owner, repo) = {
+    let (owner, repo, identity) = {
         let s = lock(store)?;
-        fetch_owner_repo(&s, project_id)?
+        let (owner, repo) = fetch_owner_repo(&s, project_id)?;
+        (owner, repo, fetch_repo_identity(&s, project_id)?)
     };
     tracing::info!(
         session_id,
@@ -3362,6 +3447,7 @@ pub(super) async fn reclone_project_root(
         &owner,
         &repo,
         &spec.project_root,
+        identity.as_deref(),
         None,
         CancellationToken::new(),
     )

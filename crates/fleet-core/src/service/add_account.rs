@@ -666,6 +666,10 @@ pub struct LoginRemoved {
     /// `setuptoken-`) that no login uses any more, now deleted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accounts_removed: Vec<String>,
+    /// The ended and lost sessions on the host that ran under the profile
+    /// and now name the host's own login (review w06-4), by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sessions_reset: Vec<String>,
 }
 
 /// The files fleet itself writes into a profile directory: the secrets and
@@ -789,11 +793,32 @@ async fn remove_login(
         }
     }
     s.forget_login_fingerprints(&args.host_alias, Some(&args.profile))?;
+    // The ended and lost rows that ran under it (the guard above counts
+    // only live ones) let go of the name: a Resume or a Restore of one
+    // would otherwise recreate the profile empty and sit at `/login`
+    // (review w06-4). They come back on the host's own login, held to the
+    // relaunch rules like any other. An ended row keeps the account it ran
+    // on (only the name goes, review r5-01-3); a lost row will really
+    // relaunch on the host's own login, so its link moves too.
+    let mut sessions_reset = Vec::new();
+    for r in s.list_sessions_for_host(&args.host_alias)? {
+        if r.claude_profile.as_deref() == Some(args.profile.as_str())
+            && (r.status == "ghost" || r.lost_at.is_some())
+        {
+            if r.status == "ghost" {
+                s.clear_session_profile_name(r.id)?;
+            } else {
+                s.set_session_profile(r.id, None)?;
+            }
+            sessions_reset.push(r.friendly_name.unwrap_or(r.tmux_name));
+        }
+    }
     let accounts_removed = sweep_unused_accounts(&s)?;
     Ok(LoginRemoved {
         host_alias: args.host_alias.clone(),
         profile: args.profile.clone(),
         accounts_removed,
+        sessions_reset,
     })
 }
 

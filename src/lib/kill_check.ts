@@ -12,6 +12,7 @@ import type { Result } from './result';
 import { push } from './toasts';
 import {
   discardKillSession,
+  hasNoPane,
   inspectSafeKill,
   pinnedBlock,
   safeKillSession,
@@ -28,7 +29,7 @@ export type WorkCheck =
   | { state: 'clean' }
   | { state: 'dirty'; files: DirtyFile[]; unpushed: number; branch: string | null }
   /** Fleet could not look: on a hub client, not this person's, or the read failed. */
-  | { state: 'unknown'; why: string };
+  | { state: 'unknown'; why: string; /** A project's main checkout: fleet tracks no worktree and did not look. */ noWorktree?: true };
 
 /** Read one session's worktree, or say why it cannot be read. */
 export async function checkWork(row: SessionRow): Promise<WorkCheck> {
@@ -46,7 +47,13 @@ export async function checkWork(row: SessionRow): Promise<WorkCheck> {
   if (!i.has_worktree) {
     return row.project_id == null
       ? { state: 'clean' }
-      : { state: 'unknown', why: 'no tracked worktree — Clean up asks the agent to commit and push' };
+      : {
+          state: 'unknown',
+          noWorktree: true,
+          why: hasAgentToAsk(row)
+            ? 'no tracked worktree — Clean up asks the agent to commit and push'
+            : 'no tracked worktree, not checked',
+        };
   }
   if ((i.dirty_files ?? []).length === 0 && (i.unpushed_commits ?? 0) === 0) return { state: 'clean' };
   return { state: 'dirty', files: i.dirty_files ?? [], unpushed: i.unpushed_commits ?? 0, branch: i.branch ?? null };
@@ -68,13 +75,31 @@ export function workLine(c: WorkCheck): string | null {
 /** The files to show under a session, the rest folded into "+N more". */
 export const FILES_SHOWN = 5;
 
+/** Whether Safe remove has an agent to type its request to (review r4
+ *  w04-1): a running Claude in a pane. A shell would run the request as
+ *  commands, and a ghost or a no-pane row cannot be typed to at all. */
+export function hasAgentToAsk(row: SessionRow): boolean {
+  return row.kind !== 'shell' && !hasNoPane(row) && row.status === 'running';
+}
+
 /** Why Clean up is not offered for this session, or `null` when it is. */
 export function cleanUpBlocked(row: SessionRow): string | null {
   return (
     hubActionBlocked('safe_kill_session', get(hubStatus), get(hubConnection)) ??
     sessionActionBlocked(row, 'safe_kill_session') ??
-    pinnedBlock(row)
+    pinnedBlock(row) ??
+    // Nobody to ask and no direct remove (a paired desktop): the request
+    // would only be refused (`safe_kill_session` answers E_INVALID_STATE for
+    // a shell, review r5-03-4), so the button is not offered.
+    (!hasAgentToAsk(row) && !directRemoveAllowed(row) ? NO_AGENT : null)
   );
+}
+
+const NO_AGENT = 'This session has no agent to commit and push for it. Use Kill.';
+
+/** This window may remove a clean session itself (`discard_kill_session`). */
+function directRemoveAllowed(row: SessionRow): boolean {
+  return (hubBlock('discard_kill_session', get(hubStatus)) ?? sessionActionBlocked(row, 'discard_kill_session')) === null;
 }
 
 /**
@@ -88,13 +113,18 @@ export async function cleanUp(row: SessionRow, check: WorkCheck): Promise<Result
   // Asked again at the call: a grant can be narrowed while the dialog is open.
   const refused = sessionActionBlocked(row, 'safe_kill_session');
   if (refused !== null) return { ok: false, error: { code: 'E_FORBIDDEN', message: refused } };
-  const direct =
-    check.state === 'clean' &&
-    (hubBlock('discard_kill_session', get(hubStatus)) ?? sessionActionBlocked(row, 'discard_kill_session')) === null;
+  // A main-checkout row with nobody to ask (a shell, a ghost, a no-pane
+  // row) is removed directly as well: fleet removes no worktree for it, and
+  // the request would be typed into bash or fail `E_NOT_ALIVE` (w04-1).
+  const nothingToAsk = check.state === 'unknown' && check.noWorktree === true && !hasAgentToAsk(row);
+  const direct = (check.state === 'clean' || nothingToAsk) && directRemoveAllowed(row);
   if (direct) {
     const r = await discardKillSession(row.host_alias, row.tmux_name, false);
     return r.ok ? { ok: true, value: 'removed' } : r;
   }
+  // Work to commit (or a worktree fleet could not read) and nobody to ask:
+  // said here, in the app's words, rather than by a refused call (r5-03-4).
+  if (!hasAgentToAsk(row)) return { ok: false, error: { code: 'E_INVALID_STATE', message: NO_AGENT } };
   const r = await safeKillSession(row.host_alias, row.tmux_name);
   return r.ok ? { ok: true, value: 'asked' } : r;
 }

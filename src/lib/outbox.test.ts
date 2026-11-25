@@ -201,6 +201,47 @@ describe('outbox: attachments', () => {
     expect(h.msgs()[0]).toMatchObject({ state: 'failed', retryable: false });
     expect(h.msgs()[0].error).toMatch(/too long/);
   });
+
+  // r4 w09-6 / w16-1: 70 KiB is over the backend's 64 KiB, and the check
+  // runs before the upload spends the files.
+  it('refuses an over-long prompt before uploading its attachments', async () => {
+    const h = harness({ 1: idle() });
+    h.box.enqueue(A, { kind: 'prompt', text: 'x'.repeat(70 * 1024), attachments: [tile('t1', '/tmp/a.txt')] });
+    await flush();
+    expect(h.uploads).toHaveLength(0);
+    expect(h.sends).toHaveLength(0);
+    expect(h.msgs()[0]).toMatchObject({ state: 'failed', retryable: false });
+    // r5-07-3: nothing was uploaded, so Edit hands the tile back unspent.
+    const back = h.box.edit(A.id, h.msgs()[0].id);
+    expect(back?.attachments).toEqual([tile('t1', '/tmp/a.txt')]);
+  });
+
+  it('a send the backend refused as invalid offers no Retry', async () => {
+    const h = harness({ 1: idle() });
+    h.box.enqueue(A, { kind: 'prompt', text: 'bad' });
+    await flush();
+    h.sends[0].done({ ok: false, error: { code: 'E_VALIDATE', message: 'prompt contains a control character' } });
+    await flush();
+    expect(h.msgs()[0]).toMatchObject({ state: 'failed', retryable: false });
+  });
+
+  // r4 w09-2: the hub dedupes on the id, so Retry must carry the same one.
+  it('every attempt of a message carries its client_msg_id, and each message its own', async () => {
+    const h = harness({ 1: idle() });
+    h.box.enqueue(A, { kind: 'prompt', text: 'one' });
+    await flush();
+    h.sends[0].done(fail('cut'));
+    await flush();
+    h.box.retry(A.id, h.msgs()[0].id);
+    await flush();
+    h.sends[1].done(ok(undefined));
+    h.box.enqueue(A, { kind: 'prompt', text: 'two' });
+    await flush();
+    const ids = vi.mocked(h.deps.send).mock.calls.map((c) => c[4]);
+    expect(ids[0]).toEqual(expect.any(String));
+    expect(ids[1]).toBe(ids[0]);
+    expect(ids[2]).not.toBe(ids[0]);
+  });
 });
 
 describe('outbox: failure holds the line', () => {
@@ -450,6 +491,7 @@ describe('outbox: settling into the transcript', () => {
 describe('receipt', () => {
   const base = {
     id: 'x',
+    clientMsgId: 'm-x',
     kind: 'prompt' as const,
     text: 't',
     prefix: null,

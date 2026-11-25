@@ -194,6 +194,13 @@ describe('todayKpis (review w11-3)', () => {
 
   it('counts review asks and the extra fleets, as the rail does (review w09-5, w11-8)', () => {
     const v = scopeToday(digest, ALL_SCOPES, rows(), () => ALL_SCOPES);
+    // Review w03-5: a session that waits on its owner is not counted.
+    const waitingIds = v.waiting.flatMap((g) => g.sessions.filter((s) => s.attention).map((s) => s.id));
+    if (waitingIds.length > 0) {
+      const all = todayKpis(v).needsYou;
+      expect(todayKpis(v, { approvals: 0, failedRoutines: 0, notMine: new Set(waitingIds.slice(0, 1)) }).needsYou).toBe(all - 1);
+    }
+    expect(waitingIds.length).toBeGreaterThan(0);
     const k = todayKpis(v, { approvals: 1, failedRoutines: 1, reviewAsks: 2, fleets: 3 });
     expect(k.needsYou).toBe(1 + 1 + 1 + 2 + 3);
   });

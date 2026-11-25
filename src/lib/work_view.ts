@@ -1828,11 +1828,14 @@ export const workTreeMeta = writable<{ orgs: WorkTreeOrg[]; trackers: WorkTreeTr
 export function cycleWorkOrg(): void {
   const orgs = get(workTreeMeta).orgs;
   const ids: (number | 'none' | undefined)[] = [undefined, ...orgs.map((o) => o.id), 'none'];
-  const cur = normalizeFilters(get(workViewFilters)).org;
+  // The Filters panel's chips write `orgs`, which the hub ANDs with `org`
+  // (review w12-6): the chord starts from a single chip and replaces both.
+  const now = normalizeFilters(get(workViewFilters));
+  const cur = now.org ?? (now.orgs?.length === 1 ? now.orgs[0] : undefined);
   const i = ids.indexOf(cur);
   const next = ids[(i + 1) % ids.length];
   workViewFilters.update((f) => {
-    const { group: _g, org: _o, ...rest } = normalizeFilters(f);
+    const { group: _g, org: _o, orgs: _os, ...rest } = normalizeFilters(f);
     return next === undefined ? rest : { ...rest, org: next };
   });
 }

@@ -22,6 +22,7 @@
   import { sessions, sessionsAnswered } from './sessions';
   import { attentionIdleMinutes } from './notify';
   import { waitingForYou } from './waiting_count';
+  import { waitsOnMeOf } from './access';
   import { hosts } from './hosts';
   import { catchingUp, catchUpLine, hostsStillConnecting, warmStart } from './startup';
 
@@ -32,7 +33,8 @@
     return () => clearInterval(t);
   });
 
-  const waiting = $derived(waitingForYou($sessions, { idleSecs: $attentionIdleMinutes * 60, now: nowSec }));
+  // Only the rows that wait on this person (review w03-5).
+  const waiting = $derived(waitingForYou($sessions.filter((s) => $waitsOnMeOf(s)), { idleSecs: $attentionIdleMinutes * 60, now: nowSec }));
 
   type Mark = 'breathe' | 'halo' | 'chase' | 'signal-lost';
   const mark = $derived.by((): Mark | null => {

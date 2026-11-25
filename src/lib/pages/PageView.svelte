@@ -53,6 +53,7 @@
     hideKeys = [],
     readonly = false,
     remote = false,
+    drafts: sharedDrafts,
     reason = null,
     proposals = [],
     fleet = null,
@@ -90,6 +91,10 @@
     fleet?: string | null;
     /** A resource page's per-record write gate: see `ResourcePage`. */
     canChange?: (record: ResourceRecord) => boolean;
+    /** The draft to stage into: Settings passes one for the whole dialog, so
+     *  a typed value survives a move to another section (review r4 w13-2).
+     *  Absent, the page keeps its own. */
+    drafts?: SettingDrafts;
     onnavigate: (pageId: string) => void;
     /** Open a setting on its page (a review row's name). */
     onopen?: (pageId: string, key: string) => void;
@@ -98,7 +103,8 @@
   const proposalOf = $derived(new Map(proposals.map((p) => [p.key, p])));
   /** G1.5: the typed values not saved yet, written together by the Save
    *  bar. A read-only page stages nothing. */
-  const drafts = new SettingDrafts();
+  // svelte-ignore state_referenced_locally
+  const drafts = sharedDrafts ?? new SettingDrafts();
   const saveDrafts = () =>
     void drafts.save((key, value) => setFleetSetting(key as SettingKey, value));
   /** Bumped after a page action ran: every data item re-reads. */
@@ -307,7 +313,7 @@
   {/each}
   {/if}
 
-  {#if drafts.count > 0}
+  {#if drafts.count > 0 && !readonly}
     <div class="save-bar" role="region" aria-label="Unsaved changes" data-testid="page-save-bar">
       <span class="save-count" data-testid="page-save-count">{drafts.count} {drafts.count === 1 ? 'change' : 'changes'}</span>
       <Button variant="quiet" disabled={drafts.saving} testid="page-discard" onclick={() => drafts.discard()}>Discard</Button>

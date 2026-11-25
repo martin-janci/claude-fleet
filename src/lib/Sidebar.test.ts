@@ -2900,6 +2900,43 @@ describe('Sidebar filters: one set of rules for every section', () => {
     expect(screen.getByTestId('bulk-bar')).toHaveTextContent('1 selected');
   });
 
+  it('w12-2: a search narrows the selection and the footer count to the rows drawn', async () => {
+    const a = sessionFor(1, 'dev-a');
+    const b = sessionFor(2, 'dev-b');
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('sidebar-count').textContent).toBe('2 sessions');
+    await fireEvent.click(await selectModeSwitch());
+    await tick();
+    for (const box of screen.getAllByTestId('select-box')) await fireEvent.click(box);
+    await tick();
+    expect(screen.getByTestId('bulk-bar')).toHaveTextContent('2 selected');
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'pos-frontend' } });
+    await waitFor(() => expect(screen.getByTestId('bulk-bar')).toHaveTextContent('1 selected'));
+    expect(screen.getByTestId('sidebar-count').textContent).toBe('1 session');
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'zzz' } });
+    await waitFor(() => expect(screen.getByTestId('sidebar-count').textContent).toBe('0 sessions'));
+  });
+
+  it('w12-5: in a flat grouping a search shows only the rows that match', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'login-fix'), sessionFor(1, 'billing'), sessionFor(1, 'docs')]);
+    sidebarGroupBy.set('state');
+    try {
+      render(Sidebar);
+      await tick(); await tick();
+      expect(names()).toHaveLength(3);
+      await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'login' } });
+      await waitFor(() => expect(names()).toHaveLength(1));
+      expect(names()[0]).toContain('login-fix');
+      // A repository query still shows the whole project.
+      await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'claude-fleet' } });
+      await waitFor(() => expect(names()).toHaveLength(3));
+    } finally {
+      sidebarGroupBy.set('project');
+    }
+  });
+
   it('Last active narrows Other sessions too, by each session’s own activity', async () => {
     const now = Math.floor(Date.now() / 1000);
     mockBackend(fakeProjects, [

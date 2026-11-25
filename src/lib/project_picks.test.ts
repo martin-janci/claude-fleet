@@ -67,7 +67,11 @@ describe('project_picks', () => {
   });
 
   it('an older hub (no such tool) or a refused token says so once per session, and rolls back', async () => {
-    for (const code of ['E_HUB_PROTOCOL', 'E_FORBIDDEN']) {
+    for (const [code, said] of [
+      ['E_HUB_PROTOCOL', "This hub doesn't support project pins yet"],
+      // r4 w19-3: the hub has pins; this device may not change them.
+      ['E_FORBIDDEN', "Project pins are set by the fleet's admin on this hub"],
+    ]) {
       resetPickNoticeForTests();
       toasts.set([]);
       inv.mockRejectedValue({ code, message: 'the hub refused the set_project_pick call' });
@@ -75,7 +79,7 @@ describe('project_picks', () => {
       await setProjectPick('o', 'r', { vis: 'hide' });
       expect(r1.ok).toBe(false);
       expect(get(projectPicks).get('o/r')).toMatchObject({ pinned: false, vis: null });
-      expect(messages()).toEqual(["This hub doesn't support project pins yet"]);
+      expect(messages()).toEqual([said]);
       expect(get(toasts)[0].count).toBe(1);
     }
   });

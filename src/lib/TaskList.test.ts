@@ -120,6 +120,17 @@ describe('TaskList', () => {
   });
 
   // Review w17-7: a failed background refresh keeps the tasks shown.
+  it('w12-7: says so when the hub holds more than the one page', async () => {
+    render(TaskList);
+    await flush();
+    expect(screen.queryByTestId('task-list-more')).toBeNull();
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
+      cmd === 'work_tree' ? { ...page, next_cursor: 'c1' } : cmd === 'list_projects' ? [] : null,
+    );
+    bumpWorkChanged();
+    await waitFor(() => expect(screen.getByTestId('task-list-more')).toBeTruthy(), { timeout: 2000 });
+  });
+
   it('a failed refresh keeps the list, with a Retry line', async () => {
     render(TaskList);
     await flush();

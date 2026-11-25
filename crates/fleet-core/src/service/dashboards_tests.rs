@@ -348,6 +348,35 @@ fn undo_never_unpins_a_dashboard_the_person_pinned_first() {
     assert!(get(&st, &desk, "dash.r42").unwrap().is_some());
 }
 
+/// Review w01-5: Control pinned it first, the person replaced it twice.
+/// Undo puts the person's earlier version back, and that is where it ends:
+/// the dashboard showing is theirs, so no second Undo offers to unpin it.
+#[test]
+fn undo_never_unpins_the_persons_version_of_a_dashboard_control_made() {
+    let st = store();
+    let (ada, _) = people(&st);
+    let desk = device(&st, ada, "Ada's Mac");
+    let pin_as = |title: &str, by: &str| {
+        pin(&st, &desk, &pin_args(block("dash.x", title)), Some(by)).unwrap()
+    };
+    assert_eq!(
+        pin_as("Control's", OPERATOR_CLIENT_NAME).undo.as_deref(),
+        Some("remove")
+    );
+    pin_as("D1", "Ada's Mac");
+    assert_eq!(pin_as("D2", "Ada's Mac").undo.as_deref(), Some("restore"));
+    undo(&st, &desk, "dash.x").unwrap();
+    let row = get(&st, &desk, "dash.x").unwrap().unwrap();
+    assert_eq!(row.title, "D1");
+    assert_eq!(row.device.as_deref(), Some("Ada's Mac"));
+    assert_eq!(row.undo, None, "the version showing is the person's");
+    assert_eq!(
+        undo(&st, &desk, "dash.x").unwrap_err().code,
+        codes::E_INVALID
+    );
+    assert!(get(&st, &desk, "dash.x").unwrap().is_some());
+}
+
 /// Review of the dashboards work, 1: on the standalone desktop (the hub's
 /// own caller) a dashboard Control pinned as the hub's owner is the
 /// desktop's: it undoes, unpins and is replaced in place, never doubled.

@@ -115,6 +115,13 @@ describe('freshness', () => {
     expect(freshness('weekly', NOW - 60, NOW - 1, NOW)).toBe('expired');
     expect(freshness('5h', NOW - 60, NOW, NOW)).toBe('fresh');
     expect(freshness('5h', null, RESET_5H, NOW)).toBe('expired');
+    // Review w07-2: a window at its limit, reset still ahead, cannot have
+    // changed: it goes stale, never expired.
+    const old = NOW - 4 * 86400;
+    expect(freshness('weekly', old, NOW + 3600, NOW, 100)).toBe('stale');
+    expect(freshness('weekly', old, NOW + 3600, NOW, 99)).toBe('expired');
+    expect(freshness('weekly', old, NOW - 1, NOW, 100)).toBe('expired');
+    expect(freshness('weekly', old, null, NOW, 100)).toBe('expired');
   });
 });
 
@@ -134,7 +141,8 @@ describe('severity', () => {
   it('drops the 5-hour window one level when its reset is under 15 minutes away', () => {
     const soon = NOW + 15 * MIN - 1;
     const atFifteen = NOW + 15 * MIN;
-    expect(severity('5h', 0, soon, NOW)).toBe('low');
+    // Review w07-2: at the limit the level holds until the reset.
+    expect(severity('5h', 0, soon, NOW)).toBe('limit');
     expect(severity('5h', 10, soon, NOW)).toBe('caution');
     expect(severity('5h', 30, soon, NOW)).toBe('ok');
     expect(severity('5h', 80, soon, NOW)).toBe('ok');

@@ -33,6 +33,7 @@ import { get } from 'svelte/store';
 
 const mockedRewind = rewindConversation as unknown as ReturnType<typeof vi.fn>;
 const mockedSend = sendPrompt as unknown as ReturnType<typeof vi.fn>;
+const SENT_ID = { clientMsgId: expect.any(String) };
 const mockedWait = waitForReplQuiet as unknown as ReturnType<typeof vi.fn>;
 const mockedPushError = pushError as unknown as ReturnType<typeof vi.fn>;
 
@@ -133,7 +134,7 @@ describe('ReplyActions', () => {
     mockedRewind.mockResolvedValue({ ok: true, value: { id: 7 } });
     await confirmRetry();
     expect(mockedRewind).toHaveBeenCalledWith(7, 'rewind', 'a2');
-    expect(mockedSend).toHaveBeenCalledWith('h1', 'sess', 'two');
+    expect(mockedSend).toHaveBeenCalledWith('h1', 'sess', 'two', SENT_ID);
     expect(mockedPushError).not.toHaveBeenCalled();
     // A delivery bubble, like any composer send.
     expect(bubbles()).toHaveLength(1);
@@ -167,7 +168,7 @@ describe('ReplyActions', () => {
     await settle();
     await fireEvent.click(screen.getByTestId('confirm-ok'));
     await settle();
-    expect(mockedSend).toHaveBeenCalledWith('h1', 'sess', 'two');
+    expect(mockedSend).toHaveBeenCalledWith('h1', 'sess', 'two', SENT_ID);
     expect(bubbles()[0].text).toBe('two');
   });
 

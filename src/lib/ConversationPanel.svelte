@@ -48,12 +48,13 @@
   import PromptTune from './PromptTune.svelte';
   import { tuneComposerPrompt } from './prompt_tune';
   import { askComposerHelp, commandLine, helpModel } from './context_help';
-  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
+  import { fleetSettings, SETTING_KEYS, hubGated } from './fleet_settings';
   import Icon from './kit/Icon.svelte';
   import { suggestedForkName } from './reply_actions';
   import {
     findMatches,
     turnIndex,
+    rowIdentities,
     rowKey,
     rememberScroll,
     recallScroll,
@@ -461,7 +462,6 @@
     loading = conv === null;
     const fetchedTurnSeq = session.turn_seq;
     const fetchedQuiet = isQuietStatus(session.claude_status);
-    const pinned = justReset || !scroller ? true : isPinned(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight);
     inFlight.set(id, (inFlight.get(id) ?? 0) + 1);
     let r: Awaited<ReturnType<typeof sessionConversation>>;
     try {
@@ -481,6 +481,7 @@
       // at the normal cadence, not after the quiet one.
       lastFetchAt = Date.now();
       lastFetchTurnSeq = fetchedTurnSeq;
+      const wasReset = justReset;
       justReset = false;
       errorCode = null;
       errorMsg = null;
@@ -490,6 +491,9 @@
       // read whose content did not move.
       if (viewing === null) outbox.settle(id, r.value, { quiet: fetchedQuiet, turnSeq: fetchedTurnSeq });
       if (!sameConversation(conv, r.value)) {
+        // Measured now, not before the read (review r4 w10-8): the reader may
+        // have scrolled while it was in flight, and the DOM has not changed yet.
+        const pinned = wasReset || !scroller ? true : isPinned(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight);
         // Older turns prepended by Load older are history, not news.
         if (!pinned && !opts.older) unseen += newItemCount(conv, r.value);
         conv = reuseTurns(conv, r.value);
@@ -921,6 +925,9 @@
   const thread = $derived(
     conv ? buildThread(conv.turns, events, { blocked: viewing === null && indicator?.kind === 'blocked' }, conv.truncated) : [],
   );
+
+  // The `{#each}` key of each row: the turn itself, not its place (w10-6).
+  const threadKeys = $derived(rowIdentities(thread));
 
   // ─── Find in conversation / turn index ────────────────────────────────────
   let root: HTMLDivElement | undefined = $state();
@@ -2181,7 +2188,7 @@
   // session shared at `answer` or `drive` has it too; a watcher does not.
   let helpOpen = $state(false);
   /** Writing help's "Context help" toggle, off by default. */
-  const helpOn = $derived(!away && settingBool($fleetSettings, SETTING_KEYS.workContextHelp));
+  const helpOn = $derived(!away && $hubGated(SETTING_KEYS.workContextHelp));
   let helpCommands = $state<string[]>([]);
   const helpBlocked = $derived(
     hubActionBlocked('session_context_help', $hubStatus, $hubConnection) ??
@@ -2200,7 +2207,7 @@
   // on the person's "Use this", never sent. `session_prompt_tune`, routed.
   let tuneOpen = $state(false);
   /** Writing help's "Prompt tuner" toggle, off by default. */
-  const tuneOn = $derived(!away && settingBool($fleetSettings, SETTING_KEYS.workPromptTune));
+  const tuneOn = $derived(!away && $hubGated(SETTING_KEYS.workPromptTune));
   const tuneBlocked = $derived(
     hubActionBlocked('session_prompt_tune', $hubStatus, $hubConnection) ??
       $sessionBlocked(session, 'session_prompt_tune') ??
@@ -2380,19 +2387,26 @@
    * expired allow-list entry, most likely) is shown the same way a failed
    * pick is, rather than falling back to an unmeasured attachment.
    */
-  const LEFT_OUT = "Left out what isn't a file: folders can't be attached — zip it first.";
+  // `attachment_describe` leaves out a folder, a file that is gone or cannot
+  // be read, and a name with a line break in it, and does not say which
+  // (review r4 w04-4): the note names them all, never only the folder.
+  const leftOutNote = (n: number) =>
+    `Left out ${n === 1 ? '1 item' : `${n} items`} that can't be attached: a folder (zip it first), or a file that is gone, unreadable or has a line break in its name.`;
 
   async function describeDroppedPaths(paths: string[]) {
+    // The tray these paths were dropped on: the person may be on another
+    // session by the time an answer lands, and its composer owes them no
+    // note about this drop.
+    const owner = draftFor;
     const r = await invokeCmd<PickedFile[]>('attachment_describe', { paths });
+    if (owner !== draftFor) return;
     if (!r.ok) {
       attachErrors = [errorText(r.error)];
       return;
     }
     const got = r.value ?? [];
     await attach(got);
-    // A folder is left out in Rust (review w11-6): say so rather than
-    // dropping it silently.
-    if (got.length < paths.length) attachErrors = [...attachErrors, LEFT_OUT];
+    if (got.length < paths.length && owner === draftFor) attachErrors = [...attachErrors, leftOutNote(paths.length - got.length)];
   }
 
   function onDroppedPaths(paths: string[]) {
@@ -2638,7 +2652,7 @@
           </p>
         {/if}
         {#if conv}
-          {#each thread as row, ri (rowKey(row))}
+          {#each thread as row, ri (threadKeys[ri])}
             {@const key = rowKey(row)}
             {@const day = daySeparators ? daySeparator(thread, ri, nowMs) : null}
             {#if day}<div class="day-sep" data-testid="conv-day-separator" role="separator" aria-label={day}><span>{day}</span></div>{/if}

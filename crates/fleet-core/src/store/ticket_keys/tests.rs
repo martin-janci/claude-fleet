@@ -333,4 +333,26 @@ fn a_project_that_reuses_a_removed_ones_id_gets_its_own_ticket_space() {
         labels.contains(&("BAC".into(), Some(backend))),
         "{labels:?}"
     );
+    // w02-8: the removed space is named by its repository, and the same
+    // repository registered again takes it back, prefix and counter, where
+    // it used to come back as `APP2`.
+    let retired = s
+        .ticket_prefix_overview()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.prefix == "APP")
+        .unwrap();
+    assert_eq!(retired.label, "acme/app (removed)");
+    let again = s.upsert_project("Acme", "app", "/p2/app").unwrap();
+    assert_ne!(again, backend);
+    let next = task(&s, "Second", Some(again), None);
+    assert_eq!(next.key.as_deref(), Some("APP-2"));
+    assert_eq!(
+        s.ticket_prefix_overview()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.prefix == "APP")
+            .and_then(|r| r.project_id),
+        Some(again)
+    );
 }

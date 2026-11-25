@@ -1214,6 +1214,10 @@ mod tests {
     /// to no org, with the production default lifetime. Multi-user M1 made
     /// `mint` take a `MintRequest`, and spelling the struct at every call
     /// site here would bury what each test is actually about.
+    /// The personal owner of a fresh store (migration 098 inserts it
+    /// first); the route test checks that it is.
+    const OWNER: i64 = 1;
+
     fn mint_req<'a>(name: &'a str, mode: &'a str, trusted: bool) -> pairing::MintRequest<'a> {
         pairing::MintRequest {
             name,
@@ -1223,7 +1227,7 @@ mod tests {
             person: Some("owner"),
             ttl: std::time::Duration::from_secs(600),
             minter: pairing::Minter {
-                person: Some(42),
+                person: Some(OWNER),
                 device: None,
                 via: "test",
                 fenced_org: None,
@@ -1626,7 +1630,7 @@ mod tests {
                 "the device is its own actor"
             );
             assert_eq!(paired.actor_device, Some(laptop.id));
-            assert_eq!(paired.representation["minted_by_person"], 42);
+            assert_eq!(paired.representation["minted_by_person"], OWNER);
             assert_eq!(paired.representation["minted_via"], "test");
             assert!(
                 ev.iter().all(|e| e.representation.get("token").is_none()
@@ -1702,6 +1706,71 @@ mod tests {
         let ok = round_trip(addr, &pair_req(&unfenced.code, "phone.invalid")).await;
         assert!(ok.contains("200 OK"), "{ok}");
         assert!(body_of(&ok).contains("\"trusted\":true"), "{ok}");
+
+        // Review r5-01-6: the three outcomes of the redeem-time check on a
+        // code a person minted under fleet authority. Ada is a fleet admin
+        // and not the owner; erin gains a device between mint and redeem.
+        let ada = {
+            use crate::store::{Principal, RoleRef, ROLE_FLEET_ADMIN};
+            let s = store.lock().unwrap();
+            assert_eq!(s.personal_owner_id().unwrap(), Some(OWNER));
+            let ada = s.create_person("zoe", None).unwrap().id;
+            let fa = s
+                .role(RoleRef::Realm(ROLE_FLEET_ADMIN))
+                .unwrap()
+                .unwrap()
+                .id;
+            s.map_role(Principal::Person(ada), fa).unwrap();
+            ada
+        };
+        let by_ada = pairing::Minter {
+            person: Some(ada),
+            ..mint_req("x", "full", false).minter
+        };
+        let for_erin = pairings.mint(pairing::MintRequest {
+            person: Some("finn"),
+            minter: by_ada,
+            ..mint_req("finn-from-zoe", "full", false)
+        });
+        {
+            let s = store.lock().unwrap();
+            let erin = s.create_person("finn", None).unwrap().id;
+            s.insert_client_token("finn-own", &"e".repeat(64), "full")
+                .unwrap();
+            s.set_client_person("finn-own", Some(erin)).unwrap();
+        }
+        let refused = round_trip(addr, &pair_req(&for_erin.code, "phone.invalid")).await;
+        assert!(refused.contains("403"), "{refused}");
+        assert!(
+            body_of(&refused).contains("already has a device"),
+            "{refused}"
+        );
+        assert!(!refused.contains("\"token\""), "{refused}");
+        assert!(
+            !store
+                .lock()
+                .unwrap()
+                .list_client_tokens(true)
+                .unwrap()
+                .iter()
+                .any(|r| r.name == "finn-from-zoe"),
+            "the refused redeem left no client row"
+        );
+        // The owner's code for the same person binds.
+        let by_owner = pairings.mint(pairing::MintRequest {
+            person: Some("finn"),
+            ..mint_req("finn-from-owner", "full", false)
+        });
+        let ok = round_trip(addr, &pair_req(&by_owner.code, "phone.invalid")).await;
+        assert!(ok.contains("200 OK"), "{ok}");
+        // So does Ada's code for her own next device.
+        let own = pairings.mint(pairing::MintRequest {
+            person: Some("zoe"),
+            minter: by_ada,
+            ..mint_req("zoe-second", "full", false)
+        });
+        let ok = round_trip(addr, &pair_req(&own.code, "phone.invalid")).await;
+        assert!(ok.contains("200 OK"), "{ok}");
 
         // The fence is not over-strict: carol's devices and live memberships
         // are all inside acme, so a fenced trusted code redeems trusted.

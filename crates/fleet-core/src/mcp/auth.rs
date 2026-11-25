@@ -500,7 +500,7 @@ pub fn sha256_hex(s: &str) -> String {
 }
 
 /// The prefix that marks a hook-only token, so `authorize` knows to try
-/// [`resolve_hook_token`] on `/hook` and nowhere else.
+/// [`resolve_hook_token`] on `/hook` and `/voice/capture`, and nowhere else.
 pub const HOOK_TOKEN_PREFIX: &str = "fhk1_";
 
 /// The hook-only token derived from a host's token (review w10-5): what a
@@ -510,8 +510,17 @@ pub const HOOK_TOKEN_PREFIX: &str = "fhk1_";
 /// host token with a fixed label, so it needs no column of its own: the hub
 /// recomputes it from the stored host token, a rotated host token rotates it,
 /// and nobody holding it can recover the host token. It authorizes `/hook`
-/// only ([`resolve_hook_token`]); every other route compares stored tokens
-/// and never matches it, so it cannot dial `/agent` or call `/mcp`.
+/// and, since the host recorder reads the same `fleet-hook.headers` file,
+/// `GET /voice/capture` ([`resolve_hook_token`]); every other route compares
+/// stored tokens and never matches it, so it cannot dial `/agent` or call
+/// `/mcp`.
+///
+/// What that opens today (review w01-3): whoever reads this bearer off the
+/// relay port can post hook events AND, for a session of that host with the
+/// microphone on, start the claimed device's capture and read the audio.
+/// The recorder never goes through the relay itself; it only shares the
+/// file. A bearer of its own for `/voice/capture` would close this; that is
+/// an open design decision (the owner's), not something this code decides.
 pub fn hook_token(host_token: &str) -> String {
     use hmac::{Hmac, Mac};
     let mut mac = Hmac::<sha2::Sha256>::new_from_slice(host_token.as_bytes())
@@ -526,7 +535,7 @@ pub fn hook_token(host_token: &str) -> String {
 /// The host whose [`hook_token`] `presented` is, as the host token itself
 /// would resolve — the caller a `/hook` request needs. Every row is
 /// compared, with no short-circuit, as in [`resolve_token_at`]. For `/hook`
-/// only: the caller of this decides the route.
+/// and `/voice/capture` only: the caller of this decides the route.
 pub fn resolve_hook_token(presented: &str, host_tokens: &[HostTokenRow]) -> Option<Caller> {
     if !presented.starts_with(HOOK_TOKEN_PREFIX) {
         return None;

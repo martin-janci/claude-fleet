@@ -472,6 +472,7 @@ impl EventBridge {
                             // state (the fleets list) must already see it.
                             self.status
                                 .hub_fleet_id(contract::hub_fleet_id(&frame.data));
+                            self.status.hub_clock(contract::hub_now(&frame.data));
                             // Reported BEFORE the resync, and the order is
                             // load-bearing: the resync's own client consults
                             // this status (`bootstrap/tasks.rs`), so a

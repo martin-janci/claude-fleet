@@ -2057,7 +2057,7 @@ Each call returns a status for every non-hidden host:
 | Status | Meaning |
 |---|---|
 | `provisioned` | All steps succeeded; tunnel established (remote hosts). |
-| `skipped` | Host was unreachable at the time of the call; no changes made. |
+| `skipped` | Nothing provisioned: the host was unreachable (no changes made), or a content-only pass ran over a host that never had a full run (skills, CLAUDE.md block and hooks refreshed; `detail` says to provision it in full). |
 | `failed` | One of the steps returned an error (see `detail`). |
 
 Per-host failures do not abort provisioning of other hosts.

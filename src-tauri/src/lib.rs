@@ -172,7 +172,7 @@ pub fn run() {
                 // migrated: it is intact, and its message says what to do.
                 let advice = fleet_core::store::open_failure_advice(
                     &e,
-                    "\nIf the file is corrupt, deleting it resets all local \
+                    "\nThe file is damaged. Deleting it resets all local \
                      state — hosts, projects and sessions are re-discovered \
                      on the next launch.",
                 );

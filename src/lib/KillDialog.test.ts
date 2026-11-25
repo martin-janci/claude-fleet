@@ -8,7 +8,10 @@ import { tick } from 'svelte';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import KillDialog from './KillDialog.svelte';
-import { workLine } from './kill_check';
+import { cleanUpBlocked, workLine } from './kill_check';
+import { hubStatus, STANDALONE } from './hub';
+import { hubConnection, type HubConnection } from './hub_connection';
+import { myPersonId } from './access';
 import { session } from './hosts_fixture';
 
 const flush = async () => {
@@ -120,6 +123,50 @@ describe('KillDialog', () => {
     await flush();
     expect(calls('safe_kill_session')).toHaveLength(1);
     expect(calls('discard_kill_session')).toHaveLength(0);
+  });
+
+  // r4 w04-1: a shell would run the request as commands, and a ghost cannot
+  // be typed to. With nobody to ask, the row is removed directly.
+  it.each([
+    ['a shell', { kind: 'shell' }],
+    ['a ghost', { status: 'ghost' }],
+  ])('Clean up removes %s in a main checkout directly, never through the agent', async (_name, over) => {
+    inspections['api'] = { ...clean, has_worktree: false, worktree_path: null, branch: null };
+    const row = session('mac', 'api', { id: 5, project_id: 7, ...over });
+    render(KillDialog, { targets: [row], mode: 'cleanup', onkill: vi.fn(), oncleaned: vi.fn(), oncancel: vi.fn() });
+    await flush();
+    expect(screen.getByTestId('kill-unknown').textContent).toContain('no tracked worktree, not checked');
+    await fireEvent.click(screen.getByTestId('kill-cleanup'));
+    await flush();
+    expect(calls('safe_kill_session')).toHaveLength(0);
+    expect(calls('discard_kill_session')).toHaveLength(1);
+  });
+
+  // r5-03-4: `safe_kill_session` refuses a session with no agent, so the
+  // desktop neither offers nor sends it.
+  it('a dirty shell session is not sent to the agent\'s Safe remove', async () => {
+    inspections['api--sh'] = dirty;
+    const row = session('mac', 'api--sh', { id: 6, kind: 'shell' });
+    render(KillDialog, { targets: [row], mode: 'cleanup', onkill: vi.fn(), oncleaned: vi.fn(), oncancel: vi.fn() });
+    await flush();
+    await fireEvent.click(screen.getByTestId('kill-cleanup'));
+    await flush();
+    expect(calls('safe_kill_session')).toHaveLength(0);
+    expect(calls('discard_kill_session')).toHaveLength(0);
+  });
+
+  it('a paired desktop offers no Clean up for a shell: no agent, and no direct remove', () => {
+    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://hub.example' });
+    hubConnection.set({ state: 'connected' } as HubConnection);
+    myPersonId.set(3);
+    try {
+      expect(cleanUpBlocked(session('mac', 'sh', { id: 8, kind: 'shell', owner_person_id: 3 }))).toContain('no agent');
+      expect(cleanUpBlocked(session('mac', 'cl', { id: 9, owner_person_id: 3 }))).toBeNull();
+    } finally {
+      myPersonId.set(null);
+      hubStatus.set({ ...STANDALONE });
+      hubConnection.set({ state: 'standalone' });
+    }
   });
 
   it('words the summary', () => {

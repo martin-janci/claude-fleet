@@ -134,7 +134,7 @@ describe('fallback role (G4.5)', () => {
     expect(fallbackRoutinesOn(GMAIL.uuid, routines, hosts)).toBe(1);
     expect(fallbackRoutinesOn(WORK.uuid, routines, hosts)).toBe(0);
     expect(countLine(2, 1, null, 1)).toBe('2 sessions · 1 routine · fallback for 1 routine');
-    expect(countLine(2, 0, '$1.00', 0)).toBe('2 sessions · $1.00 today');
+    expect(countLine(2, 0, '$1.00', 0)).toBe('2 sessions · $1.00 today (UTC)');
   });
 });
 

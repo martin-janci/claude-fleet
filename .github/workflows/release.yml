@@ -4,7 +4,7 @@ name: release
 # it once the release is proven complete.
 #
 # Trigger: pushing the `vX.Y.Z` tag that `scripts/release.sh` creates
-# (`git push origin main --follow-tags`). `workflow_dispatch` is a manual
+# (`git push --atomic origin main --follow-tags`). `workflow_dispatch` is a manual
 # re-run: pick the tag under "Use workflow from". Both jobs are gated on
 # `github.ref_type == 'tag'`, so dispatching from a branch is a no-op rather
 # than creating a release named after the branch.

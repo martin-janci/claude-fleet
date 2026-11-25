@@ -4,6 +4,7 @@ import { get } from 'svelte/store';
 import Tour from './Tour.svelte';
 import FirstRun from './FirstRun.svelte';
 import { TOUR_STEPS, startTour, tourSeen, tourStep } from './tour';
+import { destination } from './destination';
 import { onboardingDismissed, onboardingWelcomed } from './onboarding';
 import { markStartup, resetStartup } from './startup';
 
@@ -86,6 +87,37 @@ describe('Tour', () => {
       expect(get(tourSeen)).toBe(false);
     } finally {
       dialog.remove();
+    }
+  });
+
+  it('an Escape on a focused control, or outside the session view, is not the tour\'s (review r4 w04-3)', async () => {
+    render(Tour, { mac: true });
+    startTour();
+    await screen.findByTestId('tour');
+    // The Filters button with its panel open: Esc closes the panel.
+    const button = document.createElement('button');
+    button.setAttribute('aria-haspopup', 'true');
+    button.setAttribute('aria-expanded', 'true');
+    document.body.appendChild(button);
+    try {
+      await fireEvent.keyDown(button, { key: 'Escape' });
+      expect(get(tourStep)).toBe(0);
+      // WebKit leaves focus on body after the click (r5-07-4): still the panel's.
+      await fireEvent.keyDown(document.body, { key: 'Escape' });
+      expect(get(tourStep)).toBe(0);
+      button.setAttribute('aria-expanded', 'false');
+      // In Control, Esc leaves Control.
+      destination.set('control');
+      await fireEvent.keyDown(document.body, { key: 'Escape' });
+      expect(get(tourStep)).toBe(0);
+      expect(get(tourSeen)).toBe(false);
+      destination.set('session');
+      // From the tour's own popover it still ends it.
+      await fireEvent.keyDown(screen.getByTestId('tour-skip'), { key: 'Escape' });
+      expect(get(tourStep)).toBeNull();
+    } finally {
+      destination.set('session');
+      button.remove();
     }
   });
 });

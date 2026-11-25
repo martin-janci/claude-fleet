@@ -11,6 +11,7 @@ import { accounts } from '../accounts';
 import { accountUsage } from '../account_usage_store';
 import { WORK, GMAIL, snapshot } from '../hosts_fixture';
 import PageView from './PageView.svelte';
+import { SettingDrafts, announceUnsaved } from './drafts.svelte';
 import { fleetSettings, SETTING_DEFAULTS } from '../fleet_settings';
 import { allDescriptors, bundle, registryRouter } from './testing';
 import type { Page } from './pages';
@@ -86,6 +87,42 @@ describe('PageView — every generated page', () => {
       }
       unmount();
     }
+  });
+});
+
+describe('PageView — a draft shared by the dialog (review r4 w13-2)', () => {
+  it('keeps a typed value across a move to another section, and says so when Settings closes', async () => {
+    const drafts = new SettingDrafts();
+    const props = (id: string) => ({
+      page: pageOf(id),
+      pages: bundle.pages,
+      descs,
+      values: { ...defaults },
+      sources: bundle.sources,
+      drafts,
+      onnavigate: vi.fn(),
+    });
+    const first = render(PageView, { props: props('settings.limits') });
+    const move = control('move.max_transcript_mb');
+    move.value = '2000';
+    await fireEvent.change(move);
+    expect(screen.getByTestId('page-save-count').textContent).toBe('1 change');
+    // Another section: the page is rebuilt (`{#key view}` in SettingsDialog).
+    first.unmount();
+    const second = render(PageView, { props: props('settings.automation') });
+    expect(screen.getByTestId('page-save-count').textContent).toBe('1 change');
+    second.unmount();
+    render(PageView, { props: props('settings.limits') });
+    expect(control('move.max_transcript_mb').value).toBe('2000');
+
+    // Closing Settings with it still staged: a toast with Save.
+    const write = vi.fn(() => Promise.resolve({ ok: true as const, value: null }));
+    announceUnsaved(drafts, write);
+    const t = get(toasts).find((x) => x.message === '1 settings change was not saved');
+    expect(t?.action?.label).toBe('Save');
+    t?.action?.run();
+    await waitFor(() => expect(write).toHaveBeenCalledWith('move.max_transcript_mb', expect.any(String)));
+    await waitFor(() => expect(drafts.count).toBe(0));
   });
 });
 

@@ -838,7 +838,11 @@ check "probe_host over the agent: reachable, tmux version read" 'echo "$pr" | gr
 # A session on the agent's own tmux server; everything after this goes through
 # the agent: the reconcile that finds it, send-keys, capture-pane, kill-session.
 aenv tmux new-session -d -s agt1 -c "$AHOME" "echo agent-e2e-marker; exec bash --noprofile --norc"
-aenv tmux new-session -d -s agt2 -c "$AHOME" "exec bash --noprofile --norc"
+# agt2 stands in for a Claude pane, so it must not be a bare login shell:
+# the typing guard (prompt.rs agent_exited_guard) refuses to paste into a
+# bound session whose pane is one, since that means its agent exited. `cat`
+# echoes what is typed into it and runs none of it.
+aenv tmux new-session -d -s agt2 -c "$AHOME" "exec cat >/dev/null"
 # `force` does not duplicate a reconcile pass already in flight: it answers
 # that pass's rows, which predate these sessions when the background tick
 # started first (reconcile.rs::refresh_sessions). So poll until a pass has
@@ -894,7 +898,7 @@ check "send_prompt types into the pane over the agent (the shell ran it)" 'tool 
 # send_message wake=true against a NEVER-HOOKED recipient: fix round 1
 # changed this from paste to refuse (`claude_status: None` must not be
 # treated as safely idle — a never-hooked session is often sitting on the
-# first-run trust prompt with no pane read yet). agt2 is a plain shell that
+# first-run trust prompt with no pane read yet). agt2 is a stand-in pane that
 # will never fire a real Claude Code hook at all, so this holds for the rest
 # of this leg until the Stop hook below flips it to a real `idle`.
 wk=$(tool "$PC" "$PUB" "$TOKC" send_message "{\"from_session_id\":${S1:-0},\"to_session_id\":${S2:-0},\"body\":\"wake up\",\"wake\":true}")

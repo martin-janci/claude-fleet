@@ -242,6 +242,18 @@ pub fn hub_fleet_id(ready_frame_data: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The hub's clock (`now`, unix seconds) a `ready` frame names, or `None`
+/// from a hub older than the field. The window compares the hub's
+/// timestamps (a usage reading's age, a countdown's due time) with a clock,
+/// and that clock must be the hub's (review w15-3).
+pub fn hub_now(ready_frame_data: &str) -> Option<i64> {
+    serde_json::from_str::<serde_json::Value>(ready_frame_data)
+        .ok()?
+        .get("now")?
+        .as_i64()
+        .filter(|now| *now > 0)
+}
+
 /// A hub's wire-contract revision, read out of a `ready` frame's raw JSON.
 ///
 /// `0` for a hub that sends no `contract` field (every hub released before

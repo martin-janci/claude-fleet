@@ -283,8 +283,8 @@ export interface TodayKpis {
 }
 
 const sessionsIn = (gs: readonly TodayGroup[]) => gs.reduce((n, g) => n + g.sessions.length, 0);
-const waitingIn = (gs: readonly TodayGroup[]) =>
-  gs.reduce((n, g) => n + g.sessions.filter((s) => s.attention).length, 0);
+const waitingIn = (gs: readonly TodayGroup[], notMine?: ReadonlySet<number>) =>
+  gs.reduce((n, g) => n + g.sessions.filter((s) => s.attention && !notMine?.has(s.id)).length, 0);
 
 /** What else waits on the person beside sessions and missions, as the
  *  Inbox counts it (review w11-8): agent actions to approve, routines whose
@@ -297,6 +297,9 @@ export interface TodayExtras {
   /** What the extra fleets' Inboxes count (`fleetInboxCount`), as the rail
    *  counts them (w11-8: Today left the other fleets out). */
   fleets?: number;
+  /** Sessions whose waits are their owner's: a Read share, a teammate's row
+   *  (review w03-5). Listed, never counted, as in the Inbox and the rail. */
+  notMine?: ReadonlySet<number>;
 }
 
 /** The four tiles: sessions (and missions) that need you, sessions in
@@ -304,7 +307,7 @@ export interface TodayExtras {
  *  one of its sessions; its siblings count as in progress, as the rail
  *  counts them (review w11-3). */
 export function todayKpis(v: TodayView, extras: TodayExtras = { approvals: 0, failedRoutines: 0 }): TodayKpis {
-  const waiting = waitingIn(v.waiting);
+  const waiting = waitingIn(v.waiting, extras.notMine);
   return {
     needsYou:
       waiting +

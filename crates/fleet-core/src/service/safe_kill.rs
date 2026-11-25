@@ -293,6 +293,18 @@ pub async fn safe_kill_session(
                     ),
                 )
             })?;
+        // The request is a prompt for the session's agent: a shell would
+        // run its lines as commands, and a pane-less row has nowhere to
+        // type it (reviews w04-1, w17-2).
+        if row.kind == "shell" || crate::store::has_no_pane(&row.kind) {
+            return Err(IpcError::new(
+                codes::E_INVALID_STATE,
+                format!(
+                    "session {} has no agent to ask; kill it instead",
+                    args.tmux_name
+                ),
+            ));
+        }
         if row.status != "running" {
             return Err(IpcError::new(
                 codes::E_NOT_ALIVE,
@@ -703,10 +715,14 @@ pub(crate) fn git_for_worktree(host_alias: &str, base: &str, wt: &str) -> (Strin
     if host_alias == crate::service::projects::LOCAL_HOST {
         return (String::new(), format!("git -C {}", quote(base)));
     }
+    // No `--path-format=absolute`: git before 2.31 (Debian 11, Ubuntu
+    // 20.04) echoes the unknown flag and exits 0, and the two-line answer
+    // names no repository (review w02-1). `cd` into the answer, which may
+    // be relative to the worktree, and print where that is.
     (
         format!(
-            "fleet_git_dir=$(git -C {} rev-parse --path-format=absolute --git-common-dir) \
-             || exit 1; ",
+            "fleet_git_dir=$(CDPATH= cd -- {} && \
+             CDPATH= cd -- \"$(git rev-parse --git-common-dir)\" && pwd -P) || exit 1; ",
             quote(wt)
         ),
         "git --git-dir=\"$fleet_git_dir\"".to_string(),
@@ -1109,11 +1125,14 @@ mod tests {
         let remote = worktree_remove_script("vps", "/Users/m/projects/o/r", wt, false);
         assert!(!remote.contains("/Users/m"), "{remote}");
         assert!(
-            remote.contains(&format!(
-                "git -C '{wt}' rev-parse --path-format=absolute --git-common-dir"
+            remote.starts_with(&format!(
+                "fleet_git_dir=$(CDPATH= cd -- '{wt}' && \
+                 CDPATH= cd -- \"$(git rev-parse --git-common-dir)\" && pwd -P) || exit 1; "
             )),
             "{remote}"
         );
+        // Review w02-1: git before 2.31 does not know the flag.
+        assert!(!remote.contains("--path-format"), "{remote}");
         assert!(
             remote.ends_with(&format!(
                 "git --git-dir=\"$fleet_git_dir\" worktree remove -- '{wt}'"
@@ -1594,6 +1613,44 @@ SAFE_REMOVE_READY_n1";
                 row.safe_kill_state.is_none(),
                 "{status}: nothing was stamped"
             );
+        }
+    }
+
+    /// Reviews w04-1 / w17-2: a shell session (and a pane-less row) has no
+    /// agent to ask; nothing is stamped or typed into it.
+    #[tokio::test]
+    async fn safe_kill_refuses_a_shell_and_a_pane_less_row() {
+        for kind in ["shell", "bg"] {
+            let s = Store::open_in_memory().unwrap();
+            s.upsert_host("mac").unwrap();
+            let id = s
+                .upsert_session("w", "mac", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET kind = ?2, claude_status = 'idle' WHERE id = ?1",
+                    rusqlite::params![id, kind],
+                )
+                .unwrap();
+            let store = Mutex::new(s);
+            let ssh = Arc::new(SshClient::new());
+            let err = safe_kill_session(
+                SafeKillSessionArgs {
+                    host_alias: "mac".into(),
+                    tmux_name: "w".into(),
+                },
+                &store,
+                &ssh,
+            )
+            .await
+            .expect_err("no agent to ask");
+            assert_eq!(err.code, codes::E_INVALID_STATE, "{kind}: {}", err.message);
+            let row = lock(&store)
+                .unwrap()
+                .get_session_by_id(id)
+                .unwrap()
+                .unwrap();
+            assert!(row.safe_kill_state.is_none(), "{kind}: nothing was stamped");
         }
     }
 

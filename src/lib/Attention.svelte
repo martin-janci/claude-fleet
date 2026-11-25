@@ -34,9 +34,15 @@
   import { newlyStuck, stuckMessage, stuckSnapshot } from './attention';
   import {
     attentionIdleMinutes,
+    blockCauses,
+    causeTitle,
+    closeOsNotification,
+    coalesceByCause,
     newlyNotifiable,
     notificationAllowed,
+    notifyOwnSnapshot,
     notifySnapshot,
+    notifyStateOf,
     notifyStuckOs,
     notifyStuckToast,
     playChime,
@@ -45,13 +51,16 @@
   } from './notify';
   import { fleetSettings } from './fleet_settings';
   import { attentionFacts, attentionFactsFrom } from './attention_facts';
-  import { fleetRows, fleets, openFleetSession } from './fleets';
+  import { fleetRows, fleetRowWaitsOnMe, fleets, openFleetSession } from './fleets';
+  import { hosts } from './hosts';
+  import { accountUsage } from './account_usage_store';
+  import { accountByUuid, accountLabel } from './accounts';
   import { failing } from './routines';
   import type { AttentionState } from './attention';
   import { push } from './toasts';
   import { selectSessionExplicitly } from './selection';
   import { sidebarView } from './work_view';
-  import { accessOf, waitsOnMe } from './access';
+  import { waitsOnMeOf } from './access';
 
   /** Open a session of this window's fleet from a toast or a notification:
    *  the live row, if it is still there (review w11-4, w11-12). */
@@ -117,6 +126,27 @@
   }
 
   let prevStates: Map<number, AttentionState> | null = null;
+  /** The same rows without the fleet's facts (review w11-3). */
+  let prevOwn: Map<number, AttentionState> | null = null;
+  /** The causes (a down host, a login at its limit) with a notification up. */
+  let prevCauses = new Set<string>();
+  /** Whether usage had answered at the last look (review w11-2). */
+  let hostsKnown = false;
+  let usageKnown = false;
+
+  function accountName(uuid: string): string {
+    const a = get(accountByUuid).get(uuid);
+    return a ? accountLabel(a) : uuid.slice(0, 8);
+  }
+
+  /** Take down the notifications of rows that left the state they were
+   *  announced in (review w11-10): answered from the phone, say. */
+  function withdraw(before: ReadonlyMap<number, AttentionState>, now: ReadonlyMap<number, AttentionState>, tagOf: (state: NotifyState, id: number) => string) {
+    for (const [id, was] of before) {
+      const state = notifyStateOf(was);
+      if (state && notifyStateOf(now.get(id) ?? 'idle') !== state) closeOsNotification(tagOf(state, id));
+    }
+  }
   /** Failed routine runs already announced or known. */
   const seenRuns = new Set<number>();
   /** Runs that failed before the app opened are in the Inbox, not news. */
@@ -124,10 +154,11 @@
 
   onMount(() => {
     // Review w08-3 (option a): a session shared with this person at Read
-    // waits on its owner, so it never notifies here.
+    // waits on its owner, so it never notifies here. Nor does a teammate's
+    // row seen through team reach (review w11-1).
     const mine = (rows: SessionRow[]) => {
-      const of = get(accessOf);
-      return rows.filter((r) => waitsOnMe(of(r)));
+      const waits = get(waitsOnMeOf);
+      return rows.filter((r) => waits(r));
     };
     const unsub = sessions.subscribe((all) => {
       const rows = mine(all);
@@ -136,22 +167,57 @@
         return;
       }
       const fresh = newlyStuck(prev, rows);
-      prev = stuckSnapshot(rows);
+      const next = stuckSnapshot(rows);
+      for (const id of prev.keys()) if (!next.has(id)) closeOsNotification(`stuck-${id}`);
+      prev = next;
       if (fresh.length > 0) announce(fresh);
     });
     const unsubStates = sessions.subscribe((all) => {
       const rows = mine(all);
       const opts = { idleSecs: get(attentionIdleMinutes) * 60, now: Math.floor(Date.now() / 1000), facts: get(attentionFacts) };
       const before = prevStates;
+      const beforeOwn = prevOwn;
       prevStates = notifySnapshot(rows, opts);
+      prevOwn = notifyOwnSnapshot(rows, opts);
+      // Review w11-2: the facts arrive after the rows, so a row that was
+      // already blocked at launch looks newly blocked at the look where the
+      // hosts (or usage) first answer. That look is the baseline for them.
+      const hostsWas = hostsKnown;
+      hostsKnown = get(hosts).length > 0;
+      const usageWas = usageKnown;
+      usageKnown = Object.keys(get(accountUsage)).length > 0;
+      const causesNow = blockCauses(rows, opts);
+      // The causes of the last look: one that still holds is not news when
+      // another row joins it (review r5-06-3: sessions on a limited account
+      // stop one by one, and each rang).
+      const causesBefore = prevCauses;
+      for (const key of causesBefore) if (!causesNow.has(key)) closeOsNotification(`blocked-${key}`);
+      prevCauses = new Set(causesNow.keys());
       if (before === null || !get(sessionsLoaded)) return;
+      withdraw(before, prevStates, (state, id) => `${state}-${id}`);
       const friendly = get(showFriendlyNames);
       let chimed = false;
-      for (const { row, state } of newlyNotifiable(before, rows, opts)) {
+      const { single, causes } = coalesceByCause(newlyNotifiable(before, rows, opts, beforeOwn ?? undefined), rows, opts);
+      for (const { row, state } of single) {
         const name = friendly && row.friendly_name ? row.friendly_name : row.tmux_name;
         const id = row.id;
         chimed =
           notifyMatrix(state, `${name} ${TITLES[state]}`, row.host_alias, `${state}-${id}`, !chimed, () => openRow(id)) || chimed;
+      }
+      for (const { cause, rows: held } of causes) {
+        if (causesBefore.has(cause.key)) continue;
+        // Only the look at which a store first answered is its baseline. A
+        // store that stays empty holds nothing back: a signed-out login is
+        // a host fact and needs no usage reading (review r5-06-2).
+        const hostsFirst = hostsKnown && !hostsWas;
+        const usageFirst = usageKnown && !usageWas;
+        if (cause.kind === 'host_down' ? hostsFirst : cause.kind === 'account_limit' ? usageFirst : hostsFirst || usageFirst) continue;
+        const names = held.map((r) => (friendly && r.friendly_name ? r.friendly_name : r.tmux_name));
+        const body = names.length > 3 ? `${names.slice(0, 3).join(', ')} and ${names.length - 3} more` : names.join(', ');
+        chimed =
+          notifyMatrix('blocked', causeTitle(cause, held.length, accountName), body, `blocked-${cause.key}`, !chimed, () =>
+            sidebarView.set('inbox'),
+          ) || chimed;
       }
     });
     const unsubRuns = failing.subscribe((list) => {
@@ -159,6 +225,9 @@
       for (const f of list) {
         if (seenRuns.has(f.run.id)) continue;
         seenRuns.add(f.run.id);
+        // A teammate's routine: the Inbox and the badge leave it out, as
+        // this person has no Fix or Retry for it (review w11-7).
+        if (!f.may_change) continue;
         if ((f.run.finished_at ?? f.run.started_at) < openedAt) continue;
         const title = `Routine ${f.routine.name} failed`;
         // A failed routine is listed in the Inbox, with its Fix and Retry.
@@ -169,7 +238,9 @@
       }
     });
     const fleetPrev = new Map<string, Map<number, AttentionState>>();
+    const fleetOwnPrev = new Map<string, Map<number, AttentionState>>();
     const fleetStuckPrev = new Map<string, Map<number, StuckKind>>();
+    const fleetCauses = new Map<string, Set<string>>();
     const unsubFleets = fleetRows.subscribe((all) => {
       const now = Math.floor(Date.now() / 1000);
       const idleSecs = get(attentionIdleMinutes) * 60;
@@ -183,15 +254,34 @@
         // event brought first would make every listed row look new (w01-13).
         if (known.find((f) => f.id === fid)?.duplicate_of || !rows.loaded) continue;
         watched.add(fid);
-        const list = [...rows.sessions.values()];
+        // Only the rows that wait on this person there (review w11-1).
+        const list = [...rows.sessions.values()].filter((s) => fleetRowWaitsOnMe(rows, s));
         const opts = { idleSecs, now, facts: attentionFactsFrom([...rows.hosts.values()], {}, now) };
         const before = fleetPrev.get(fid);
+        const beforeOwn = fleetOwnPrev.get(fid);
         const beforeStuck = fleetStuckPrev.get(fid);
-        fleetPrev.set(fid, notifySnapshot(list, opts));
-        fleetStuckPrev.set(fid, stuckSnapshot(list));
+        const states = notifySnapshot(list, opts);
+        const stuck = stuckSnapshot(list);
+        fleetPrev.set(fid, states);
+        fleetOwnPrev.set(fid, notifyOwnSnapshot(list, opts));
+        fleetStuckPrev.set(fid, stuck);
+        const causesNow = blockCauses(list, opts);
+        const up = fleetCauses.get(fid) ?? new Set<string>();
+        for (const key of up) if (!causesNow.has(key)) closeOsNotification(`blocked-${fid}-${key}`);
+        fleetCauses.set(fid, new Set(causesNow.keys()));
+        if (beforeStuck) for (const id of beforeStuck.keys()) if (!stuck.has(id)) closeOsNotification(`stuck-${fid}-${id}`);
         if (!before || before.size === 0) continue;
+        withdraw(before, states, (state, id) => `${state}-${fid}-${id}`);
         const label = known.find((f) => f.id === fid)?.label ?? fid;
-        for (const { row, state } of newlyNotifiable(before, list, opts)) {
+        const { single, causes } = coalesceByCause(newlyNotifiable(before, list, opts, beforeOwn), list, opts);
+        for (const { cause, rows: held } of causes) {
+          if (up.has(cause.key)) continue;
+          chimed =
+            notifyMatrix('blocked', causeTitle(cause, held.length, accountName), label, `blocked-${fid}-${cause.key}`, !chimed, () =>
+              sidebarView.set('inbox'),
+            ) || chimed;
+        }
+        for (const { row, state } of single) {
           const name = friendly && row.friendly_name ? row.friendly_name : row.tmux_name;
           const id = row.id;
           // Review w17-6: a click opens the fleet's session, as the primary's does.
@@ -215,7 +305,9 @@
       for (const fid of [...fleetPrev.keys()]) {
         if (!watched.has(fid)) {
           fleetPrev.delete(fid);
+          fleetOwnPrev.delete(fid);
           fleetStuckPrev.delete(fid);
+          fleetCauses.delete(fid);
         }
       }
     });

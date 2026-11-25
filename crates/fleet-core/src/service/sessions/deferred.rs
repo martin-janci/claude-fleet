@@ -47,6 +47,13 @@ pub struct QueuePromptArgs {
     /// "Skip it if the session is archived first".
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub skip_if_archived: bool,
+    /// Mirrors `QueuePromptParams.client_msg_id` for the hub wire (the
+    /// hub-client route serialises this struct as the tool's arguments): a
+    /// retry with the same id answers the first call's result instead of
+    /// queueing the prompt again (reviews r4 w01-4, w09-3). Ignored here: the
+    /// dedupe lives in the tool layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_msg_id: Option<String>,
 }
 
 impl QueuePromptArgs {
@@ -158,7 +165,14 @@ fn archived(row: &SessionRow) -> bool {
 /// Whether the session's account is known to be at or past the line now.
 fn account_over(s: &Store, row: &SessionRow, now: i64) -> Result<bool, IpcError> {
     match row.account_uuid.as_deref() {
-        Some(uuid) => crate::service::account_limits::account_over_line(s, uuid, now),
+        // The row's own model counts too: a session launched on Opus is
+        // paused by the weekly Opus window alone (review w07-3).
+        Some(uuid) => crate::service::account_limits::account_over_line_on(
+            s,
+            uuid,
+            now,
+            row.launch_model.as_deref(),
+        ),
         None => Ok(false),
     }
 }
@@ -280,6 +294,25 @@ where
         ));
     }
     let timing = args.timing();
+    // `stopped`: the agent's process is gone and the pane is its login
+    // shell. Nothing wakes such a row, so a prompt meant for now would wait
+    // with no error (review w09-1). A timed one is queued as before (review
+    // r5-03-5): it is typed once the session is restarted, which is what
+    // "schedule a follow-up, then press Restart" and the Scheduled list's
+    // Undo rely on.
+    let timed = timing.not_before.is_some() || timing.until_limit_reset;
+    if row.claude_status.as_deref() == Some("stopped") && !timed {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!(
+                "the agent in session {} has exited; restart the session",
+                row.id
+            ),
+        ));
+    }
+    if let Some(t) = timing.not_before {
+        crate::validate::unix_seconds_ahead("not_before", t, now)?;
+    }
     if timing.skip_if_archived && archived(&row) {
         return Err(IpcError::new(
             codes::E_INVALID_STATE,
@@ -1629,6 +1662,53 @@ mod tests {
         assert!(out.is_none());
     }
 
+    /// Review w09-1: nothing wakes a `stopped` row, so its prompt is refused.
+    #[tokio::test]
+    async fn a_prompt_for_a_session_whose_agent_exited_is_refused_not_queued() {
+        let (store, id) = store_with("stopped");
+        let e = queue_prompt_with(args(id, "later"), &store, now_unix(), |_, _| async {
+            panic!("typed into a shell")
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID_STATE);
+        assert!(e.message.contains("has exited"), "{}", e.message);
+        assert!(store
+            .lock()
+            .unwrap()
+            .next_deferred_prompt(id)
+            .unwrap()
+            .is_none());
+        // Review r5-03-5: a timed one is queued, for after the restart.
+        let mut later = args(id, "after the restart");
+        later.not_before = Some(now_unix() + 3_600);
+        let r = queue_prompt_with(later, &store, now_unix(), |_, _| async {
+            panic!("typed into a shell")
+        })
+        .await
+        .unwrap();
+        assert!(!r.delivered && r.queued_id.is_some());
+    }
+
+    /// Reviews w15-5 / w16-4: a `not_before` in milliseconds never comes due.
+    #[tokio::test]
+    async fn a_not_before_in_milliseconds_is_refused_not_queued() {
+        let (store, id) = store_with("working");
+        let now = now_unix();
+        let mut a = args(id, "later");
+        a.not_before = Some(now * 1000);
+        let e = queue_prompt_with(a, &store, now, |_, _| async { Ok(()) })
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_VALIDATE);
+        assert!(store
+            .lock()
+            .unwrap()
+            .next_deferred_prompt(id)
+            .unwrap()
+            .is_none());
+    }
+
     #[tokio::test]
     async fn a_prompt_for_a_lost_or_killed_session_is_refused_not_queued() {
         let (store, id) = store_with("working");
@@ -1779,6 +1859,51 @@ mod tests {
             source_host: None,
         })
         .unwrap();
+    }
+
+    /// Review w07-3: a session launched on Opus is paused by the weekly
+    /// Opus window alone, so its "when the limit resets" prompt waits too.
+    #[tokio::test]
+    async fn a_prompt_for_after_the_limit_waits_for_the_rows_own_model_window() {
+        use crate::service::account_usage::{AccountUsage, Window};
+        let (store, id) = store_with("idle");
+        set_account_use(&store, id, 60.0, T + 1_000);
+        {
+            let s = store.lock().unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET launch_model = 'opus' WHERE id = ?1",
+                    [id],
+                )
+                .unwrap();
+            s.insert_usage_snapshot(&crate::store::UsageSnapshotRow {
+                account_uuid: "acct".into(),
+                fetched_at: T + 1,
+                usage: AccountUsage {
+                    seven_day: Some(Window {
+                        utilization: 60.0,
+                        resets_at: Some(T + 5_000),
+                    }),
+                    seven_day_opus: Some(Window {
+                        utilization: 100.0,
+                        resets_at: Some(T + 5_000),
+                    }),
+                    ..Default::default()
+                },
+                subscription: None,
+                source_host: None,
+            })
+            .unwrap();
+        }
+        let r = queue_prompt_with(
+            timed(id, "after the reset", |a| a.until_limit_reset = true),
+            &store,
+            T + 2,
+            |_, _| async { panic!("the Opus window is full") },
+        )
+        .await
+        .unwrap();
+        assert!(!r.delivered);
     }
 
     #[tokio::test]

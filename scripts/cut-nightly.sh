@@ -20,7 +20,10 @@
 #   env: GH_TOKEN (dispatch) DRY_RUN=1 (commit and tag locally, push nothing)
 #
 # Prints the version on stdout. Idempotent: a version whose tag exists is
-# printed and nothing else happens.
+# printed and not cut again. Its two workflows are still looked up, and one
+# that has no run at the tag is dispatched: the tag is pushed before the
+# dispatches, so a dispatch that failed on an API error left a tag nothing
+# was building, and a re-run used to stop at "exists already" and go green.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -52,8 +55,27 @@ version="$major.$minor.$((patch + 1))-dev.$n.${desktop:+desktop.}g$short"
 
 echo "$version"
 [ -z "$version_only" ] || exit 0
+workflows="release.yml hub-image.yml"
 if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
   echo "cut-nightly.sh: v$version exists already" >&2
+  if [ "${DRY_RUN:-0}" = 1 ]; then exit 0; fi
+  # A tag that is only local (a DRY_RUN left it) was never pushed: nothing to
+  # finish, and nothing to dispatch at.
+  if ! git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1; then
+    echo "cut-nightly.sh: v$version is not on origin; not dispatching" >&2
+    exit 0
+  fi
+  # A run of any state counts (queued, running, failed: a failed build is
+  # re-run by a person, not started twice here). A lookup that fails is an
+  # error, so the job goes red and can be re-run, rather than "nothing to do".
+  for wf in $workflows; do
+    runs="$(gh run list --workflow "$wf" --branch "v$version" --limit 1 --json databaseId --jq length)" \
+      || { echo "cut-nightly.sh: could not list the runs of $wf at v$version" >&2; exit 1; }
+    if [ "$runs" = 0 ]; then
+      echo "cut-nightly.sh: $wf has no run at v$version; dispatching it" >&2
+      gh workflow run "$wf" --ref "v$version" >&2
+    fi
+  done
   exit 0
 fi
 
@@ -71,7 +93,7 @@ if [ "${DRY_RUN:-0}" = 1 ]; then
   exit 0
 fi
 git push -q origin "refs/tags/v$version"
-for wf in release.yml hub-image.yml; do
+for wf in $workflows; do
   gh workflow run "$wf" --ref "v$version" >&2
 done
 echo "cut-nightly.sh: pushed v$version and dispatched release.yml and hub-image.yml at it" >&2

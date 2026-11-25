@@ -374,6 +374,35 @@ pub(crate) fn fetch_owner_repo(s: &Store, project_id: i64) -> Result<(String, St
     .map_err(missing_row("project", project_id))
 }
 
+/// The repository a checkout of project `project_id` on another host must
+/// be, for [`super::lifecycle`]'s same-repository check: the project's
+/// `github_origin` (`ProjectRow::github_origin`). `None`, and so no check,
+/// for an adopted `local/<dir>` project: `owner`/`repo` are a name there,
+/// not the repository's identity (review w02-4). A project whose origin
+/// was never read (a row from before migration 207 on a hub) is held to
+/// the URL its `owner`/`repo` name, so a fork is not started in its
+/// upstream's clone while the row waits for a backfill (review r5-02-3).
+pub(crate) fn fetch_repo_identity(s: &Store, project_id: i64) -> Result<Option<String>, IpcError> {
+    let mut stmt = s
+        .conn_ref()
+        .prepare("SELECT owner, repo, github_origin FROM projects WHERE id=?1")?;
+    let (owner, repo, origin) = stmt
+        .query_row(rusqlite::params![project_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(missing_row("project", project_id))?;
+    if owner == "local" {
+        return Ok(None);
+    }
+    Ok(Some(origin.unwrap_or_else(|| {
+        crate::repo_url::clone_url_for(&owner, &repo)
+    })))
+}
+
 /// A system project's `base_path`, or `None` for an ordinary project.
 ///
 /// A system project (`projects.system`, e.g. the UX agent's operator dir) is
@@ -429,6 +458,36 @@ pub(super) fn fetch_worktree(
         ))
     })
     .map_err(missing_row("worktree", worktree_id))
+}
+
+/// Refuse a start in worktree `worktree_id` filed under another project
+/// than `project_id` (review w17-3): a client that sent the two out of step
+/// (a worktree list that answered late for the project picked before) would
+/// get a session filed under one repository and running in another's
+/// checkout.
+pub(super) fn reject_worktree_of_another_project(
+    s: &Store,
+    worktree_id: i64,
+    project_id: i64,
+) -> Result<(), IpcError> {
+    let mut stmt = s
+        .conn_ref()
+        .prepare("SELECT project_id, name FROM worktrees WHERE id=?1")?;
+    let (of, name) = stmt
+        .query_row(rusqlite::params![worktree_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(missing_row("worktree", worktree_id))?;
+    if of == project_id {
+        return Ok(());
+    }
+    Err(IpcError::new(
+        crate::ipc_error::codes::E_INVALID,
+        format!(
+            "worktree {name} ({worktree_id}) is a checkout of project {of}, not of project \
+             {project_id}; pick one of this project's worktrees or start a new one"
+        ),
+    ))
 }
 
 /// Where work that ran in worktree `worktree_key` of `project_id` on `host`

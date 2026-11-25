@@ -56,7 +56,9 @@ concurrency:
 #   version-consistency      0:10        15
 #   ag                       0:16        15
 #   frontend             2:06-4:39        30
-#   rust                16:45-17:33       60
+#   rust                16:45-17:33       90   (ubuntu ~10 min; macos-latest
+#                                              measured 43, 56 and a 59:24
+#                                              cancel on main, 2026-11-24)
 #   rust-windows            18:49         60
 #   windows-bundle     (new: the bundle, split out of rust-windows)   60
 #   clippy             (new: macOS/Windows lint, split out of the test jobs)   30
@@ -206,6 +208,11 @@ jobs:
       # (fleet-mobile 0.4.8 shipped at 7 beside a revision-8 hub). A second.
       - name: release-mobile contract guard
         run: bash scripts/release-mobile-test.sh
+      # scripts/check-release-drift.sh against a fake gh and curl: zero drafts
+      # under the workflow's token is clean, and the completeness check still
+      # reaches stable releases behind the per-push dev ones. A second.
+      - name: release-drift check
+        run: bash scripts/check-release-drift-test.sh
       # The same rule against this tree, so a contract bump meets the phone on
       # its own PR instead of at release time: fleet-mobile main's
       # MIN/MAX_HUB_CONTRACT must cover this checkout's CONTRACT_REVISION.
@@ -274,7 +281,13 @@ jobs:
   rust:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
-    timeout-minutes: 60
+    # 90, not 60: the macOS leg's `cargo test --workspace` ran 43 and 56
+    # minutes on main and was cancelled at 59:24 (run 45066155675). A cancelled
+    # main run means no dev release for that commit (nightly.yml needs
+    # `success`) and a refused release cut (check-ci-green.sh). Where the
+    # macOS time goes (compile or the SQLite tempdir stall CLAUDE.md records
+    # for Linux) is not yet measured; lower this again once it is fixed.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:

@@ -29,7 +29,7 @@ import { writable, get } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { sessionIdActionBlocked } from './share';
 import { pairedLocalRefusal } from './access';
-import { sendPrompt, sessions } from './sessions';
+import { newClientMsgId, sendPrompt, sessions } from './sessions';
 import { markNeedsReattach, type Attachment } from './attachments';
 import { withAttachments, tooLong } from './attach_prompt';
 import { recordAttachments } from './library';
@@ -58,6 +58,11 @@ export interface OutboxRow {
 
 export interface OutboxMessage {
   id: string;
+  /** The `client_msg_id` every send attempt of this message carries: a hub
+   *  that already typed it answers a Retry with the first result instead of
+   *  typing it again (review r4 w09-2). Random, since `id` restarts with
+   *  each launch. */
+  clientMsgId: string;
   kind: 'prompt' | 'command';
   /** What the user typed: the bubble shows this, not the prefixed body. */
   text: string;
@@ -70,6 +75,9 @@ export interface OutboxMessage {
   /** False once a retry cannot work as-is: the upload spent the picked
    *  paths, or the prompt is too long. Edit is the way out. */
   retryable: boolean;
+  /** Failed before anything was uploaded (too long): the picked paths are
+   *  not spent, so Edit hands the tiles back as they were (review r5-07-3). */
+  unsent?: boolean;
   /** ISO time the user pressed Enter. */
   at: string;
   /** ms timestamp the current send attempt started. */
@@ -85,7 +93,7 @@ export interface OutboxMessage {
 }
 
 export interface OutboxDeps {
-  send(host: string, tmux: string, body: string, fleet?: string): Promise<Result<void>>;
+  send(host: string, tmux: string, body: string, fleet?: string, clientMsgId?: string): Promise<Result<void>>;
   upload(host: string, tmux: string, localPaths: string[], fleet?: string): Promise<Result<string[]>>;
   row(sessionId: number): OutboxRow | undefined;
   /**
@@ -140,7 +148,7 @@ export function outboxBody(m: {
   return withAttachments(prefixed, m.paths ?? []);
 }
 
-const TOO_LONG = 'That prompt is too long to send through tmux. Shorten it.';
+const TOO_LONG = 'That prompt is too long to send (the limit is 64 KB). Shorten it.';
 
 /** Still in line behind a failed message of the same session. */
 export function isHeld(msgs: OutboxMessage[], id: string): boolean {
@@ -256,6 +264,7 @@ export function createOutbox(deps: OutboxDeps) {
             : 0);
     const msg: OutboxMessage = {
       id: `ob${++nextId}`,
+      clientMsgId: newClientMsgId(),
       kind: input.kind,
       text: input.text,
       prefix,
@@ -310,6 +319,12 @@ export function createOutbox(deps: OutboxDeps) {
     const gen = genOf(sid);
 
     let paths = m.paths;
+    // Before the upload, which spends the picked paths (w16-1): the text
+    // alone is already over the limit.
+    if (paths === null && tooLong(outboxBody(m))) {
+      patch(sid, id, { state: 'failed', error: TOO_LONG, retryable: false, unsent: true });
+      return;
+    }
     if (paths === null && m.attachments.length > 0) {
       const up = await deps.upload(
         target.host_alias,
@@ -330,7 +345,7 @@ export function createOutbox(deps: OutboxDeps) {
     m = find(sid, id)!;
 
     const body = outboxBody({ ...m, paths });
-    if (tooLong(body, target.host_alias === 'local')) {
+    if (tooLong(body)) {
       patch(sid, id, { state: 'failed', error: TOO_LONG, retryable: false });
       return;
     }
@@ -346,10 +361,12 @@ export function createOutbox(deps: OutboxDeps) {
 
     const before = deps.row(sid);
     patch(sid, id, { turnSeqAtSend: before?.turn_seq ?? null });
-    const r = await deps.send(target.host_alias, target.tmux_name, body, target.fleet);
+    const r = await deps.send(target.host_alias, target.tmux_name, body, target.fleet, m.clientMsgId);
     if (mine !== epoch || genOf(sid) !== gen) return;
     if (!r.ok) {
-      patch(sid, id, { state: 'failed', error: errorText(r.error), retryable: true, acked: false });
+      // A refused body (too long, a control character) is refused again on
+      // Retry: Edit is the way out (w09-6).
+      patch(sid, id, { state: 'failed', error: errorText(r.error), retryable: r.error.code !== 'E_VALIDATE', acked: false });
       return;
     }
     stamp += 1;
@@ -439,7 +456,7 @@ export function createOutbox(deps: OutboxDeps) {
     if (!m || m.state !== 'failed') return null;
     remove(sid, id);
     pump(sid);
-    const spent = m.paths !== null || !m.retryable;
+    const spent = m.paths !== null || (!m.retryable && !m.unsent);
     const ids = new Set(spent ? m.attachments.map((a) => a.id) : []);
     return { text: m.text, attachments: markNeedsReattach(m.attachments, ids) };
   }
@@ -503,7 +520,8 @@ export async function uploadAttachments(
  *  attachments through `upload_attachments`, and receipts come off the
  *  sessions store's row events. */
 export const outbox = createOutbox({
-  send: (host, tmux, body, fleet) => (fleet === undefined ? sendPrompt(host, tmux, body) : sendPrompt(host, tmux, body, { fleet })),
+  send: (host, tmux, body, fleet, clientMsgId) =>
+    sendPrompt(host, tmux, body, { ...(fleet === undefined ? {} : { fleet }), ...(clientMsgId === undefined ? {} : { clientMsgId }) }),
   // The access half, resolved from the id the queue carries. The pure form
   // rather than the store: a send runs from a `.finally`, not from a reactive
   // position, so the `get()` defaults are what is wanted — and a row the

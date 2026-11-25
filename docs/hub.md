@@ -332,11 +332,16 @@ the copy of state.db you backed up before upgrading.
 ```
 
 That message is the whole rollback procedure for a version that migrated:
-go forward again, or restore the backup you took above — with the hub stopped,
-`docker compose cp state.db.<date>.bak
-fleet-hub:/var/lib/fleet-hub/state.db`, then start the older version. Sessions
-that ran while the newer release was up are in the newer database, not in the
-restored one. Rolling back between two versions that share a schema needs
+go forward again, or restore the backup you took above
+(`pre-upgrade-<stamp>.db`, in `/var/lib/fleet-hub/backups/` inside the data
+volume and wherever you copied it) by following *Restore drill* below, then
+start the older version. Do not copy the file over `state.db` by hand: the
+drill also moves `state.db-wal` and `state.db-shm` aside (left in place,
+SQLite replays the newer release's pages over the restored file, which undoes
+the restore or damages it) and gives the file to uid 1000, the user the hub
+runs as (`docker cp` writes it as root, and the hub cannot open that).
+Sessions that ran while the newer release was up are in the newer database,
+not in the restored one. Rolling back between two versions that share a schema needs
 none of this and loses nothing.
 
 **If a pull fails.** `manifest unknown` means the tag does not exist — check
@@ -452,7 +457,10 @@ sudo FLEET_HUB_DATA=/volume1/docker/fleet-hub/data deploy/hub/backup.sh
 `FLEET_HUB_DATA` defaults to `/volume1/docker/fleet-hub/data` (the Synology
 layout below); point it at the compose directory's `data/` anywhere else.
 
-It runs `.backup`, then `PRAGMA integrity_check` on the copy (a failed check
+It runs `VACUUM INTO` (one read snapshot, as `fleet-hub backup` does, so a
+busy hub cannot make it start over; a `sqlite3` older than 3.27 gets
+`.backup` under `timeout`, `BACKUP_TIMEOUT` seconds, default 3600), then
+`PRAGMA integrity_check` on the copy (a failed check
 removes it and exits 1; a run killed mid-copy removes its `.part`), then
 prunes to the newest `KEEP` files of its own `PREFIX` — other prefixes are
 never touched (`PREFIX=pre-1.0.0` prunes `pre-1.0.0-<stamp>.db`, never
@@ -506,7 +514,8 @@ The backups to restore from are `backup.sh`'s `state-<stamp>.db` (and
 `upgrade.sh`'s `pre-<version>-<stamp>.db`) in `backups/` beside the compose
 file, and the hub's own daily `daily-<stamp>.db` and `fleet-hub backup`'s
 `<prefix>-<stamp>.db` under `/var/lib/fleet-hub/backups/`, inside the data
-volume. With a bind-mounted `./data` (*Behind an existing reverse proxy*):
+volume, where the *Back up first* copy (`pre-upgrade-<stamp>.db`) is too.
+With a bind-mounted `./data` (*Behind an existing reverse proxy*):
 
 ```bash
 docker compose stop fleet-hub
@@ -530,7 +539,7 @@ docker compose up -d fleet-hub
 ```
 
 A copy you took out with `docker compose cp` goes back in the same way:
-`docker run --rm -v fleet-hub_hub-data:/d -v "$PWD":/b alpine cp /b/<file>.db /d/state.db`
+`docker run --rm -v fleet-hub_hub-data:/d -v "$PWD":/b alpine sh -c 'cp /b/<file>.db /d/state.db && chown 1000 /d/state.db'`
 (after moving the old `state.db`, `-wal` and `-shm` aside as above).
 
 Restoring a copy taken before a migration onto a newer image re-runs the
@@ -975,9 +984,12 @@ So `fleet-agent` relays them:
   agent adds no credential. That bearer is not the host token but a
   hook-only token derived from it (`fhk1_` + HMAC-SHA256 under the host
   token, `mcp::auth::hook_token`): the hub recomputes it from the stored
-  host token and accepts it on `/hook` only, so another local account that
-  takes the port while the agent is down collects nothing that can dial
-  `/agent` or call `/mcp`. Rotating the host token rotates it. An older
+  host token and accepts it on `/hook` and on `GET /voice/capture` (the
+  host's recorder reads the same headers file) only, so another local
+  account that takes the port while the agent is down collects nothing that
+  can dial `/agent` or call `/mcp`. It could post hook events and, for a
+  session of that host with the microphone on, start the claimed device's
+  capture and read the audio. Rotating the host token rotates it. An older
   agent relays it unchanged; an older hub writes the host token as before. A
   request carrying an `Origin`, or a `Host` that is not loopback, is refused
   (a browser aimed at the port). The hub's answer — status, `Content-Type`,
@@ -1007,10 +1019,16 @@ fleet-agent uninstall --user        # Linux, --user unit; macOS (no flag needed)
 
 It stops and disables the unit and the update timer (on macOS it boots the
 LaunchAgent out), removes them, the config (it holds the host's token; pass
-`--config` if `install --config` put it elsewhere) and the updater's state,
-and reloads systemd. The sessions the agent started keep running, and the
-binaries stay: it prints where they are. An agent older than `uninstall`
-is removed by hand:
+`--config` if `install --config` put it elsewhere), the updater's state and
+the agent's own state (`~/.local/state/fleet-agent`: the identity file the
+desktop app on that machine reads, and the status line; for a system unit,
+in the home of the user it runs as), and reloads systemd. The sessions the
+agent started keep running, and the binaries stay: it prints where they are.
+It exits non-zero, and does not say "uninstalled", when it finds no agent in
+that scope (it names the other one to try) and when the unit was there but
+could not be stopped (for example `--user` with no user session bus): the
+files are removed, the process may still be running, and it prints how to
+stop it. An agent older than `uninstall` is removed by hand:
 
 ```bash
 # Linux, system unit (installed with sudo)
@@ -2662,7 +2680,10 @@ another reason while its account had room (signed out, host down), the
 minutes between a limit and the next reading, extra usage (an account
 with it on keeps working past its limit and is counted at its limit all
 the same; its line says `extra usage is on`), and a weekly limit on one
-model only (Opus, Sonnet), which fleet does not pause a row for either.
+model only (Opus, Sonnet): fleet pauses only the sessions launched on that
+model for it, and the census does not count it. With `--db` (a copy) the
+window ends an hour after the copy's newest reading, not at the wall clock,
+and the output says so.
 Logins that no reading counts in the window are named in `logins with no
 usage reading`, an API key and a setup token as such (`ci (API key)`,
 `team (setup token)`).

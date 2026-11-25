@@ -550,7 +550,7 @@ export function compactWindow(
   const usage = snapshot.usage;
   const win: UsageWindow | null = usage ? (kind === '5h' ? usage.five_hour : usage.seven_day) : null;
   if (!win) return { left: '—', reset: null, freshness: 'unknown' };
-  const fr = freshness(kind, snapshot.fetched_at, win.resets_at, now);
+  const fr = freshness(kind, snapshot.fetched_at, win.resets_at, now, win.utilization);
   if (fr === 'expired') return { left: '? left', reset: null, freshness: fr };
   const left = `${fr === 'stale' ? '~' : ''}${leftPct(win)}% left`;
   const reset = win.resets_at == null ? null : formatResetShort(kind, win.resets_at, now, locale, timeZone);
@@ -575,8 +575,8 @@ export function freshnessMark(snapshot: AccountUsageSnapshot | null, now: number
   }
   const u = snapshot.usage;
   const states = [
-    u.five_hour ? freshness('5h', fetchedAt, u.five_hour.resets_at, now) : null,
-    u.seven_day ? freshness('weekly', fetchedAt, u.seven_day.resets_at, now) : null,
+    u.five_hour ? freshness('5h', fetchedAt, u.five_hour.resets_at, now, u.five_hour.utilization) : null,
+    u.seven_day ? freshness('weekly', fetchedAt, u.seven_day.resets_at, now, u.seven_day.utilization) : null,
   ].filter((s): s is Freshness => s !== null);
   const age = formatAge(now - fetchedAt);
   const ago = checkedAgo(fetchedAt, now);
