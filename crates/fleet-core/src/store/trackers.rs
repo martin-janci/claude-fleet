@@ -1845,10 +1845,12 @@ mod tests {
         }
         assert_eq!(
             src.matches("FROM tracker_secrets").count(),
-            4,
+            6,
             "tracker_secrets is read by resolve_tracker_credential, \
-             tracker_secret_literals and deleted by remove_tracker and \
-             set_tracker_transport (a via_cli tracker holds none) only"
+             tracker_secret_literals and tracker_credential_is_reference (whether \
+             it is a reference, never the value) and deleted by remove_tracker, \
+             set_tracker_transport (a via_cli tracker holds none) and \
+             forget_tracker_credential only"
         );
     }
 
