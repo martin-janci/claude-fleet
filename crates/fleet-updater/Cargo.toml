@@ -45,6 +45,9 @@ rustls-pki-types = { version = "1", features = ["std"] }
 # The exec WebSocket's Sec-WebSocket-Key (kube.rs, ws.rs); already in the
 # lockfile through fleet-update.
 base64 = "0.22"
+# `O_NOFOLLOW` for `common::restore_db`, which runs as root in a directory
+# the hub's user owns. Already in the lockfile (tokio, ring).
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

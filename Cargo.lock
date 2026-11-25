@@ -1714,6 +1714,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "fleet-update",
+ "libc",
  "rustls-pki-types",
  "serde",
  "serde_json",

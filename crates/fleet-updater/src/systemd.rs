@@ -123,6 +123,20 @@ pub fn parse_show(text: &str) -> std::collections::HashMap<String, String> {
         .collect()
 }
 
+/// Whether the binary a unit's main process runs (`/proc/<pid>/exe`) is the
+/// one its `ExecStart` link names, so asking it for `--version` runs
+/// nothing the updater did not install. This pass runs as root and the
+/// process is the hub's or the agent's own user: a process that `execve`d
+/// a file of its own (after a compromise, or under a same-user `ptrace`)
+/// otherwise had that file run as root on the next pass. Anything else
+/// reads as no version, as an unreadable binary always has.
+pub(crate) fn runs_the_link(exe: &Path, link: &Path) -> bool {
+    match (std::fs::canonicalize(exe), std::fs::canonicalize(link)) {
+        (Ok(e), Ok(l)) => e == l,
+        _ => false,
+    }
+}
+
 #[async_trait]
 impl Host for SystemdHost {
     async fn fetch(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
@@ -208,7 +222,10 @@ impl Host for SystemdHost {
             .and_then(|p| p.parse::<u32>().ok())
             .filter(|p| *p > 0)
             .and_then(|pid| std::fs::read_link(format!("/proc/{pid}/exe")).ok());
-        let version = exe.as_deref().and_then(|e| self.version_of(e).ok());
+        let version = exe
+            .as_deref()
+            .filter(|e| runs_the_link(e, &self.link))
+            .and_then(|e| self.version_of(e).ok());
         match &self.hub {
             None => {
                 let status = show.get("StatusText").cloned().unwrap_or_default();
@@ -286,6 +303,24 @@ impl Host for SystemdHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the binary the unit's link resolves to is asked its version; a
+    /// file the service's own process switched to is never run.
+    #[test]
+    fn only_the_installed_binary_is_asked_its_version() {
+        let d = tempfile::tempdir().unwrap();
+        let release = d.path().join("releases/0.6.5/fleet-hub");
+        std::fs::create_dir_all(release.parent().unwrap()).unwrap();
+        std::fs::write(&release, "bin").unwrap();
+        let link = d.path().join("fleet-hub");
+        std::os::unix::fs::symlink(&release, &link).unwrap();
+        assert!(runs_the_link(&release, &link));
+        let planted = d.path().join("home/fleet/x");
+        std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+        std::fs::write(&planted, "evil").unwrap();
+        assert!(!runs_the_link(&planted, &link));
+        assert!(!runs_the_link(Path::new("/nonexistent (deleted)"), &link));
+    }
 
     #[test]
     fn an_environment_file_reads_like_systemd_reads_it() {

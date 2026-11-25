@@ -193,30 +193,81 @@ pub fn save_token(dir: &Path, name: &str, token: &str) -> Result<PathBuf, String
 
 /// Move `state.db*` aside into `failed-<v>-<stamp>/` (never deleted) and put
 /// a copy of `backup` in their place, owned like the database it replaces.
+///
+/// This runs as root (a bare hub's update unit, the Docker sidecar) in a
+/// directory the hub's own user owns, so nothing here follows a link that
+/// user could have planted: the backup is opened with `O_NOFOLLOW` and must
+/// be a regular file, the copy is a NEW file (`O_CREAT|O_EXCL|O_NOFOLLOW`,
+/// after whatever sat at its name is removed — a link itself, never its
+/// target), it is given away through its open descriptor, and the aside
+/// directory is created fresh. A fixed `state.db.restore` that was a link
+/// to `/etc/ld.so.preload` used to be written and chowned through.
 pub fn restore_db(data: &Path, backup: &Path, failed_version: &str) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
     let db = data.join("state.db");
-    let owner = std::fs::metadata(&db).ok().map(|m| {
-        use std::os::unix::fs::MetadataExt;
-        (m.uid(), m.gid())
-    });
-    let aside = data.join(format!("failed-{}-{}", safe(failed_version), stamp()));
-    std::fs::create_dir_all(&aside).map_err(|e| format!("{}: {e}", aside.display()))?;
+    let owner = std::fs::symlink_metadata(&db)
+        .ok()
+        .filter(|m| m.file_type().is_file())
+        .map(|m| {
+            use std::os::unix::fs::MetadataExt;
+            (m.uid(), m.gid())
+        });
+    let mut src = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(backup)
+        .map_err(|e| format!("{}: {e}", backup.display()))?;
+    let is_file = src
+        .metadata()
+        .map_err(|e| format!("{}: {e}", backup.display()))?
+        .file_type()
+        .is_file();
+    if !is_file {
+        return Err(format!("{}: not a regular file", backup.display()));
+    }
+    // Fresh, never one that is already there (a link included): a second
+    // restore within the same second takes the next free suffix.
+    let base = format!("failed-{}-{}", safe(failed_version), stamp());
+    let mut aside = data.join(&base);
+    let mut n = 1;
+    loop {
+        match std::fs::create_dir(&aside) {
+            Ok(()) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 100 => {
+                aside = data.join(format!("{base}-{n}"));
+                n += 1;
+            }
+            Err(e) => return Err(format!("{}: {e}", aside.display())),
+        }
+    }
     for name in ["state.db", "state.db-wal", "state.db-shm"] {
         let p = data.join(name);
-        if p.exists() {
+        if std::fs::symlink_metadata(&p).is_ok() {
             std::fs::rename(&p, aside.join(name)).map_err(|e| format!("{}: {e}", p.display()))?;
         }
     }
     let tmp = data.join("state.db.restore");
-    std::fs::copy(backup, &tmp).map_err(|e| format!("{}: {e}", backup.display()))?;
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{}: {e}", tmp.display())),
+    }
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&tmp)
+        .map_err(|e| format!("{}: {e}", tmp.display()))?;
+    std::io::copy(&mut src, &mut out).map_err(|e| format!("{}: {e}", backup.display()))?;
     if let Some((uid, gid)) = owner {
         // Only root may give a file away; an updater running as the hub's
         // own user already owns it.
-        let _ = std::os::unix::fs::chown(&tmp, Some(uid), Some(gid));
+        let _ = std::os::unix::fs::fchown(&out, Some(uid), Some(gid));
     }
-    std::fs::File::open(&tmp)
-        .and_then(|f| f.sync_all())
+    out.sync_all()
         .map_err(|e| format!("{}: {e}", tmp.display()))?;
+    drop(out);
     std::fs::rename(&tmp, &db).map_err(|e| format!("{}: {e}", db.display()))?;
     Ok(())
 }

@@ -895,6 +895,45 @@ fn when_a_rollback_restores_the_database() {
     ));
 }
 
+/// The restore runs as root in a directory the hub's user owns: a link that
+/// user planted at the temp name, or as the backup, is never followed. The
+/// link at the temp name is replaced, its target untouched; a backup that is
+/// a link is refused before anything is moved.
+#[test]
+fn restore_follows_no_link_the_hubs_user_could_plant() {
+    let d = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("ld.so.preload");
+    std::fs::write(&target, "untouched").unwrap();
+    std::fs::write(d.path().join("state.db"), "141").unwrap();
+    std::fs::create_dir(d.path().join("backups")).unwrap();
+    let b = d.path().join("backups/pre-0.5.4-1.db");
+    std::fs::write(&b, "140").unwrap();
+    std::os::unix::fs::symlink(&target, d.path().join("state.db.restore")).unwrap();
+    restore_db(d.path(), &b, "0.5.4").unwrap();
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "untouched");
+    let db = d.path().join("state.db");
+    assert!(std::fs::symlink_metadata(&db)
+        .unwrap()
+        .file_type()
+        .is_file());
+    assert_eq!(std::fs::read_to_string(&db).unwrap(), "140");
+    // A backup that is a link (to a file root can read) is refused, and the
+    // live database stays where it is.
+    let linked = d.path().join("backups/pre-0.5.5-1.db");
+    std::os::unix::fs::symlink(&target, &linked).unwrap();
+    assert!(restore_db(d.path(), &linked, "0.5.5").is_err());
+    assert_eq!(std::fs::read_to_string(&db).unwrap(), "140");
+    // A second restore in the same second gets an aside folder of its own.
+    restore_db(d.path(), &b, "0.5.4").unwrap();
+    let asides = std::fs::read_dir(d.path())
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("failed-0.5.4-"))
+        .count();
+    assert_eq!(asides, 2);
+}
+
 #[test]
 fn restore_moves_the_database_aside_and_copies_the_backup_in() {
     let d = tempfile::tempdir().unwrap();
