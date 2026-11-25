@@ -51,7 +51,7 @@
     testid: string;
   } = $props();
 
-  const fresh = $derived(win ? freshness(window, fetchedAt, win.resets_at, now) : 'expired');
+  const fresh = $derived(win ? freshness(window, fetchedAt, win.resets_at, now, win.utilization) : 'expired');
   const known = $derived(win !== null && fresh !== 'expired');
   const left = $derived(win && known ? leftPct(win) : null);
   const level = $derived(
@@ -69,7 +69,7 @@
   );
   const bucketText = $derived.by(() => {
     if (!bindingBucket || left === null) return null;
-    const b = freshness(window, fetchedAt, bindingBucket.window.resets_at, now);
+    const b = freshness(window, fetchedAt, bindingBucket.window.resets_at, now, bindingBucket.window.utilization);
     if (b === 'expired') return null;
     return `${bindingBucket.model} ${b === 'stale' ? '~' : ''}${bindingBucket.left}% left ▲`;
   });

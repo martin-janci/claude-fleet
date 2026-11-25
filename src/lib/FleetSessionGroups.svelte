@@ -177,7 +177,11 @@
     });
   }
   const shownCount = $derived(
-    focused ? 0 : $visibleExtraFleets.reduce((n, { fleet, rows }) => n + viewOf(fleet, rows).shown.length, 0),
+    // A folded group shows no row, as the folded primary counts none
+    // (review r5-06-7).
+    focused
+      ? 0
+      : $visibleExtraFleets.reduce((n, { fleet, rows }) => n + (folded.includes(fleet.id) ? 0 : viewOf(fleet, rows).shown.length), 0),
   );
   $effect(() => {
     oncount?.(shownCount);

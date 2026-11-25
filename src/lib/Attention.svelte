@@ -187,8 +187,12 @@
       const usageWas = usageKnown;
       usageKnown = Object.keys(get(accountUsage)).length > 0;
       const causesNow = blockCauses(rows, opts);
-      for (const key of prevCauses) if (!causesNow.has(key)) closeOsNotification(`blocked-${key}`);
-      prevCauses = new Set([...prevCauses].filter((k) => causesNow.has(k)));
+      // The causes of the last look: one that still holds is not news when
+      // another row joins it (review r5-06-3: sessions on a limited account
+      // stop one by one, and each rang).
+      const causesBefore = prevCauses;
+      for (const key of causesBefore) if (!causesNow.has(key)) closeOsNotification(`blocked-${key}`);
+      prevCauses = new Set(causesNow.keys());
       if (before === null || !get(sessionsLoaded)) return;
       withdraw(before, prevStates, (state, id) => `${state}-${id}`);
       const friendly = get(showFriendlyNames);
@@ -201,8 +205,13 @@
           notifyMatrix(state, `${name} ${TITLES[state]}`, row.host_alias, `${state}-${id}`, !chimed, () => openRow(id)) || chimed;
       }
       for (const { cause, rows: held } of causes) {
-        if (cause.kind === 'host_down' ? !hostsWas : !usageWas) continue;
-        prevCauses.add(cause.key);
+        if (causesBefore.has(cause.key)) continue;
+        // Only the look at which a store first answered is its baseline. A
+        // store that stays empty holds nothing back: a signed-out login is
+        // a host fact and needs no usage reading (review r5-06-2).
+        const hostsFirst = hostsKnown && !hostsWas;
+        const usageFirst = usageKnown && !usageWas;
+        if (cause.kind === 'host_down' ? hostsFirst : cause.kind === 'account_limit' ? usageFirst : hostsFirst || usageFirst) continue;
         const names = held.map((r) => (friendly && r.friendly_name ? r.friendly_name : r.tmux_name));
         const body = names.length > 3 ? `${names.slice(0, 3).join(', ')} and ${names.length - 3} more` : names.join(', ');
         chimed =
@@ -258,19 +267,15 @@
         fleetStuckPrev.set(fid, stuck);
         const causesNow = blockCauses(list, opts);
         const up = fleetCauses.get(fid) ?? new Set<string>();
-        for (const key of [...up]) {
-          if (causesNow.has(key)) continue;
-          closeOsNotification(`blocked-${fid}-${key}`);
-          up.delete(key);
-        }
-        fleetCauses.set(fid, up);
+        for (const key of up) if (!causesNow.has(key)) closeOsNotification(`blocked-${fid}-${key}`);
+        fleetCauses.set(fid, new Set(causesNow.keys()));
         if (beforeStuck) for (const id of beforeStuck.keys()) if (!stuck.has(id)) closeOsNotification(`stuck-${fid}-${id}`);
         if (!before || before.size === 0) continue;
         withdraw(before, states, (state, id) => `${state}-${fid}-${id}`);
         const label = known.find((f) => f.id === fid)?.label ?? fid;
         const { single, causes } = coalesceByCause(newlyNotifiable(before, list, opts, beforeOwn), list, opts);
         for (const { cause, rows: held } of causes) {
-          up.add(cause.key);
+          if (up.has(cause.key)) continue;
           chimed =
             notifyMatrix('blocked', causeTitle(cause, held.length, accountName), label, `blocked-${fid}-${cause.key}`, !chimed, () =>
               sidebarView.set('inbox'),
