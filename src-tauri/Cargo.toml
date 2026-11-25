@@ -43,6 +43,10 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
+# OS notifications (review w11-11): WKWebView on macOS has no web
+# `Notification`, so the Desktop column of the notify matrix posts through
+# the plugin; `src/lib/notify.ts` falls back to the web API outside Tauri.
+tauri-plugin-notification = "2"
 # This desktop updating itself (update-channel design S7): the decision and
 # its signatures from fleet-update (already in the tree through fleet-core),
 # the download, second signature check and in-place swap from the plugin.

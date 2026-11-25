@@ -128,6 +128,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
+        // OS notifications (review w11-11): replaces the webview's
+        // `Notification` with one that posts through the OS, which WKWebView
+        // on macOS does not offer at all. `src/lib/notify.ts`.
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             use tauri::Manager;
