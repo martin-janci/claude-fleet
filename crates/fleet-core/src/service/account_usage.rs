@@ -600,13 +600,22 @@ fn parse_usage_body(body: &str) -> Option<AccountUsage> {
     })
 }
 
+/// The furthest ahead a usage window may say it resets: the seven-day
+/// window's length and a day of slack.
+const MAX_RESET_AHEAD_SECS: i64 = 8 * 24 * 3600;
+
 fn window_of(v: Option<&serde_json::Value>) -> Option<Window> {
     let obj = v?.as_object()?;
     let utilization = obj.get("utilization")?.as_f64()?;
+    // No window resets further out than its own length (a week at most):
+    // a later reset is not a reading, and taken at its word a year-9999
+    // reset parked every routine on the account until that date (and
+    // walked 100 000 schedule steps under the store lock to get there).
     let resets_at = obj
         .get("resets_at")
         .and_then(serde_json::Value::as_str)
-        .and_then(parse_rfc3339);
+        .and_then(parse_rfc3339)
+        .filter(|t| *t <= crate::store::now_unix() + MAX_RESET_AHEAD_SECS);
     Some(Window {
         utilization: utilization.clamp(0.0, 100.0),
         resets_at,
@@ -1307,6 +1316,18 @@ pub async fn fetch_account_usage_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reset further out than any window's length is dropped, not
+    /// trusted: a year-9999 reset parked routines until then.
+    #[test]
+    fn a_reset_beyond_any_window_is_not_a_reading() {
+        let far = serde_json::json!({ "utilization": 100, "resets_at": "9999-12-31T23:59:59Z" });
+        let w = window_of(Some(&far)).unwrap();
+        assert_eq!(w.utilization, 100.0);
+        assert_eq!(w.resets_at, None);
+        let past = serde_json::json!({ "utilization": 5, "resets_at": "2026-02-06T22:00:00Z" });
+        assert!(window_of(Some(&past)).unwrap().resets_at.is_some());
+    }
     use crate::ssh_fake::{FakeSsh, Match, Reply};
     use std::path::Path;
     #[cfg(unix)]
