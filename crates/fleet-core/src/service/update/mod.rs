@@ -146,7 +146,10 @@ fn asked_refresh_due(last: i64, now: i64) -> bool {
 /// so a release published minutes ago is seen now rather than at the next
 /// tick. Once a minute across every caller, bounded in time; a failure keeps
 /// the last good cache, as the tick's does.
-pub async fn refresh_asked(store: &Mutex<Store>, now: i64) {
+///
+/// `true` when this call ran the refresh, `false` when the rate limit
+/// skipped it.
+pub async fn refresh_asked(store: &Mutex<Store>, now: i64) -> bool {
     use std::sync::atomic::Ordering::Relaxed;
     let last = ASKED_REFRESH_AT.load(Relaxed);
     if !asked_refresh_due(last, now)
@@ -154,7 +157,7 @@ pub async fn refresh_asked(store: &Mutex<Store>, now: i64) {
             .compare_exchange(last, now, Relaxed, Relaxed)
             .is_err()
     {
-        return;
+        return false;
     }
     let base = channel_base_url();
     let fetch = HttpsFetch::new(Some(&base));
@@ -175,6 +178,7 @@ pub async fn refresh_asked(store: &Mutex<Store>, now: i64) {
         }
         Err(_) => tracing::warn!("update channel refresh on request timed out"),
     }
+    true
 }
 
 /// Wakes the refresh tick early: a new track has no cached channel (every

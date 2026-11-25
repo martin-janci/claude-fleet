@@ -53,7 +53,7 @@ pub async fn handle_check(
         Err(e) => return refusal(e),
     };
     if req.refresh {
-        update::refresh_asked(state.store(), crate::store::now_unix()).await;
+        let _ = update::refresh_asked(state.store(), crate::store::now_unix()).await;
     }
     let keys = update::trusted_keys();
     match update::check(
@@ -102,9 +102,15 @@ static POKE_REREAD_PENDING: std::sync::atomic::AtomicBool =
 
 /// Re-read the channel, then push the decisions it moves now (waking the
 /// hub's own updater when its target moved) rather than at the next beat.
+///
+/// Only when the refresh actually ran: the route is unauthenticated, and a
+/// wake runs a decision pass that re-verifies every cached signed document
+/// under the store lock, so a stream of pokes inside the refresh's rate
+/// limit used to keep that pass running back to back.
 async fn read_and_decide(store: &std::sync::Mutex<crate::store::Store>) {
-    update::refresh_asked(store, crate::store::now_unix()).await;
-    update::decisions_may_have_changed();
+    if update::refresh_asked(store, crate::store::now_unix()).await {
+        update::decisions_may_have_changed();
+    }
 }
 
 /// `GET /update/artifact/<sha256>`: a release file from the hub's mirror

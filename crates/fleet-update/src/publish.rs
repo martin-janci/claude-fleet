@@ -272,10 +272,21 @@ pub fn empty_channel(track: Track, first: &Version) -> ChannelDoc {
 }
 
 /// Every write: a higher sequence and a fresh expiry.
-fn stamp(doc: &mut ChannelDoc, now: i64, expires_days: i64) {
-    doc.sequence += 1;
+///
+/// A sequence that cannot go higher is refused, never wrapped: release
+/// builds have no overflow checks, and a wrap to 0 is a document every
+/// client refuses as a replay from then on. (The base document it starts
+/// from comes off the channel branch, so its sequence is not ours alone.)
+fn stamp(doc: &mut ChannelDoc, now: i64, expires_days: i64) -> Result<(), String> {
+    // The hub stores a sequence as an i64: keep under that, too.
+    doc.sequence = doc
+        .sequence
+        .checked_add(1)
+        .filter(|n| *n <= i64::MAX as u64)
+        .ok_or_else(|| format!("the channel's sequence {} cannot go higher", doc.sequence))?;
     doc.generated_at = format_rfc3339(now);
     doc.expires_at = format_rfc3339(now + expires_days * 86_400);
+    Ok(())
 }
 
 /// List a published release on a track: the entry is replaced if the
@@ -320,7 +331,7 @@ pub fn channel_add(
         doc.recommended = v.clone();
     }
     trim(&mut doc, keep);
-    stamp(&mut doc, now, expires_days);
+    stamp(&mut doc, now, expires_days)?;
     Ok(doc)
 }
 
@@ -341,7 +352,7 @@ pub fn channel_amend(
         .ok_or_else(|| format!("{version} is not on the {} channel", doc.track.as_str()))?;
     r.amendments.retain(|a| a.component != amendment.component);
     r.amendments.push(amendment);
-    stamp(&mut doc, now, expires_days);
+    stamp(&mut doc, now, expires_days)?;
     Ok(doc)
 }
 
@@ -481,7 +492,7 @@ pub fn channel_edit(
             doc.mandatory.push(m);
         }
     }
-    stamp(&mut doc, now, expires_days);
+    stamp(&mut doc, now, expires_days)?;
     Ok(doc)
 }
 
@@ -767,6 +778,23 @@ mod tests {
             manifest_sha256: sha256_hex(ver.as_bytes()),
             amendments: Vec::new(),
         }
+    }
+
+    /// A sequence at the top is refused, never wrapped to 0 (which every
+    /// client would refuse as a replay for good).
+    #[test]
+    fn a_sequence_that_cannot_go_higher_is_refused() {
+        let mut doc = channel_add(None, Track::Stable, rref("0.5.5"), 100, 14, 30).unwrap();
+        doc.sequence = i64::MAX as u64;
+        let a = crate::channel_doc::AmendmentRef {
+            component: "android".into(),
+            manifest: "https://raw/amendments/0.5.5/android.json".into(),
+            manifest_sha256: "ab".repeat(32),
+        };
+        let e = channel_amend(doc.clone(), &v("0.5.5"), a, 200, 14).unwrap_err();
+        assert!(e.contains("cannot go higher"), "{e}");
+        doc.sequence = u64::MAX;
+        assert!(channel_add(Some(doc), Track::Stable, rref("0.5.6"), 300, 14, 30).is_err());
     }
 
     #[test]
