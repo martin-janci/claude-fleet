@@ -1609,16 +1609,43 @@ async fn spawn_loopback_forward(bind: std::net::IpAddr, port: u16) {
     }
 }
 
+/// Relays open at once through the loopback forward; past it a connection
+/// waits for a slot. The hub's own connection cap stands behind the
+/// target, and the relay must not be a way around it.
+const LOOPBACK_RELAYS: usize = 256;
+
 /// Every connection to `listener`, relayed to `target`.
+///
+/// A relay ends when EITHER side ends: `copy_bidirectional` waited for both,
+/// so once the hub closed a silent client's connection (its head deadline)
+/// the relay still held two descriptors for as long as the client kept its
+/// end open, uncounted by the hub's cap — a few hundred of those reached
+/// the process's file limit.
 async fn forward_each(listener: tokio::net::TcpListener, target: std::net::SocketAddr) {
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(LOOPBACK_RELAYS));
     loop {
+        let Ok(permit) = slots.clone().acquire_owned().await else {
+            return;
+        };
         match listener.accept().await {
-            Ok((mut inbound, _)) => {
+            Ok((inbound, _)) => {
                 tokio::spawn(async move {
+                    let _permit = permit;
                     match tokio::net::TcpStream::connect(target).await {
-                        Ok(mut outbound) => {
-                            let _ =
-                                tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                        Ok(outbound) => {
+                            let (mut ir, mut iw) = inbound.into_split();
+                            let (mut or, mut ow) = outbound.into_split();
+                            // Client to hub: its half-close is passed on,
+                            // not taken as the end (a request may still be
+                            // answered).
+                            let up = tokio::spawn(async move {
+                                let _ = tokio::io::copy(&mut ir, &mut ow).await;
+                                let _ = tokio::io::AsyncWriteExt::shutdown(&mut ow).await;
+                            });
+                            // Hub to client: when the hub is done, so is the
+                            // relay, whatever the client still holds open.
+                            let _ = tokio::io::copy(&mut or, &mut iw).await;
+                            up.abort();
                         }
                         Err(e) => tracing::debug!(%target, error = %e, "loopback forward failed"),
                     }
