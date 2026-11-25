@@ -11,6 +11,12 @@ set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PASS=0; FAIL=0
 
+# Run from a git hook (the pre-commit hook runs ci-local.sh), git exports
+# GIT_DIR and GIT_INDEX_FILE: with them, every `git -C <throwaway>` below
+# would commit into the repository being committed to. Drop them all.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_PREFIX \
+  GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE
+
 t="$(mktemp -d)"
 trap 'rm -rf "$t"' EXIT
 
@@ -27,6 +33,9 @@ EOF
   printf '# Changelog\n\n## [%s] - 2026-11-21\n\n### Fixed\n- a thing\n' "$2" >"$t/r/CHANGELOG.md"
   printf '.consistency-args\n' >"$t/r/.gitignore"
   git -C "$t/r" init -q -b main
+  # Never anything but the throwaway repository.
+  [[ "$(git -C "$t/r" rev-parse --absolute-git-dir)" == "$t/r/.git" ]] \
+    || { echo "FAIL: the test repository is not $t/r/.git; refusing to go on" >&2; exit 1; }
   git -C "$t/r" -c user.name=t -c user.email=t@t add -A
   git -C "$t/r" -c user.name=t -c user.email=t@t commit -q -m "chore(release): v$1"
 }
