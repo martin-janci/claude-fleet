@@ -447,6 +447,15 @@ the phone warn when the newest backup is over two days old or under 2 GB (or
 5%) is free. Keep copying `backups/` off the box (Hyper Backup): a backup on
 the same disk does not survive the disk.
 
+**Before a migration.** When a new image is about to migrate the database
+(its schema is older than the build's), the hub first copies it to
+`<data>/backups/pre-migrate-<schema>-<stamp>.db`, `<schema>` being the
+version it migrates from, and keeps the newest three `pre-migrate-*` files.
+So `docker compose pull && up -d` always leaves a way back to the database
+the previous version wrote. A start with no migration to run copies nothing.
+If the copy fails, the hub does not migrate and exits with the reason; if
+only free space is short, it migrates without a copy and says so on stderr.
+
 Or by hand, or from a scheduler:
 
 ```bash
@@ -512,7 +521,8 @@ file, and one that was killed leaves a stale file, which reads as not ready.
 **Restore drill** (rehearse it once; a backup nobody restored is a hope).
 The backups to restore from are `backup.sh`'s `state-<stamp>.db` (and
 `upgrade.sh`'s `pre-<version>-<stamp>.db`) in `backups/` beside the compose
-file, and the hub's own daily `daily-<stamp>.db` and `fleet-hub backup`'s
+file, and the hub's own daily `daily-<stamp>.db`, its
+`pre-migrate-<schema>-<stamp>.db` and `fleet-hub backup`'s
 `<prefix>-<stamp>.db` under `/var/lib/fleet-hub/backups/`, inside the data
 volume, where the *Back up first* copy (`pre-upgrade-<stamp>.db`) is too.
 With a bind-mounted `./data` (*Behind an existing reverse proxy*):
