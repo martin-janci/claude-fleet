@@ -238,12 +238,21 @@ pub struct LogPoller {
     pub dir: Option<std::path::PathBuf>,
 }
 
+/// How long one exchange with the hub may take.
+const EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl LogPoller {
     pub async fn poll_once(&self, now: i64) -> Poll {
-        let asked = match self
-            .transport
-            .post_json(&self.url, &self.token, "{}".to_string())
-            .await
+        // Each exchange is bounded here (the transport leaves timing to its
+        // caller): a hub or proxy that accepts and never answers, or a
+        // connection that died half-open, parked the poller for good.
+        let asked = match tokio::time::timeout(
+            EXCHANGE_TIMEOUT,
+            self.transport
+                .post_json(&self.url, &self.token, "{}".to_string()),
+        )
+        .await
+        .unwrap_or_else(|_| Err("the hub did not answer".to_string()))
         {
             Ok(r) if r.status == 204 => return Poll::Idle,
             Ok(r) if r.status == 200 => r.body,
@@ -265,8 +274,13 @@ impl LogPoller {
             .unwrap_or_default();
         let n = lines.len();
         let body = json!({ "id": id, "lines": lines, "app": self.app }).to_string();
-        match self.transport.post_json(&self.url, &self.token, body).await {
-            Ok(r) if r.status / 100 == 2 => Poll::Sent(n),
+        match tokio::time::timeout(
+            EXCHANGE_TIMEOUT,
+            self.transport.post_json(&self.url, &self.token, body),
+        )
+        .await
+        {
+            Ok(Ok(r)) if r.status / 100 == 2 => Poll::Sent(n),
             _ => Poll::Retry,
         }
     }
@@ -278,7 +292,11 @@ impl LogPoller {
                 () = shutdown.cancelled() => return,
                 () = tokio::time::sleep(POLL_EVERY) => {}
             }
-            match self.poll_once(crate::store::now_unix()).await {
+            let polled = tokio::select! {
+                () = shutdown.cancelled() => return,
+                p = self.poll_once(crate::store::now_unix()) => p,
+            };
+            match polled {
                 Poll::Stop => {
                     tracing::info!("[log] the hub takes no client log from this app; not polling");
                     return;

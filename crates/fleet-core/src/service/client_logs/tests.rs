@@ -160,3 +160,24 @@ async fn the_desktop_sends_its_log_only_when_asked() {
     let (p, _) = poller(vec![ok(200, "{}")], None);
     assert_eq!(p.poll_once(NOW).await, Poll::Retry);
 }
+
+/// A hub that accepts and never answers: the exchange is bounded, so the
+/// poll ends as a retry instead of parking the poller for good.
+#[tokio::test(start_paused = true)]
+async fn a_hub_that_never_answers_ends_the_poll_as_a_retry() {
+    struct Silent;
+    #[async_trait::async_trait]
+    impl HubTransport for Silent {
+        async fn post_json(&self, _: &str, _: &str, _: String) -> Result<HubResponse, String> {
+            std::future::pending().await
+        }
+    }
+    let p = LogPoller {
+        url: "http://hub/log".into(),
+        token: "t".into(),
+        app: "desktop 1".into(),
+        transport: Arc::new(Silent),
+        dir: None,
+    };
+    assert!(matches!(p.poll_once(NOW).await, Poll::Retry));
+}
