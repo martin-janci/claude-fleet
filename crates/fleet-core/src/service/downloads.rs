@@ -630,6 +630,20 @@ async fn fetch_chunked(
         )
         .await?;
         let chunk = carry::payload(&out.stdout).unwrap_or_default();
+        // More than asked for is the host's doing, not the file's: refused
+        // before it is written, so a host cannot push a download past
+        // `downloads.max_file_mb` and the total budget.
+        if chunk.len() as u64 > want {
+            return Err(IpcError::new(
+                codes::E_SSH,
+                format!(
+                    "reading {} on {} gave {} bytes for a {want}-byte piece",
+                    row.path,
+                    row.host_alias,
+                    chunk.len()
+                ),
+            ));
+        }
         if !out.status.success() || chunk.is_empty() {
             return Err(IpcError::new(
                 codes::E_SSH,
