@@ -413,7 +413,18 @@ impl SelfUpdate {
         let updater = app
             .updater_builder()
             .endpoints(vec![endpoint])
-            .and_then(|b| b.pubkey(pubkey).version_comparator(|_, _| true).build())
+            .and_then(|b| {
+                // The one release this install verified, and only when it is
+                // newer than the running build: a desktop never installs an
+                // older one (`Component::can_downgrade`), whatever a hub's
+                // answer or a local process on the loopback endpoint says.
+                let want = to.to_string().trim_start_matches('v').to_string();
+                b.pubkey(pubkey)
+                    .version_comparator(move |current, remote| {
+                        newer_and_wanted(&current, &remote.version, &want)
+                    })
+                    .build()
+            })
             .map_err(|e| fail(format!("the updater: {e}")))?;
         let update = updater
             .check()
@@ -628,9 +639,35 @@ async fn serve_loopback_once(
         .map_err(|e| IpcError::new(codes::E_INTERNAL, format!("{e}")))
 }
 
+/// Whether `remote` is the version this install verified (`want`) and newer
+/// than the build running (`current`).
+fn newer_and_wanted(current: &semver::Version, remote: &semver::Version, want: &str) -> bool {
+    remote.to_string() == want && remote > current
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The updater installs only the verified release, and only when it is
+    /// newer than the running build.
+    #[test]
+    fn the_updater_takes_only_the_verified_newer_release() {
+        let v = |s: &str| semver::Version::parse(s).unwrap();
+        assert!(newer_and_wanted(&v("0.6.5"), &v("0.6.6"), "0.6.6"));
+        assert!(
+            !newer_and_wanted(&v("0.6.5"), &v("0.6.4"), "0.6.4"),
+            "older"
+        );
+        assert!(
+            !newer_and_wanted(&v("0.6.5"), &v("0.6.5"), "0.6.5"),
+            "the same"
+        );
+        assert!(
+            !newer_and_wanted(&v("0.6.5"), &v("0.7.0"), "0.6.6"),
+            "not the verified one"
+        );
+    }
 
     /// A hub that takes reports, or (while `down`) refuses them.
     struct FakeHub {
