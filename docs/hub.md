@@ -1165,9 +1165,11 @@ routed to it.
   - An upload rewrites the file in place, so a process that already had the
     old file open can read the new contents. That is the same as SSH's
     `cat >`.
-  - `install` does not check who can write to the directory holding the
-    `fleet-agent` binary. Put it somewhere only root (or the run-as user)
-    can write.
+  - A system-scope `install --auto-update` writes a unit that runs the
+    binary as root, so `install` refuses it unless the binary and every
+    directory above it are root's and writable by nobody else (a sticky
+    `/tmp`-style directory passes). Without `--auto-update` nothing runs it
+    as root; put it somewhere only root (or the run-as user) can write.
   - A command's output is cut at 200 MiB, and the caller is not told: the
     agent flags the cut, but the hub's command interface has nowhere to
     carry the flag, so a cut answer looks complete.

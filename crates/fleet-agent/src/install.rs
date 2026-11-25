@@ -250,6 +250,52 @@ pub fn systemctl_calls(scope: &Scope) -> Vec<Vec<String>> {
     ]
 }
 
+/// System-scope `--auto-update` writes a ROOT oneshot that runs `binary
+/// update` and then re-points the install: every directory from `/` down to
+/// the binary, and the binary itself (through any link, as systemd would
+/// follow it), must be root's and writable by nobody else, or the user the
+/// agent runs as (and so the hub, and every session it drives there) could
+/// replace it and be root on the next pass. A sticky directory (`/tmp`) does
+/// not let others replace root's file in it, so it passes.
+#[cfg(unix)]
+pub(crate) fn root_only(binary: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let real = std::fs::canonicalize(binary).map_err(|e| format!("{}: {e}", binary.display()))?;
+    let mut paths: Vec<&Path> = binary
+        .ancestors()
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect();
+    paths.extend(real.ancestors().filter(|p| !p.as_os_str().is_empty()));
+    for p in paths {
+        let md = std::fs::metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        let mode = md.mode();
+        let sticky_dir = md.is_dir() && mode & 0o1000 != 0;
+        let others_write = mode & 0o022 != 0 && !sticky_dir;
+        if md.uid() != 0 || others_write {
+            return Err(format!(
+                "--auto-update in system scope runs {} as root, and {} is {} (mode {:04o}): \
+                 anyone who can write there could be root on the next update. Install the \
+                 binary somewhere only root can write (e.g. /usr/local/bin) and run install \
+                 from there",
+                binary.display(),
+                p.display(),
+                if md.uid() != 0 {
+                    format!("owned by uid {}", md.uid())
+                } else {
+                    "writable by others".to_string()
+                },
+                mode & 0o7777
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn root_only(_binary: &Path) -> Result<(), String> {
+    Ok(())
+}
+
 /// Write the config and the unit, then hand the unit to systemd. Reports each
 /// file it wrote and each call it made on `out`.
 ///
@@ -261,6 +307,9 @@ pub fn install(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     let unit = render_unit(&plan.scope, &plan.binary, &plan.layout.config_path)?;
+    if plan.auto_update && matches!(plan.scope, Scope::System { .. }) {
+        root_only(&plan.binary)?;
+    }
 
     config::write(&plan.layout.config_path, &plan.config, plan.owner).map_err(|e| e.to_string())?;
     let _ = writeln!(
@@ -674,6 +723,47 @@ mod tests {
             "{said}"
         );
         assert!(!said.contains(TOKEN), "{said}");
+    }
+
+    /// A system-scope auto-update runs the binary as root, so it must sit
+    /// where only root can write; a group- or other-writable directory on
+    /// the way, or a binary that is not root's, is refused before anything
+    /// is written.
+    #[cfg(unix)]
+    #[test]
+    fn a_system_auto_update_needs_a_binary_only_root_can_replace() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let open = dir.path().join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let bin = open.join("fleet-agent");
+        std::fs::write(&bin, "bin").unwrap();
+        let e = root_only(&bin).unwrap_err();
+        assert!(e.contains("root"), "{e}");
+        let mut plan = plan_in(dir.path(), false);
+        plan.scope = Scope::System {
+            run_as: "nobody".into(),
+        };
+        plan.binary = bin.clone();
+        plan.auto_update = true;
+        assert!(install(&plan, &mut Recorder::default(), &mut Vec::new()).is_err());
+        assert!(!plan.layout.config_path.exists(), "nothing written");
+        // A private directory: fine exactly when it (and the file) are root's.
+        let closed = dir.path().join("closed");
+        std::fs::create_dir(&closed).unwrap();
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let bin = closed.join("fleet-agent");
+        std::fs::write(&bin, "bin").unwrap();
+        // Explicit: the process umask is shared with other tests.
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mine_is_root = std::fs::metadata(&bin).unwrap().uid() == 0;
+        assert_eq!(
+            root_only(&bin).is_ok(),
+            mine_is_root,
+            "{:?}",
+            root_only(&bin)
+        );
     }
 
     #[test]
