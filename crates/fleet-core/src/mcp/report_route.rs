@@ -363,6 +363,30 @@ mod tests {
         .unwrap()
     }
 
+    /// Outside `authorize`, the run-token routes look at the token before
+    /// the body: a caller with none is answered at once, even when it
+    /// promised a body and never sends it (it used to hold its connection
+    /// slot waiting for the body).
+    #[tokio::test]
+    async fn the_run_token_routes_refuse_before_reading_a_body() {
+        let (addr, _store) = app().await;
+        for path in ["/agent-records", "/agent-diagnostics"] {
+            let req = format!(
+                "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer nope\r\n\
+                 Content-Type: application/json\r\nContent-Length: 1000\r\n\r\n"
+            );
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            s.write_all(req.as_bytes()).await.unwrap();
+            let mut buf = vec![0u8; 512];
+            let n = tokio::time::timeout(std::time::Duration::from_secs(5), s.read(&mut buf))
+                .await
+                .expect("answered without waiting for the body")
+                .unwrap();
+            let head = String::from_utf8_lossy(&buf[..n]);
+            assert!(head.starts_with("HTTP/1.1 401"), "{path}: {head}");
+        }
+    }
+
     /// `/agent-records` takes a live run token and nothing else: not the
     /// master, not a host's token.
     #[tokio::test]

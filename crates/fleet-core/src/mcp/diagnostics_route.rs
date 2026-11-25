@@ -11,7 +11,7 @@ use super::records_route::bearer;
 use super::report_route::ReportState;
 use crate::service::fleet_agents::diagnostics;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
@@ -21,16 +21,20 @@ pub const BODY_MAX: usize = 64 * 1024;
 /// `POST /agent-diagnostics`.
 pub async fn handle_diagnostics(
     State(state): State<ReportState>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
+    request: axum::extract::Request,
 ) -> Response {
     let now = crate::store::now_unix();
-    if bearer(&headers)
+    if bearer(request.headers())
         .and_then(|t| diagnostics::grant_for(t, now))
         .is_none()
     {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    // The token first, then the body (see `body_after_auth`).
+    let body = match super::records_route::body_after_auth(request.into_body(), BODY_MAX).await {
+        Ok(b) => b,
+        Err(code) => return code.into_response(),
+    };
     let req: serde_json::Value = match serde_json::from_slice::<serde_json::Value>(&body) {
         Ok(v) if v.is_object() => v,
         _ => return StatusCode::BAD_REQUEST.into_response(),
