@@ -57,7 +57,7 @@
   import TerminalStrip from './TerminalStrip.svelte';
   import ContextHelp from './ContextHelp.svelte';
   import { askContextHelp, helpModel, screenHistory } from './context_help';
-  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
+  import { fleetSettings, hubGated, SETTING_KEYS } from './fleet_settings';
   import { AGENT_LABELS } from './row_groups';
   import { agentTabLabel, agentTabName, sessionView } from './prefs';
   import Self from './TerminalView.svelte';
@@ -370,10 +370,12 @@
   // followed by Enter.
   let helpOpen = $state(false);
   /** Writing help's "Context help" toggle, off by default. */
-  // The value itself, never `$hubGated` (review r5-07-1): this Help runs
-  // `context_help` on this device, with no hub tool in its path to refuse
-  // it when the toggle is off, so "not known" must stay "off" here.
-  const helpOn = $derived(settingBool($fleetSettings, SETTING_KEYS.workContextHelp));
+  // This Help runs `context_help` on this device, with no hub tool in its
+  // path to refuse it when the toggle is off, so "not known" must stay "off"
+  // (review r5-07-1), which `$hubGated` keeps for this toggle: the settings'
+  // value, or the hub's own list of what is on for a device that may not
+  // read them (review w19-2), and off while neither has answered.
+  const helpOn = $derived($hubGated(SETTING_KEYS.workContextHelp));
   $effect(() => {
     void activeShell;
     helpOpen = false;

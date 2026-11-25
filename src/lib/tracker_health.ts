@@ -13,6 +13,7 @@
 //
 // Pure helpers plus one store; `TrackerAttention.svelte` polls and renders.
 import { setContextRedPct } from './attention';
+import { setHubWritingHelp } from './fleet_settings';
 import { decideHealth } from './decide_health';
 import { orgBudgets } from './org_budget';
 import { updatesHealth } from './update_health';
@@ -77,6 +78,7 @@ export async function refreshTrackersHealth(): Promise<void> {
     updatesHealth.set(r.value.updates ?? null);
     storageHealth.set(r.value.storage ?? null);
     setContextRedPct(r.value.context_red_pct);
+    setHubWritingHelp(r.value.writing_help);
   }
 }
 

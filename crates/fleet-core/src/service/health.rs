@@ -142,6 +142,14 @@ pub struct Health {
     /// desktop, for a scoped caller and from an older hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<crate::service::hub_storage::StorageHealth>,
+    /// The Writing help toggles that are on, by setting key
+    /// (`settings::writing_help_on`, review w19-2). Every device may read
+    /// this answer, where `get_settings` answers only the fleet's admin, so a
+    /// paired device that may not read settings still offers Tune, Help and
+    /// Draft exactly when the hub would serve them. `None` (not sent) from
+    /// an older hub and before the store is ready.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writing_help: Option<Vec<String>>,
 }
 
 /// [`Health::devices`].
@@ -1308,6 +1316,7 @@ fn health_at(
         automation_paused: crate::service::loops::paused(s),
         devices: None,
         playbooks_week,
+        writing_help: Some(crate::service::settings::writing_help_on(s)),
         // The hub's own business, like `decide`; it reads the disk, so the
         // caller fills it in once the store's lock is released
         // ([`storage_for`]).
@@ -1415,6 +1424,7 @@ pub fn unready_health() -> Health {
         devices: None,
         playbooks_week: BTreeMap::new(),
         storage: None,
+        writing_help: None,
     }
 }
 
@@ -2462,10 +2472,27 @@ mod tests {
             devices: None,
             playbooks_week: BTreeMap::new(),
             storage: None,
+            writing_help: None,
         })
         .expect("Health serialises");
         let back: Health = serde_json::from_str(&whole).expect("a whole Health parses");
         assert_eq!(back.stuck, 6);
+    }
+
+    /// Review w19-2: the answer every device may read names the Writing help
+    /// toggles that are on, and only those.
+    #[test]
+    fn health_names_the_writing_help_toggles_that_are_on() {
+        use crate::service::settings::{WORK_CONTEXT_HELP, WORK_PROMPT_TUNE};
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(health_from_store(&store).writing_help, Some(Vec::new()));
+        store.set_setting(WORK_PROMPT_TUNE, "true").unwrap();
+        store.set_setting(WORK_CONTEXT_HELP, "true").unwrap();
+        let on = health_from_store(&store).writing_help.unwrap();
+        assert_eq!(
+            on,
+            vec![WORK_CONTEXT_HELP.to_string(), WORK_PROMPT_TUNE.to_string()]
+        );
     }
 
     /// A link outside `connected` (retrying, refused, incompatible) is a hub

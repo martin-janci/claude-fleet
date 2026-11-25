@@ -477,6 +477,9 @@ fn sample_health() -> Health {
         // desktop reads it only for its Attention items, as optional
         // fields, so it stays out of the contract (`None` is not sent).
         storage: None,
+        // Review w19-2: Some, so the golden pins the name a desktop that may
+        // not read settings gates Writing help on.
+        writing_help: Some(vec!["work.prompt_tune".into()]),
     }
 }
 
