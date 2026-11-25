@@ -176,3 +176,17 @@ async fn a_pass_indexes_new_text_and_resumes_where_it_stopped() {
     assert_eq!(s.clear_transcript_chunks().unwrap(), 2);
     assert!(s.transcript_cursors().unwrap().is_empty());
 }
+
+/// A full read with no line end (one line longer than the cap) moves the
+/// cursor past itself; anything else moves by its complete lines.
+#[test]
+fn a_line_longer_than_the_cap_does_not_wedge_the_cursor() {
+    let cap = FILE_CAP_BYTES as usize;
+    assert_eq!(advance_past_long_line(0, cap), FILE_CAP_BYTES);
+    assert_eq!(
+        advance_past_long_line(0, 10),
+        0,
+        "a short read waits for its line end"
+    );
+    assert_eq!(advance_past_long_line(100, cap), 100);
+}

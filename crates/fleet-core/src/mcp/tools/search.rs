@@ -22,8 +22,16 @@ impl FleetTools {
         Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<search::SearchArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let view = self.view_scope(&caller)?;
-        let page = search::search(&self.store, &view, &args).map_err(to_mcp_err)?;
+        // A read through the read pool (a search writes nothing), with the
+        // scope built from the same handle: a full-text query and one fence
+        // per hit held the single writer's lock, which hooks and reconcile
+        // wait on, for any readonly device that asked.
+        let store = self.reader();
+        let view = {
+            let s = crate::ipc_error::lock(store).map_err(to_mcp_err)?;
+            caller.view_scope(&s).map_err(to_mcp_err)?
+        };
+        let page = search::search(store, &view, &args).map_err(to_mcp_err)?;
         ok_json_compact(&page)
     }
 }

@@ -239,6 +239,17 @@ pub fn pieces(bytes: &[u8], start: i64, since: i64, now: i64) -> (Vec<(i64, Stri
     (out, complete as i64)
 }
 
+/// How far the cursor moves after a read of `read_len` bytes whose complete
+/// lines came to `consumed`: past the read itself when it was a full cap
+/// with no line end at all.
+fn advance_past_long_line(consumed: i64, read_len: usize) -> i64 {
+    if consumed == 0 && read_len as i64 >= FILE_CAP_BYTES {
+        read_len as i64
+    } else {
+        consumed
+    }
+}
+
 async fn run_script(
     exec: &dyn SshExec,
     host: &str,
@@ -326,6 +337,13 @@ pub async fn index_host(
                 s.clear_transcript_chunks_of(claude_id)?;
             }
             let (found, consumed) = pieces(&read.bytes, read.offset, since, now);
+            // A whole read with no line end in it is one line longer than the
+            // cap (a pasted screenshot is a single base64 line of megabytes).
+            // Not moving past it re-read the same 2 MiB from the host's budget
+            // every pass, for good, and starved every later session on that
+            // host; its tail is skipped on the next pass, as a line that is
+            // not JSON.
+            let consumed = advance_past_long_line(consumed, read.bytes.len());
             for (offset, text, at) in &found {
                 s.upsert_transcript_chunk(&TranscriptChunk {
                     session_id: t.session_id,
