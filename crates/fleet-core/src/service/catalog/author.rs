@@ -896,6 +896,7 @@ pub fn write_layer_in(
     }
     let rel = layer_rel_path(&layer.name);
     let path = root.join(&rel);
+    super::repo::refuse_link_below(&root, &path)?;
     let verb = if path.exists() { "update" } else { "create" };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

@@ -1211,6 +1211,56 @@ fn refuse_symlink(p: &Path) -> Result<(), String> {
     }
 }
 
+/// Refuse a write to `target` when any component from `root` down to it is
+/// a symlink. A catalog checkout is a repository other people push to, so a
+/// committed link (`skills/x/body.md`, `skills/x/resources`, `layers/x.yaml`)
+/// would otherwise make the hub write a caller's bytes where the link points,
+/// outside the checkout. Components that do not exist yet are fine: they are
+/// created as plain directories.
+pub(crate) fn refuse_link_below(root: &Path, target: &Path) -> std::io::Result<()> {
+    let Ok(rel) = target.strip_prefix(root) else {
+        return Err(std::io::Error::other(format!(
+            "{} is outside the catalog checkout",
+            target.display()
+        )));
+    };
+    let mut p = root.to_path_buf();
+    for c in rel.components() {
+        p.push(c);
+        match std::fs::symlink_metadata(&p) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(std::io::Error::other(format!(
+                    "{} is a symlink; fleet does not write through one",
+                    rel_display(root, &p)
+                )))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Where a YAML document failed to parse, without the parser's description
+/// (which can quote the document).
+fn yaml_error_place(e: &serde_yaml::Error) -> String {
+    match e.location() {
+        Some(l) => format!(
+            "not a valid catalog file (line {}, column {})",
+            l.line(),
+            l.column()
+        ),
+        None => "not a valid catalog file".to_string(),
+    }
+}
+
+fn rel_display(root: &Path, p: &Path) -> String {
+    p.strip_prefix(root)
+        .unwrap_or(p)
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn read_resources(dir: &Path) -> Result<Vec<Resource>, String> {
     let res = dir.join("resources");
     refuse_symlink(&res)?;
@@ -1280,10 +1330,19 @@ fn load_one(root: &Path, kind: Kind, yaml_path: &Path, stem: &str) -> Result<Ass
 /// schema version.
 pub fn load_dir(root: &Path) -> Result<Catalog, IpcError> {
     let cat_file = root.join("catalog.yaml");
+    // A linked catalog.yaml would make the hub read (and, on a parse error,
+    // echo) whatever file the link names.
+    refuse_symlink(&cat_file).map_err(|e| IpcError::new(E_CATALOG_PARSE, e))?;
     let text = std::fs::read_to_string(&cat_file)
         .map_err(|e| IpcError::new(E_CATALOG_PARSE, format!("{}: {e}", cat_file.display())))?;
-    let cf: CatalogFile = serde_yaml::from_str(&text)
-        .map_err(|e| IpcError::new(E_CATALOG_PARSE, format!("catalog.yaml: {e}")))?;
+    // The parser's own words can quote the document (`invalid type: string
+    // "<the whole file>"`), so only where it failed is passed on.
+    let cf: CatalogFile = serde_yaml::from_str(&text).map_err(|e| {
+        IpcError::new(
+            E_CATALOG_PARSE,
+            format!("catalog.yaml: {}", yaml_error_place(&e)),
+        )
+    })?;
     if cf.schema_version != SCHEMA_VERSION {
         return Err(IpcError::new(
             E_CATALOG_PARSE,
@@ -1299,6 +1358,13 @@ pub fn load_dir(root: &Path) -> Result<Catalog, IpcError> {
     };
     for kind in Kind::ALL {
         let dir = root.join(kind.dir());
+        if let Err(message) = refuse_symlink(&dir) {
+            cat.problems.push(Problem {
+                path: kind.dir().to_string(),
+                message,
+            });
+            continue;
+        }
         if !dir.is_dir() {
             continue;
         }
@@ -1382,7 +1448,12 @@ pub fn load_dir(root: &Path) -> Result<Catalog, IpcError> {
     // Layers are NOT a Kind: they must never reach compute_host_plan as an
     // asset. Own directory, own pass.
     let layer_dir = root.join("layers");
-    if layer_dir.is_dir() {
+    if let Err(message) = refuse_symlink(&layer_dir) {
+        cat.problems.push(Problem {
+            path: "layers".to_string(),
+            message,
+        });
+    } else if layer_dir.is_dir() {
         let mut parsed: Vec<crate::service::catalog::layer::Layer> = Vec::new();
         let mut entries: Vec<PathBuf> = match std::fs::read_dir(&layer_dir) {
             Ok(rd) => rd
@@ -1415,8 +1486,8 @@ pub fn load_dir(root: &Path) -> Result<Catalog, IpcError> {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            match std::fs::read_to_string(&p)
-                .map_err(|e| e.to_string())
+            match refuse_symlink(&p)
+                .and_then(|()| std::fs::read_to_string(&p).map_err(|e| e.to_string()))
                 .and_then(|t| crate::service::catalog::layer::Layer::from_yaml(&t))
             {
                 Ok(l) if l.name != stem => cat.problems.push(Problem {
@@ -1501,6 +1572,16 @@ pub fn write_asset(root: &Path, asset: &Asset, overwrite: bool) -> Result<(), Ip
         ));
     }
     let dir = yaml_path.parent().unwrap_or(root);
+    // Every path written below is checked before anything is written, so a
+    // refused asset leaves the checkout as it was.
+    refuse_link_below(root, &yaml_path)?;
+    if kind.is_folder() {
+        refuse_link_below(root, &dir.join(body_file(kind)))?;
+        refuse_link_below(root, &dir.join("resources"))?;
+        for r in &asset.resources {
+            refuse_link_below(root, &dir.join(&r.rel_path))?;
+        }
+    }
     std::fs::create_dir_all(dir)?;
     std::fs::write(&yaml_path, asset.to_yaml())?;
     if kind.is_folder() {
@@ -1531,6 +1612,10 @@ pub fn write_asset(root: &Path, asset: &Asset, overwrite: bool) -> Result<(), Ip
 /// `read_resources`'s treatment of them.
 fn prune_resources(dir: &Path, keep: &HashSet<&str>) -> std::io::Result<()> {
     let res = dir.join("resources");
+    // A linked `resources` is somebody else's directory: never pruned.
+    if std::fs::symlink_metadata(&res).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Ok(());
+    }
     if !res.is_dir() {
         return Ok(());
     }
@@ -2449,6 +2534,101 @@ mod tests {
         assert_eq!(err.code, "E_ASSET_NOT_FOUND");
         let err = remove_asset(&root, Kind::Hook, "missing").unwrap_err();
         assert_eq!(err.code, "E_ASSET_NOT_FOUND");
+    }
+
+    /// A link committed to the checkout is never written through: the
+    /// hub would put a caller's bytes where the link points, outside the
+    /// repository. Nothing is written when any target is refused, and a
+    /// linked `resources` is never pruned.
+    #[cfg(unix)]
+    #[test]
+    fn write_asset_and_write_layer_never_write_through_a_link() {
+        let root = tmp("write-link");
+        let outside = tmp("write-link-outside");
+        write(&outside, "victim", "untouched\n");
+        write(&outside, "dir/keep", "untouched\n");
+        write(&root, "catalog.yaml", "schema_version: 1\n");
+        let asset = |name: &str| {
+            let mut a = Asset::from_yaml(
+                None,
+                &format!("kind: skill\nname: {name}\ndescription: d\n"),
+            )
+            .unwrap();
+            a.body = "mine\n".into();
+            a.resources.push(Resource {
+                rel_path: "resources/x.txt".into(),
+                bytes: b"x".to_vec(),
+            });
+            a
+        };
+        // A linked body.
+        write(
+            &root,
+            "skills/a/asset.yaml",
+            "kind: skill\nname: a\ndescription: d\n",
+        );
+        std::os::unix::fs::symlink(outside.join("victim"), root.join("skills/a/body.md")).unwrap();
+        assert!(write_asset(&root, &asset("a"), true).is_err());
+        // A linked resources folder.
+        write(
+            &root,
+            "skills/b/asset.yaml",
+            "kind: skill\nname: b\ndescription: d\n",
+        );
+        std::os::unix::fs::symlink(outside.join("dir"), root.join("skills/b/resources")).unwrap();
+        assert!(write_asset(&root, &asset("b"), true).is_err());
+        assert!(prune_resources(&root.join("skills/b"), &HashSet::new()).is_ok());
+        // A linked kind folder.
+        let other = tmp("write-link-kind");
+        write(&other, "catalog.yaml", "schema_version: 1\n");
+        std::os::unix::fs::symlink(outside.join("dir"), other.join("skills")).unwrap();
+        assert!(write_asset(&other, &asset("c"), false).is_err());
+        assert_eq!(
+            fs::read_to_string(outside.join("victim")).unwrap(),
+            "untouched\n"
+        );
+        assert_eq!(
+            fs::read_to_string(outside.join("dir/keep")).unwrap(),
+            "untouched\n"
+        );
+        assert!(!outside.join("dir/x.txt").exists() && !outside.join("dir/c").exists());
+        // The layer writer's own check.
+        assert!(refuse_link_below(&root, &root.join("skills/a/body.md")).is_err());
+        assert!(refuse_link_below(&root, &root.join("skills/new/body.md")).is_ok());
+    }
+
+    /// A linked `catalog.yaml`, `layers/` or kind folder is not read, and a
+    /// file that does not parse is never quoted back.
+    #[cfg(unix)]
+    #[test]
+    fn load_dir_reads_no_catalog_file_through_a_link_and_quotes_none() {
+        let outside = tmp("load-link-outside");
+        write(&outside, "secret", "s3cr3t-value-zz\n");
+        let root = tmp("load-link");
+        std::os::unix::fs::symlink(outside.join("secret"), root.join("catalog.yaml")).unwrap();
+        let e = load_dir(&root).unwrap_err();
+        assert!(!e.message.contains("s3cr3t"), "{}", e.message);
+        let plain = tmp("load-unparsable");
+        write(&plain, "catalog.yaml", "s3cr3t-value-zz\n");
+        let e = load_dir(&plain).unwrap_err();
+        assert!(!e.message.contains("s3cr3t"), "{}", e.message);
+        let root = tmp("load-link-dirs");
+        write(&root, "catalog.yaml", "schema_version: 1\n");
+        write(&outside, "layers/x.yaml", "kind: layer\nname: x\n");
+        std::os::unix::fs::symlink(outside.join("layers"), root.join("layers")).unwrap();
+        std::os::unix::fs::symlink(outside.join("layers"), root.join("skills")).unwrap();
+        let cat = load_dir(&root).unwrap();
+        assert!(cat.layers.get("x").is_none());
+        assert!(
+            cat.problems.iter().any(|p| p.path == "layers"),
+            "{:?}",
+            cat.problems
+        );
+        assert!(
+            cat.problems.iter().any(|p| p.path == "skills"),
+            "{:?}",
+            cat.problems
+        );
     }
 
     #[cfg(unix)]
