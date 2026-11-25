@@ -971,6 +971,7 @@ async fn read_loop(
     // Pieces of chunked results (proto 2), by request id, until their final
     // `result` — each bounded by that request's own budget.
     let mut assembly = fleet_proto::Assembly::default();
+    let mut report_refusal_logged = false;
     loop {
         // A beat that has come due is taken first, before any read, however
         // many frames are waiting: see `Ticker`. Otherwise wait for either.
@@ -1075,7 +1076,15 @@ async fn read_loop(
                                     crate::service::reports::AGENT_BATCH_MAX,
                                     fleet_proto::report::now_unix(),
                                 ) {
-                                    tracing::warn!(host = %alias, code = %e.code, error = %e.message, "[agent] report batch refused");
+                                    // Once per connection at warn: a refused batch
+                                    // is 17 bytes, and an agent past its rate
+                                    // sends them at wire speed.
+                                    if !report_refusal_logged {
+                                        report_refusal_logged = true;
+                                        tracing::warn!(host = %alias, code = %e.code, error = %e.message, "[agent] report batch refused (further refusals on this connection at debug)");
+                                    } else {
+                                        tracing::debug!(host = %alias, code = %e.code, "[agent] report batch refused");
+                                    }
                                 }
                             }
                             Ok(Decoded::Frame(AgentFrame::ResultChunk {

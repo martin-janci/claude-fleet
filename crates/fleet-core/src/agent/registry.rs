@@ -239,6 +239,11 @@ impl AgentRegistry {
         let mut entry = self.takeovers.entry(alias.to_string()).or_default();
         entry.push((at, replaced, new));
         entry.retain(|(t, _, _)| at - *t <= DUPLICATE_WINDOW_SECS);
+        // Bounded by count too: one host's token reconnecting in a loop with
+        // a new name each time grew this (and each scan of it) for the whole
+        // window. The detector needs two; the newest are kept.
+        let over = entry.len().saturating_sub(MAX_TAKEOVERS_KEPT);
+        entry.drain(..over);
         duplicate_of(&entry)
     }
 
@@ -596,6 +601,11 @@ fn peer_label(hello: &AgentHello) -> String {
     format!("{} (fleet-agent {})", hello.host_name, hello.agent_version)
 }
 
+/// Takeovers kept per alias inside the window.
+const MAX_TAKEOVERS_KEPT: usize = 32;
+/// Distinct agent labels a duplicate report names.
+const MAX_PEERS_SHOWN: usize = 8;
+
 fn duplicate_of(takeovers: &[Takeover]) -> Option<DuplicateAgent> {
     if takeovers.len() < DUPLICATE_TAKEOVERS {
         return None;
@@ -603,7 +613,7 @@ fn duplicate_of(takeovers: &[Takeover]) -> Option<DuplicateAgent> {
     let mut peers: Vec<String> = Vec::new();
     for (_, a, b) in takeovers {
         for p in [a, b] {
-            if !peers.contains(p) {
+            if peers.len() < MAX_PEERS_SHOWN && !peers.contains(p) {
                 peers.push(p.clone());
             }
         }
