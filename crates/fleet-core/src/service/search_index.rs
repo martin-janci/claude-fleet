@@ -334,7 +334,14 @@ pub async fn index_host(
             let Some(read) = reads.get(&t.session_id) else {
                 continue;
             };
-            let claude_id = read.source.trim_end_matches(".jsonl");
+            // The conversation the hub knows this session by, never the file
+            // name the host printed: chunks are keyed by conversation alone,
+            // so a printed name of another session's conversation let one
+            // host delete or overwrite that session's indexed text.
+            let claude_id = t.claude_session_id.as_str();
+            if read.source.trim_end_matches(".jsonl") != claude_id {
+                continue;
+            }
             // The same file, rewritten shorter: what was indexed of it is stale.
             if t.source.as_deref() == Some(read.source.as_str()) && read.offset == 0 && t.offset > 0
             {
