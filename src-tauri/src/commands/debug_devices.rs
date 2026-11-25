@@ -528,7 +528,7 @@ pub(crate) mod routed {
 #[cfg(test)]
 mod tests {
     /// Review w19-1: every arm, routed or standalone, names its device as
-    /// `#<id>`. Read from the source: a bare `args.id.to_string()` is the
+    /// `#<id>`. Read from the source: the id turned into a string with no `#` is the
     /// bug coming back.
     #[test]
     fn every_device_is_named_by_its_id_alone() {

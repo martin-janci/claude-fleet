@@ -395,11 +395,11 @@ fn installing_with_a_claim_claims_the_device_first() {
         vec![
             (
                 "debug_devices".to_string(),
-                json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null, "queue": null })
+                json!({ "action": "claim", "device": "#3", "note": "login flow", "claim_s": null, "queue": null })
             ),
             (
                 "debug_devices".to_string(),
-                json!({ "action": "install", "device": "3", "path": "~/app.apk", "host": null })
+                json!({ "action": "install", "device": "#3", "path": "~/app.apk", "host": null })
             ),
         ]
     );
@@ -3406,7 +3406,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         (
             "update_debug_device",
             "debug_devices",
-            json!({ "action": "configure", "device": "3", "label": "bench", "shared": true }),
+            json!({ "action": "configure", "device": "#3", "label": "bench", "shared": true }),
             DEBUG_DEVICE_JSON,
             Box::new(|b, s, _| {
                 block_on(commands::debug_devices::routed::update_debug_device(
@@ -3424,7 +3424,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         (
             "release_debug_device",
             "debug_devices",
-            json!({ "action": "release", "device": "3" }),
+            json!({ "action": "release", "device": "#3" }),
             DEBUG_DEVICE_JSON,
             Box::new(|b, s, _| {
                 block_on(commands::debug_devices::routed::release_debug_device(
@@ -3438,7 +3438,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         (
             "forget_debug_device",
             "debug_devices",
-            json!({ "action": "forget", "device": "3" }),
+            json!({ "action": "forget", "device": "#3" }),
             r#"{"removed":true}"#,
             Box::new(|b, s, _| {
                 block_on(commands::debug_devices::routed::forget_debug_device(
@@ -3452,7 +3452,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         (
             "boot_debug_device",
             "debug_devices",
-            json!({ "action": "boot", "device": "3" }),
+            json!({ "action": "boot", "device": "#3" }),
             r#"{"state":"booted"}"#,
             Box::new(|b, s, ssh| {
                 block_on(commands::debug_devices::routed::boot_debug_device(
@@ -3467,7 +3467,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         (
             "claim_debug_device",
             "debug_devices",
-            json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null, "queue": true }),
+            json!({ "action": "claim", "device": "#3", "note": "login flow", "claim_s": null, "queue": true }),
             DEBUG_DEVICE_JSON,
             Box::new(|b, s, _| {
                 block_on(commands::debug_devices::routed::claim_debug_device(
@@ -3486,7 +3486,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         (
             "install_debug_device",
             "debug_devices",
-            json!({ "action": "install", "device": "3", "path": "~/app.apk", "host": null }),
+            json!({ "action": "install", "device": "#3", "path": "~/app.apk", "host": null }),
             RUN_OUTPUT_JSON,
             Box::new(|b, s, ssh| {
                 block_on(commands::debug_devices::routed::install_debug_device(
@@ -3507,7 +3507,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         (
             "debug_device_logs",
             "debug_devices",
-            json!({ "action": "logs", "device": "3", "lines": 200, "contains": "FATAL" }),
+            json!({ "action": "logs", "device": "#3", "lines": 200, "contains": "FATAL" }),
             RUN_OUTPUT_JSON,
             Box::new(|b, s, ssh| {
                 block_on(commands::debug_devices::routed::debug_device_logs(
@@ -3525,7 +3525,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         (
             "shutdown_debug_device",
             "debug_devices",
-            json!({ "action": "shutdown", "device": "3" }),
+            json!({ "action": "shutdown", "device": "#3" }),
             DEBUG_DEVICE_JSON,
             Box::new(|b, s, ssh| {
                 block_on(commands::debug_devices::routed::shutdown_debug_device(
@@ -9074,7 +9074,7 @@ fn a_hub_screenshot_comes_back_as_the_image_block_it_answered() {
     ))
     .expect("the image block");
     let (tool, args) = fake.only_call();
-    assert_eq!(args, json!({ "action": "screenshot", "device": "3" }));
+    assert_eq!(args, json!({ "action": "screenshot", "device": "#3" }));
     assert_eq!(
         verdicts::verdict("debug_device_screenshot").and_then(Verdict::tool),
         Some(tool.as_str())

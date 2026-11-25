@@ -929,7 +929,7 @@ pub const SPECS: &[Spec] = &[
         "20",
         Kind::Secs,
         "Reconcile interval",
-        "Seconds between background reconcile passes, which refresh session state on every host. Everything fleet does by itself runs after a pass, no more often than this: recovery of killed sessions, stuck-session fixes, queued prompts, cleanup, usage and budgets, autofix, account switching and scheduled agents. 0 stops all of that too, while their own switches still read On.",
+        "Seconds between background reconcile passes, which refresh session state on every host. Everything fleet does by itself runs after a pass: recovery, stuck-session fixes, queued prompts, cleanup, usage and budgets, autofix, account switching, agents. 0 stops all of that too.",
     )
     .unit(Unit::Seconds)
     .zero("off")
