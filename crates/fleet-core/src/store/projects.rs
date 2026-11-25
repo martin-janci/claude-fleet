@@ -876,6 +876,15 @@ impl Store {
             "UPDATE pull_requests SET project_id = NULL WHERE project_id = ?1",
             rusqlite::params![project_id],
         )?;
+        // A work link's snapshot of its project (migration 046, no FK; the
+        // retire trigger has just stamped it on this project's links). The
+        // id is reused, so it would resume the link's task, and default a
+        // new start of that ticket prefix, into whatever project is added
+        // next under it — the routines' R6 bug, here.
+        tx.execute(
+            "UPDATE work_links SET snap_project_id = NULL WHERE snap_project_id = ?1",
+            rusqlite::params![project_id],
+        )?;
         tx.execute(
             "DELETE FROM projects WHERE id = ?1",
             rusqlite::params![project_id],
@@ -2453,6 +2462,32 @@ mod tests {
         assert!(s
             .delete_project_if_unused(free, &FingerprintKeys::new())
             .unwrap());
+    }
+
+    #[test]
+    fn delete_project_forgets_the_work_links_snapshot_of_it() {
+        let s = Store::open_in_memory().unwrap();
+        let pid = s.upsert_project("o", "r", "/fleet-test/r").unwrap();
+        let other = s.upsert_project("o", "k", "/fleet-test/k").unwrap();
+        for p in [pid, other] {
+            s.conn
+                .execute(
+                    "INSERT INTO work_links (ref_key, state, source, created_at, snap_project_id) \
+                     VALUES ('ABC-1', 'ended', 'test', 1, ?1)",
+                    rusqlite::params![p],
+                )
+                .unwrap();
+        }
+        s.delete_project(pid, &FingerprintKeys::new()).unwrap();
+        let snaps: Vec<Option<i64>> = s
+            .conn
+            .prepare("SELECT snap_project_id FROM work_links ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(snaps, vec![None, Some(other)]);
     }
 
     #[test]

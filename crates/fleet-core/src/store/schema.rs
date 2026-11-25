@@ -2652,6 +2652,13 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/230_row_creators.sql"),
         already_applied: Some(rows_have_creators),
     },
+    // A deleted session's downloads and library items lose its id, which
+    // the next session may reuse. A trigger and two UPDATEs: idempotent.
+    Migration {
+        version: 231,
+        sql: include_str!("../../migrations/231_detach_downloads_library.sql"),
+        already_applied: None,
+    },
 ];
 
 /// The settings row [`Store::finish_realm_upgrade`] writes once migration

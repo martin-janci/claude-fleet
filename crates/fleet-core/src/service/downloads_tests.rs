@@ -519,3 +519,77 @@ async fn a_copy_in_flight_pauses_goes_on_and_stops_when_removed() {
     assert_eq!(e.code, codes::E_INVALID_STATE);
     control::clear(other.id);
 }
+
+/// `sessions.id` is reused: once a session is deleted, the next one created
+/// may take its id. A download (and a library item) recorded under the old
+/// id stays its owner's, by the owner recorded on the row, and is never the
+/// new session's owner's to list (migration 231's trigger detaches it).
+#[test]
+fn a_reused_session_id_inherits_no_download_or_library_item() {
+    use crate::mcp::auth::{Caller, ClientRef, TokenMode};
+    let s = Store::open_in_memory().unwrap();
+    let ada = s.create_person("ada", None).unwrap().id;
+    let bob = s.create_person("bob", None).unwrap().id;
+    s.upsert_host("web-1").unwrap();
+    let old = s
+        .upsert_session("fleet-a", "web-1", None, None, 1, 1, "running", None)
+        .unwrap();
+    assert!(s.claim_if_unclaimed(old, Some(ada)).unwrap());
+    let row = s
+        .insert_download(&NewDownload {
+            host_alias: "web-1",
+            session_id: Some(old),
+            session_name: Some("fleet-a"),
+            org_id: None,
+            path: "/home/ada/report.pdf",
+            name: "report.pdf",
+            size: 5,
+            source: SOURCE_PERSON,
+            note: None,
+        })
+        .unwrap();
+    s.conn_ref()
+        .execute(
+            "INSERT INTO library_items (at, kind, host_alias, session_id, path, name, owner_person_id) \
+             VALUES (1, 'upload', 'web-1', ?1, '/home/ada/x.md', 'x.md', ?2)",
+            rusqlite::params![old, ada],
+        )
+        .unwrap();
+    s.delete_session(old).unwrap();
+    let new = s
+        .upsert_session("fleet-b", "web-1", None, None, 2, 2, "running", None)
+        .unwrap();
+    assert_eq!(new, old, "the id is reused, which is the case under test");
+    assert!(s.claim_if_unclaimed(new, Some(bob)).unwrap());
+    let device = |person: i64| {
+        Caller {
+            api: None,
+            host_alias: None,
+            client: Some(ClientRef {
+                id: 1,
+                name: "phone".into(),
+                trusted: false,
+                org_id: None,
+                person_id: Some(person),
+            }),
+            mode: TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
+            is_fleet_admin: false,
+        }
+        .view_scope(&s)
+        .unwrap()
+    };
+    let row = s.download(row.id).unwrap().unwrap();
+    assert_eq!(row.session_id, None, "detached when its session went");
+    assert!(!visible(&s, &device(bob), &row), "the new session's owner");
+    assert!(visible(&s, &device(ada), &row), "still the owner's");
+    let lib: Option<i64> = s
+        .conn_ref()
+        .query_row("SELECT session_id FROM library_items LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .ok()
+        .flatten();
+    assert_eq!(lib, None, "a library item is detached the same way");
+}
