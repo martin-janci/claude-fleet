@@ -160,3 +160,70 @@ fn a_size_line_that_never_ends_is_an_error_not_a_buffer() {
     assert_eq!(d.take(&mut raw).unwrap(), b"abc");
     assert!(d.finished());
 }
+
+/// A body of very many very small chunks de-chunks in time linear in its
+/// size. `take` used to drain `raw` from the front after every chunk and
+/// every size line: 600 000 one-byte chunks (3.6 MB on the wire, under the
+/// tracker client's 4 MiB cap) moved about 2 TB and took minutes, in a loop
+/// that runs after the caller's timeout has already been met. The budget
+/// below is three orders of magnitude above what the cursor needs.
+#[test]
+fn a_body_of_one_byte_chunks_is_dechunked_in_linear_time() {
+    const CHUNKS: usize = 600_000;
+    let mut body = Vec::with_capacity(CHUNKS * 6 + 5);
+    for i in 0..CHUNKS {
+        body.extend_from_slice(b"1\r\n");
+        body.push(b'a' + (i % 26) as u8);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(b"0\r\n\r\n");
+    let started = std::time::Instant::now();
+    let out = dechunk(&body).expect("a response");
+    let took = started.elapsed();
+    assert_eq!(out.len(), CHUNKS);
+    assert!(out
+        .iter()
+        .enumerate()
+        .all(|(i, b)| *b == b'a' + (i % 26) as u8));
+    assert!(
+        took < std::time::Duration::from_secs(20),
+        "de-chunking {CHUNKS} one-byte chunks took {took:?}"
+    );
+    // Fed a read at a time, the same body gives the same bytes and leaves
+    // nothing behind.
+    let mut d = Dechunker::new(true);
+    let mut raw = Vec::new();
+    let mut piecemeal = Vec::new();
+    for read in body.chunks(16 * 1024) {
+        raw.extend_from_slice(read);
+        piecemeal.extend(d.take(&mut raw).expect("a response"));
+    }
+    assert!(d.finished() && raw.is_empty());
+    assert_eq!(piecemeal, out);
+}
+
+/// What `take` leaves in `raw` is exactly what it has not consumed: the
+/// unfinished size line stays for the next read, and a refused one stays
+/// where it was found, behind the payload already taken.
+#[test]
+fn the_dechunker_leaves_only_what_it_has_not_consumed() {
+    let mut d = Dechunker::new(true);
+    let mut raw = b"3\r\nabc\r\n4\r\nde".to_vec();
+    assert_eq!(d.take(&mut raw).unwrap(), b"abcde");
+    assert!(raw.is_empty(), "{raw:?}");
+    raw.extend_from_slice(b"fg\r\n1");
+    assert_eq!(d.take(&mut raw).unwrap(), b"fg");
+    assert_eq!(raw, b"\r\n1", "the size line has not ended yet");
+    raw.extend_from_slice(b"\r\nh\r\nzz\r\n");
+    let err = d.take(&mut raw).unwrap_err();
+    assert!(err.contains("chunk size"), "{err}");
+    assert_eq!(raw, b"\r\nzz\r\n", "the refused line is where it was found");
+    // Past the last chunk everything is dropped, trailers included.
+    let mut d = Dechunker::new(true);
+    let mut raw = b"1\r\nx\r\n0\r\nTrailer: y\r\n\r\n".to_vec();
+    assert_eq!(d.take(&mut raw).unwrap(), b"x");
+    assert!(d.finished() && raw.is_empty());
+    raw.extend_from_slice(b"anything after the end");
+    assert!(d.take(&mut raw).unwrap().is_empty());
+    assert!(raw.is_empty());
+}

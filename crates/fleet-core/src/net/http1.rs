@@ -88,52 +88,71 @@ impl Dechunker {
     }
 
     /// Take whatever payload `raw` now yields, leaving the rest in place.
+    ///
+    /// `raw` is walked with a cursor and what was consumed is dropped once,
+    /// at the end. Draining it from the front after every chunk and every
+    /// size line moved the whole tail each time, which is quadratic in a
+    /// body of small chunks: 4 MiB of one-byte chunks (the tracker client's
+    /// cap) moved about 3 TB, and a hub's 22 MiB pairing answer about 90 TB,
+    /// in a loop no deadline reaches because the callers parse after their
+    /// timeout has been met.
     pub fn take(&mut self, raw: &mut Vec<u8>) -> Result<Vec<u8>, String> {
         if !self.chunked {
             return Ok(std::mem::take(raw));
         }
         let mut out = Vec::new();
-        loop {
+        let mut pos = 0;
+        let walked = loop {
             if self.done {
-                raw.clear();
-                break;
+                pos = raw.len();
+                break Ok(());
             }
+            let rest = &raw[pos..];
             if self.remaining > 0 {
-                let take = self.remaining.min(raw.len());
+                let take = self.remaining.min(rest.len());
                 if take == 0 {
-                    break;
+                    break Ok(());
                 }
-                out.extend(raw.drain(..take));
+                out.extend_from_slice(&rest[..take]);
+                pos += take;
                 self.remaining -= take;
                 continue;
             }
             // A size line, possibly preceded by the CRLF that ended the
             // previous chunk's data.
-            let skip = if raw.starts_with(b"\r\n") { 2 } else { 0 };
-            let Some(eol) = find(&raw[skip..], b"\r\n") else {
+            let skip = if rest.starts_with(b"\r\n") { 2 } else { 0 };
+            let Some(eol) = find(&rest[skip..], b"\r\n") else {
                 // Not a whole size line yet — unless it is already longer
                 // than any size line is. Without this a peer that never sent
                 // the CRLF grew `raw` (and every scan of it) for as long as
                 // it kept sending, which also kept the idle timer quiet.
-                if raw.len() - skip > MAX_SIZE_LINE {
-                    return Err(format!("a chunk size line ran past {MAX_SIZE_LINE} bytes"));
+                if rest.len() - skip > MAX_SIZE_LINE {
+                    break Err(format!("a chunk size line ran past {MAX_SIZE_LINE} bytes"));
                 }
-                break;
+                break Ok(());
             };
-            let line = String::from_utf8_lossy(&raw[skip..skip + eol]).into_owned();
+            // The same bound for a line that did end: a megabyte of anything
+            // before the next CRLF is no size line either.
+            if eol > MAX_SIZE_LINE {
+                break Err(format!("a chunk size line ran past {MAX_SIZE_LINE} bytes"));
+            }
+            let line = String::from_utf8_lossy(&rest[skip..skip + eol]);
             // `;` introduces chunk extensions, which nothing here uses.
-            let token = line.split(';').next().unwrap_or("").trim().to_string();
-            let size = usize::from_str_radix(&token, 16)
-                .map_err(|_| format!("unreadable chunk size {token:?}"))?;
-            raw.drain(..skip + eol + 2);
+            let token = line.split(';').next().unwrap_or("").trim();
+            let size = match usize::from_str_radix(token, 16) {
+                Ok(size) => size,
+                Err(_) => break Err(format!("unreadable chunk size {token:?}")),
+            };
+            pos += skip + eol + 2;
             if size == 0 {
                 self.done = true;
-                raw.clear();
-                break;
+                pos = raw.len();
+                break Ok(());
             }
             self.remaining = size;
-        }
-        Ok(out)
+        };
+        raw.drain(..pos);
+        walked.map(|()| out)
     }
 }
 
