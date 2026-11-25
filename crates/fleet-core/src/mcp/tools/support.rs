@@ -888,9 +888,13 @@ pub(super) fn broadcast_summary(
     project_id: Option<i64>,
     status: Option<&str>,
     prompt: &str,
+    submit: bool,
+    raw: bool,
 ) -> String {
+    // Every argument that changes what lands is bound: an approval for a
+    // typed-but-unsent, marked prompt is not one for a submitted raw one.
     format!(
-        "host={host:?} project_id={project_id:?} status={status:?} prompt={}",
+        "host={host:?} project_id={project_id:?} status={status:?} submit={submit} raw={raw} prompt={}",
         guard::content_digest(prompt)
     )
 }
@@ -2091,7 +2095,7 @@ impl FleetTools {
         }
         let confirms = &self.guards.confirms;
         if let Some(n) = nonce {
-            match confirms.consume(n, tool, summary) {
+            match confirms.consume_as(n, tool, summary, &caller.label()) {
                 ConfirmState::Approved => {
                     if caller.is_operator() {
                         guard::note_approval(crate::store::APPROVAL_PERSON);

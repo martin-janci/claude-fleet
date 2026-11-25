@@ -722,13 +722,16 @@ impl FleetTools {
                 "move_session",
                 p.confirm_nonce.as_deref(),
                 &format!(
-                    "session_id={} from={} to={} keep_source={} strict={} clean_target={}",
+                    "session_id={} from={} to={} keep_source={} strict={} clean_target={} \
+                     force_cross_org={} when={:?}",
                     row.id,
                     row.host_alias,
                     p.target_host_alias,
                     p.keep_source,
                     p.strict,
-                    p.clean_target
+                    p.clean_target,
+                    p.force_cross_org,
+                    when
                 ),
                 &caller,
             )?;

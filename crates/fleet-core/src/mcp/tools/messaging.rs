@@ -509,6 +509,8 @@ impl FleetTools {
             p.project_id,
             p.status.as_deref(),
             &p.prompt,
+            p.submit.unwrap_or(true),
+            p.raw,
         );
         // Confirmation first: a refused-then-approved retry must not burn the
         // caller's rate-limit slot on the initial E_CONFIRM_REQUIRED.

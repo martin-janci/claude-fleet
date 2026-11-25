@@ -3648,10 +3648,22 @@ fn confirm_summaries_bind_the_content_digest() {
     assert_ne!(a, b, "same length, different content ⇒ different summary");
     assert!(a.starts_with("host=local bytes=8 sha="), "{a}");
     assert!(!a.contains("ls -la"), "content never appears: {a}");
-    let x = broadcast_summary(Some("m"), Some(1), Some("idle"), "continue");
-    let y = broadcast_summary(Some("m"), Some(1), Some("idle"), "rm -rf /");
+    let x = broadcast_summary(Some("m"), Some(1), Some("idle"), "continue", true, false);
+    let y = broadcast_summary(Some("m"), Some(1), Some("idle"), "rm -rf /", true, false);
     assert_ne!(x, y);
-    assert!(x.starts_with("host=Some(\"m\") project_id=Some(1) status=Some(\"idle\") prompt="));
+    assert!(x.starts_with(
+        "host=Some(\"m\") project_id=Some(1) status=Some(\"idle\") submit=true raw=false prompt="
+    ));
+    // An approval for a marked prompt left unsent is not one for a raw,
+    // submitted one.
+    assert_ne!(
+        broadcast_summary(Some("m"), None, None, "go", false, false),
+        broadcast_summary(Some("m"), None, None, "go", true, false)
+    );
+    assert_ne!(
+        broadcast_summary(Some("m"), None, None, "go", true, false),
+        broadcast_summary(Some("m"), None, None, "go", true, true)
+    );
     assert!(!x.contains("continue"));
 }
 

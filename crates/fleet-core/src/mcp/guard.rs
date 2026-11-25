@@ -2820,6 +2820,22 @@ impl PendingConfirms {
     /// issued for; a retry with different arguments is `Unknown` (and the
     /// original approval stays consumable only with the approved arguments).
     pub fn consume(&self, nonce: &str, tool: &str, summary: &str) -> ConfirmState {
+        self.consume_inner(nonce, tool, summary, None)
+    }
+
+    /// [`Self::consume`], bound to the caller the nonce was issued to as
+    /// well: another token that learned the nonce reads `Unknown`.
+    pub fn consume_as(&self, nonce: &str, tool: &str, summary: &str, caller: &str) -> ConfirmState {
+        self.consume_inner(nonce, tool, summary, Some(caller))
+    }
+
+    fn consume_inner(
+        &self,
+        nonce: &str,
+        tool: &str,
+        summary: &str,
+        caller: Option<&str>,
+    ) -> ConfirmState {
         let mut entries = self
             .entries
             .lock()
@@ -2828,7 +2844,7 @@ impl PendingConfirms {
         let Some(p) = entries.get(nonce) else {
             return ConfirmState::Unknown;
         };
-        if p.tool != tool || p.summary != summary {
+        if p.tool != tool || p.summary != summary || caller.is_some_and(|c| p.caller != c) {
             return ConfirmState::Unknown;
         }
         if p.run_by_fleet {
@@ -4503,5 +4519,21 @@ mod tests {
         }
         assert!(mode_allows_action(TokenMode::Full, "dashboards", "pin"));
         assert!(mode_allows_action(TokenMode::Full, "review_notes", "send"));
+    }
+
+    #[test]
+    fn an_approved_nonce_is_spent_only_by_the_caller_it_was_issued_to() {
+        let pc = PendingConfirms::new();
+        let req = pc.request("kill_session", "s=1", "host:web-1");
+        assert!(pc.answer(&req.nonce, true));
+        assert_eq!(
+            pc.consume_as(&req.nonce, "kill_session", "s=1", "client:phone"),
+            ConfirmState::Unknown,
+            "another token that learned the nonce"
+        );
+        assert_eq!(
+            pc.consume_as(&req.nonce, "kill_session", "s=1", "host:web-1"),
+            ConfirmState::Approved
+        );
     }
 }
