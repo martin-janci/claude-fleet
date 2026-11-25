@@ -1714,7 +1714,7 @@ mod tests {
             use crate::store::{Principal, RoleRef, ROLE_FLEET_ADMIN};
             let s = store.lock().unwrap();
             assert_eq!(s.personal_owner_id().unwrap(), Some(OWNER));
-            let ada = s.create_person("ada", None).unwrap().id;
+            let ada = s.create_person("zoe", None).unwrap().id;
             let fa = s
                 .role(RoleRef::Realm(ROLE_FLEET_ADMIN))
                 .unwrap()
@@ -1728,16 +1728,16 @@ mod tests {
             ..mint_req("x", "full", false).minter
         };
         let for_erin = pairings.mint(pairing::MintRequest {
-            person: Some("erin"),
+            person: Some("finn"),
             minter: by_ada,
-            ..mint_req("erin-from-ada", "full", false)
+            ..mint_req("finn-from-zoe", "full", false)
         });
         {
             let s = store.lock().unwrap();
-            let erin = s.create_person("erin", None).unwrap().id;
-            s.insert_client_token("erin-own", &"e".repeat(64), "full")
+            let erin = s.create_person("finn", None).unwrap().id;
+            s.insert_client_token("finn-own", &"e".repeat(64), "full")
                 .unwrap();
-            s.set_client_person("erin-own", Some(erin)).unwrap();
+            s.set_client_person("finn-own", Some(erin)).unwrap();
         }
         let refused = round_trip(addr, &pair_req(&for_erin.code, "phone.invalid")).await;
         assert!(refused.contains("403"), "{refused}");
@@ -1753,21 +1753,21 @@ mod tests {
                 .list_client_tokens(true)
                 .unwrap()
                 .iter()
-                .any(|r| r.name == "erin-from-ada"),
+                .any(|r| r.name == "finn-from-zoe"),
             "the refused redeem left no client row"
         );
         // The owner's code for the same person binds.
         let by_owner = pairings.mint(pairing::MintRequest {
-            person: Some("erin"),
-            ..mint_req("erin-from-owner", "full", false)
+            person: Some("finn"),
+            ..mint_req("finn-from-owner", "full", false)
         });
         let ok = round_trip(addr, &pair_req(&by_owner.code, "phone.invalid")).await;
         assert!(ok.contains("200 OK"), "{ok}");
         // So does Ada's code for her own next device.
         let own = pairings.mint(pairing::MintRequest {
-            person: Some("ada"),
+            person: Some("zoe"),
             minter: by_ada,
-            ..mint_req("ada-second", "full", false)
+            ..mint_req("zoe-second", "full", false)
         });
         let ok = round_trip(addr, &pair_req(&own.code, "phone.invalid")).await;
         assert!(ok.contains("200 OK"), "{ok}");
