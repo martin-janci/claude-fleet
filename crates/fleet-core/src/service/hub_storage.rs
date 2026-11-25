@@ -132,9 +132,16 @@ pub fn low_disk(free: u64, total: u64) -> bool {
 }
 
 /// Whether the newest backup (at `last`) is missing or too old at `now`.
+///
+/// A backup dated after `now` (written while the clock was ahead, or
+/// restored with its future mtime) vouches for nothing: it counts as
+/// missing, so it neither silences the warning nor the daily backup.
 pub fn backup_stale(last: Option<i64>, now: i64) -> bool {
-    last.is_none_or(|t| now - t > BACKUP_STALE_SECS)
+    last.is_none_or(|t| t > now + CLOCK_SKEW_SECS || now - t > BACKUP_STALE_SECS)
 }
+
+/// How far ahead of the clock a backup's mtime may be and still count.
+const CLOCK_SKEW_SECS: i64 = 300;
 
 /// Where backups land: `<data>/backups` (`fleet-hub backup`, the updater,
 /// the daily tick) and `<data>/../backups` (`backup.sh`'s default).
@@ -248,7 +255,9 @@ pub fn disk_space(dir: &Path) -> Option<(u64, u64)> {
 /// older than [`BACKUP_EVERY_SECS`], then keep the newest [`KEEP_DAILY`]
 /// daily ones. `Ok(None)` when none was due.
 pub fn backup_if_due(data_dir: &Path, now: i64) -> Result<Option<BackupInfo>, String> {
-    if newest_backup(&backup_dirs(data_dir)).is_some_and(|t| now - t < BACKUP_EVERY_SECS) {
+    if newest_backup(&backup_dirs(data_dir))
+        .is_some_and(|t| t <= now + CLOCK_SKEW_SECS && now - t < BACKUP_EVERY_SECS)
+    {
         return Ok(None);
     }
     let dir = data_dir.join("backups");
@@ -399,6 +408,9 @@ mod tests {
         assert!(backup_stale(None, 1_000));
         assert!(backup_stale(Some(0), BACKUP_STALE_SECS + 1));
         assert!(!backup_stale(Some(0), BACKUP_STALE_SECS));
+        // A backup from the future proves nothing.
+        assert!(backup_stale(Some(1_000_000), 1_000));
+        assert!(!backup_stale(Some(1_100), 1_000), "small skew is fine");
     }
 
     /// The disk and backups are read off the caller's thread: the first
