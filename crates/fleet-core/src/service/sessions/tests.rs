@@ -2184,9 +2184,10 @@ fn send_script_with_an_empty_body_is_a_bare_enter() {
     );
 }
 
-/// Review w09-1: an agent row's typing script refuses a pane that holds a
-/// bare login shell, before anything is loaded or pasted; a bare Enter and
-/// the unguarded script (a `shell` row) carry no such step.
+/// Review w09-1: an agent row's typing script carries the bare-shell guard
+/// ahead of the paste; a bare Enter and the unguarded script (a `shell`
+/// row) carry none. What the guard decides is tested against real panes in
+/// `the_exited_agent_guard_refuses_only_a_bare_shell`.
 #[test]
 fn send_script_for_an_agent_row_refuses_a_bare_shell_before_the_paste() {
     let s = build_send_script_guarded(
@@ -2199,13 +2200,141 @@ fn send_script_for_an_agent_row_refuses_a_bare_shell_before_the_paste() {
     );
     let guard = s.find("exit 97").expect("the guard");
     assert!(guard < s.find("load-buffer").unwrap(), "{s}");
-    assert!(s.contains("'#{pane_pid} #{pane_current_command}'"), "{s}");
-    // The launcher (`sh -c '<several words>'`) is never read as a shell.
-    assert!(s.contains("in *' '*' '*) ;;"), "{s}");
+    assert!(s.contains("ps -o tpgid= -o args= -p \"$pp\""), "{s}");
     let bare = build_send_script_guarded("dev-x", Some("%3"), "", "fleet-1", true, true);
     assert!(!bare.contains("exit 97"), "{bare}");
     let shell = build_send_script("dev-x", Some("%3"), "ls", "fleet-1", true);
     assert!(!shell.contains("exit 97"), "{shell}");
+}
+
+/// Reviews r5-03-1 / r5-03-3: the guard itself, run against real panes on a
+/// private tmux server. Only a pane whose first process is a bare shell
+/// holding the terminal is refused: not the launcher with its agent running,
+/// not an agent started by hand (a binary, or a wrapper script with no
+/// `exec`), not a person's launcher script, not the agent as first process.
+/// Skipped without tmux.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_exited_agent_guard_refuses_only_a_bare_shell() {
+    let has_tmux = std::process::Command::new("tmux")
+        .arg("-V")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !has_tmux {
+        eprintln!("skipping the_exited_agent_guard_refuses_only_a_bare_shell: no tmux on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().to_string_lossy().into_owned();
+    let wrap = dir.path().join("wrap.sh");
+    std::fs::write(&wrap, "sleep 300\n").unwrap();
+    let wrap = wrap.to_string_lossy().into_owned();
+    let tmux = |args: &[&str]| {
+        let out = std::process::Command::new("tmux")
+            .env("TMUX_TMPDIR", &sock)
+            .env_remove("TMUX")
+            .args(args)
+            .output()
+            .expect("spawn tmux");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let shell = "exec bash --norc --noprofile -i";
+    let launcher_script = format!("exec /bin/sh {}", crate::shell::quote(&wrap));
+    for (name, command) in [
+        (
+            "running",
+            "sleep 300 || true; exec bash --norc --noprofile -i",
+        ),
+        ("exited", "true || true; exec bash --norc --noprofile -i"),
+        ("byhand", shell),
+        ("wrapped", shell),
+        ("script", launcher_script.as_str()),
+        ("direct", "exec sleep 300"),
+    ] {
+        tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            name,
+            "-x",
+            "80",
+            "-y",
+            "24",
+            command,
+        ]);
+    }
+    tmux(&["send-keys", "-t", "=byhand:", "sleep 300", "Enter"]);
+    let by_wrapper = format!("sh {}", crate::shell::quote(&wrap));
+    tmux(&["send-keys", "-t", "=wrapped:", &by_wrapper, "Enter"]);
+    // Until each pane has settled into what it is meant to show.
+    let foreground = |name: &str| {
+        tmux(&[
+            "display-message",
+            "-p",
+            "-t",
+            &format!("={name}:"),
+            "#{pane_current_command}",
+        ])
+    };
+    let children = |name: &str| {
+        let pid = tmux(&[
+            "display-message",
+            "-p",
+            "-t",
+            &format!("={name}:"),
+            "#{pane_pid}",
+        ]);
+        std::process::Command::new("pgrep")
+            .args(["-P", &pid])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let settled = foreground("byhand") == "sleep"
+            && children("wrapped")
+            && children("running")
+            && foreground("exited") == "bash"
+            && !children("exited");
+        if settled {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the panes never settled"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let verdict = |name: &'static str| {
+        let script = format!(
+            "export TMUX_TMPDIR={}; unset TMUX; t={}; {}exit 0",
+            crate::shell::quote(&sock),
+            crate::shell::quote(&crate::tmux::exact_pane(name)),
+            prompt::agent_exited_guard()
+        );
+        std::process::Command::new("bash")
+            .args(["-c", &script])
+            .output()
+            .expect("spawn bash")
+            .status
+            .code()
+    };
+    let got: Vec<_> = ["running", "exited", "byhand", "wrapped", "script", "direct"]
+        .into_iter()
+        .map(|n| (n, verdict(n)))
+        .collect();
+    tmux(&["kill-server"]);
+    assert_eq!(
+        got,
+        vec![
+            ("running", Some(0)),
+            ("exited", Some(97)),
+            ("byhand", Some(0)),
+            ("wrapped", Some(0)),
+            ("script", Some(0)),
+            ("direct", Some(0)),
+        ]
+    );
 }
 
 /// Review w09-4: a typing script run twice types once. The paste leaves the
@@ -2225,26 +2354,46 @@ fn send_script_run_again_after_its_paste_types_nothing() {
     assert!(check < paste && paste < mark && mark < enter, "{s}");
 }
 
-/// Review w09-4: ssh's own exit 255 on a connection it had made may have
-/// typed; one that never connected did not.
+/// Reviews w09-4 / r5-03-2: ssh's own exit 255 may have typed only when
+/// the script's first output came back; a connection that never ran it
+/// (refused, reset before auth, a failed login, a bad config) did not.
 #[cfg(unix)]
 #[test]
 fn an_ssh_drop_mid_run_may_have_typed_and_a_failed_connect_did_not() {
     use std::os::unix::process::ExitStatusExt;
-    let out = |code: i32, stderr: &str| std::process::Output {
+    let out = |code: i32, stdout: &str, stderr: &str| std::process::Output {
         status: std::process::ExitStatus::from_raw(code << 8),
-        stdout: Vec::new(),
+        stdout: stdout.as_bytes().to_vec(),
         stderr: stderr.as_bytes().to_vec(),
     };
     assert!(prompt::dropped_mid_run(&out(
         255,
+        prompt::TYPING_MARK,
         "client_loop: send disconnect: Broken pipe"
     )));
+    for nothing_ran in [
+        "ssh: connect to host h port 22: Connection refused",
+        "Connection timed out during banner exchange",
+        "Connection reset by 10.0.0.5 port 22",
+        "Received disconnect from 10.0.0.5 port 22:2: Too many authentication failures",
+        "Bad owner or permissions on /home/u/.ssh/config",
+    ] {
+        assert!(
+            !prompt::dropped_mid_run(&out(255, "", nothing_ran)),
+            "{nothing_ran}"
+        );
+    }
     assert!(!prompt::dropped_mid_run(&out(
-        255,
-        "ssh: connect to host h port 22: Connection refused"
+        1,
+        prompt::TYPING_MARK,
+        "can't find pane: %3"
     )));
-    assert!(!prompt::dropped_mid_run(&out(1, "can't find pane: %3")));
+    // Every typing script says it started, before anything else it does.
+    let s = build_send_script("dev-x", None, "body", "fleet-1", true);
+    assert!(
+        s.find("printf %s fleet-typing; ").unwrap() < s.find("load-buffer").unwrap(),
+        "{s}"
+    );
 }
 
 #[test]
@@ -8744,6 +8893,47 @@ fn reconcile_reads_a_codex_pane_with_the_codex_adapter() {
         "a Claude row keeps Claude's reading"
     );
     assert_ne!(a.pending_input, Some(card), "and the two readings differ");
+}
+
+/// Reviews w08-4 / r5-04-6: a Codex row has no hooks and no `claude agents`
+/// entry, so its idle pane ends `working` on a pass that asked no agents; a
+/// Claude row's idle pane on such a pass does not (a weak guess).
+#[test]
+fn reconcile_writes_a_codex_rows_idle_pane_on_a_pass_that_asked_no_agents() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    let live = || vec![tmux_session("dev-cx"), tmux_session("dev-a")];
+    let first = vps_probe(&s, live(), None, vec![], PrInfoMap::new());
+    reconcile_write_one_host(&mut s, &first, &[]).unwrap();
+    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
+    s.set_session_agent(cx.id, crate::store::AGENT_CODEX)
+        .unwrap();
+    s.conn_ref()
+        .execute("UPDATE sessions SET claude_status = 'working'", [])
+        .unwrap();
+
+    let idle = include_str!("../../agent_adapter/testdata/codex/idle_after_turn.txt");
+    assert_eq!(
+        crate::agent_adapter::by_id(crate::store::AGENT_CODEX)
+            .unwrap()
+            .analyze_pane(idle)
+            .derived_status,
+        Some(crate::service::pane_intel::ClaudeStatus::Idle),
+        "the fixture reads idle"
+    );
+    let mut probe = vps_probe(&s, live(), None, vec![], PrInfoMap::new());
+    // This pass asked no agents.
+    probe.agent_rows = None;
+    for name in ["dev-cx", "dev-a"] {
+        probe.pane_tails.insert(name.into(), idle.into());
+    }
+    probe.intel = intel_from_tails(&probe.pane_tails);
+    reconcile_write_one_host(&mut s, &probe, &[]).unwrap();
+
+    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
+    assert_eq!(cx.claude_status.as_deref(), Some("idle"));
+    let a = s.get_session("dev-a", "vps").unwrap().unwrap();
+    assert_eq!(a.claude_status.as_deref(), Some("working"));
 }
 
 /// Codex names its own conversation: reconcile takes the id and rollout the
