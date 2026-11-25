@@ -152,10 +152,32 @@ pub async fn repo_delete_merged_branches(
     if args.names.is_empty() && args.remotes.is_empty() {
         return Ok(DeleteMergedResult::default());
     }
+    check_delete_args(&args)?;
+    let (host, name) = session_target(store, args.session_id)?;
+    let body = delete_merged_body(&args.names, &args.remotes);
+    let out = run_git(ssh, &host, &name, &body).await?;
+    parse_delete_merged(&out.stdout)
+}
+
+fn check_delete_args(args: &DeleteMergedArgs) -> Result<(), IpcError> {
     for n in args.names.iter().chain(&args.remotes) {
         crate::validate::git_ref(n)?;
     }
     for r in &args.remotes {
+        // The branch half reaches `git push` on its own: `origin/-f` passes
+        // git_ref as a whole, so its parts are checked too.
+        let parts = r.split_once('/');
+        if parts.is_some_and(|(remote, branch)| {
+            remote.is_empty()
+                || remote.starts_with('-')
+                || branch.is_empty()
+                || branch.starts_with('-')
+        }) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("{r:?} is not a remote branch (remote/branch)"),
+            ));
+        }
         if !r.contains('/') {
             return Err(IpcError::new(
                 codes::E_INVALID,
@@ -163,10 +185,7 @@ pub async fn repo_delete_merged_branches(
             ));
         }
     }
-    let (host, name) = session_target(store, args.session_id)?;
-    let body = delete_merged_body(&args.names, &args.remotes);
-    let out = run_git(ssh, &host, &name, &body).await?;
-    parse_delete_merged(&out.stdout)
+    Ok(())
 }
 
 fn delete_merged_body(names: &[String], remotes: &[String]) -> String {
@@ -189,7 +208,7 @@ fn delete_merged_body(names: &[String], remotes: &[String]) -> String {
               && git -C \"$root\" remote | grep -qxF -- \"$r\" \
               && git -C \"$root\" fetch -q \"$r\" \"+refs/heads/$b:refs/remotes/$n\" >/dev/null 2>&1 \
               && git -C \"$root\" merge-base --is-ancestor \"refs/remotes/$n\" \"$base\" 2>/dev/null \
-              && git -C \"$root\" push -q \"$r\" --delete \"$b\" >/dev/null 2>&1; then\n\
+              && git -C \"$root\" push -q \"$r\" --delete \"refs/heads/$b\" >/dev/null 2>&1; then\n\
              printf 'D %s\\n' \"$n\"\n\
            else\n\
              printf 'K %s\\n' \"$n\"\n\
@@ -373,6 +392,25 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn a_remote_branch_whose_half_reads_as_an_option_is_refused() {
+        for bad in ["origin/-f", "-o/x", "origin/", "/x", "nobranch"] {
+            let args = DeleteMergedArgs {
+                session_id: 1,
+                names: vec![],
+                remotes: vec![bad.to_string()],
+            };
+            let err = check_delete_args(&args).unwrap_err();
+            assert_eq!(err.code, codes::E_INVALID, "{bad}");
+        }
+        let ok = DeleteMergedArgs {
+            session_id: 1,
+            names: vec!["feat".into()],
+            remotes: vec!["origin/feat/x".into()],
+        };
+        assert!(check_delete_args(&ok).is_ok());
+    }
+
     #[test]
     fn delete_merged_refuses_without_a_base_branch() {
         let tmp = tempfile::tempdir().unwrap();
