@@ -212,6 +212,7 @@ pub async fn list_host_worktrees_with(
     // an MCP tool, so the alias can come from a paired client rather than
     // from a host chip the app drew itself.
     crate::validate::host_alias(host)?;
+    crate::service::hosts::require_fleet_host(store, host)?;
     if host == crate::service::projects::LOCAL_HOST {
         let s = lock(store)?;
         // Resolve the project first, exactly as the remote branch does below:
@@ -654,6 +655,7 @@ mod tests {
     #[tokio::test]
     async fn list_host_worktrees_scans_the_host_and_caches_rows() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
+        store.lock().unwrap().upsert_host("vps").unwrap();
         let pid = {
             let s = store.lock().unwrap();
             let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
@@ -729,6 +731,7 @@ mod tests {
         let root = "/home/u/projects/github.com/o/r";
         let scan = |origin: &str| {
             let store = Mutex::new(Store::open_in_memory().unwrap());
+            store.lock().unwrap().upsert_host("vps").unwrap();
             let pid = store
                 .lock()
                 .unwrap()
@@ -800,6 +803,7 @@ mod tests {
     #[tokio::test]
     async fn list_host_worktrees_tolerates_a_login_banner_before_the_root_line() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
+        store.lock().unwrap().upsert_host("vps").unwrap();
         let pid = store
             .lock()
             .unwrap()
@@ -844,6 +848,7 @@ mod tests {
     #[tokio::test]
     async fn list_host_worktrees_quotes_a_root_containing_a_quote_and_a_space() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
+        store.lock().unwrap().upsert_host("vps").unwrap();
         let pid = {
             let s = store.lock().unwrap();
             let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
@@ -895,6 +900,7 @@ mod tests {
     #[tokio::test]
     async fn list_host_worktrees_reports_not_cloned() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
+        store.lock().unwrap().upsert_host("vps").unwrap();
         let pid = store
             .lock()
             .unwrap()
@@ -971,6 +977,7 @@ mod tests {
     #[tokio::test]
     async fn list_host_worktrees_git_failure_is_e_git_setup() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
+        store.lock().unwrap().upsert_host("vps").unwrap();
         let pid = store
             .lock()
             .unwrap()

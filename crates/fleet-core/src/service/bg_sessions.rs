@@ -254,6 +254,8 @@ pub async fn new_bg_session_tracked(
     reg: &Arc<crate::cancel::CancellationRegistry>,
     owner: Option<i64>,
 ) -> Result<NewBgSessionResult, IpcError> {
+    crate::validate::host_alias(&args.host_alias)?;
+    crate::service::hosts::require_fleet_host(store, &args.host_alias)?;
     if args.is_codex() {
         return new_codex_bg_session(args, store, ssh, reg, owner).await;
     }

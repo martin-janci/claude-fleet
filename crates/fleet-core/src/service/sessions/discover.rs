@@ -399,6 +399,8 @@ pub async fn discover_lost_sessions(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<Vec<LostCandidate>, IpcError> {
+    crate::validate::host_alias(&args.host_alias)?;
+    crate::service::hosts::require_fleet_host(store, &args.host_alias)?;
     let shell = RealHostShell {
         ssh: Arc::clone(ssh),
         timeout: DISCOVER_TIMEOUT,

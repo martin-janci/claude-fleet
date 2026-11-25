@@ -816,6 +816,7 @@ impl FleetTools {
                 )));
             }
         }
+        crate::service::hosts::require_fleet_host(&self.store, host_alias).map_err(to_mcp_err)?;
         let s = lock(&self.store).map_err(to_mcp_err)?;
         require_bound_client_sees_host(&s, caller, host_alias)
     }

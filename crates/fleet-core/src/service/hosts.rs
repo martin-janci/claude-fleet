@@ -372,6 +372,8 @@ pub async fn probe_host(
     ssh: &dyn SshExec,
     reg: &Arc<CancellationRegistry>,
 ) -> Result<HostRow, IpcError> {
+    crate::validate::host_alias(&args.alias)?;
+    require_fleet_host(store, &args.alias)?;
     let ssh_alias = {
         let s = lock(store)?;
         s.list_hosts()?
@@ -1196,9 +1198,41 @@ fn merge_known_account_fields(
 
 use crate::store::now_unix;
 
+/// `host_alias` names a host of this fleet: a registered row, or `local`
+/// where the hub allows it. A syntactically valid alias is otherwise handed
+/// straight to `ssh`, which resolves it through `~/.ssh/config` (or DNS),
+/// and the hub would run commands on a machine nobody added (or one an
+/// admin removed) with its own SSH identity. Adding a host is the admin's
+/// (`add_host`); every path that SSHes to a caller's alias asks here.
+pub fn require_fleet_host(
+    store: &std::sync::Mutex<crate::store::Store>,
+    host_alias: &str,
+) -> Result<(), IpcError> {
+    if host_alias == crate::service::projects::LOCAL_HOST {
+        return crate::service::hub::ensure_local_allowed(host_alias);
+    }
+    match crate::ipc_error::lock(store)?.get_host_row(host_alias)? {
+        Some(_) => Ok(()),
+        None => Err(IpcError::new(
+            crate::ipc_error::codes::E_NOTFOUND,
+            format!("host {host_alias} not found"),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a host of this fleet is SSHed to on a caller's word.
+    #[test]
+    fn only_a_registered_host_is_a_fleet_host() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        store.lock().unwrap().upsert_host("vps").unwrap();
+        assert!(require_fleet_host(&store, "vps").is_ok());
+        let e = require_fleet_host(&store, "bastion-from-ssh-config").unwrap_err();
+        assert_eq!(e.code, crate::ipc_error::codes::E_NOTFOUND);
+    }
 
     /// An account id that is not id-shaped is no account.
     #[test]

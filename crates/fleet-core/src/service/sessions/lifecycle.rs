@@ -524,6 +524,7 @@ pub async fn new_session(
 ) -> Result<SessionRow, IpcError> {
     // Reject hostile input before it reaches ssh / tmux / git.
     crate::validate::host_alias(&args.host_alias)?;
+    crate::service::hosts::require_fleet_host(store, &args.host_alias)?;
     let owner_key = store as *const Mutex<Store> as usize;
     // An empty name means "pick one for me" (the dialog's dice, an MCP
     // caller that doesn't care): mint it here so every caller shares the

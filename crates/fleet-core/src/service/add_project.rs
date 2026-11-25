@@ -1826,16 +1826,7 @@ fn refuse_existing_base_path(store: &Mutex<Store>, base_path: &str) -> Result<()
 /// row until the first reconcile — and is answered by
 /// `hub::ensure_local_allowed` instead (a hub with `hub.local_host` off).
 fn require_fleet_host(store: &Mutex<Store>, host_alias: &str) -> Result<(), IpcError> {
-    if host_alias == crate::service::projects::LOCAL_HOST {
-        return crate::service::hub::ensure_local_allowed(host_alias);
-    }
-    match lock(store)?.get_host_row(host_alias)? {
-        Some(_) => Ok(()),
-        None => Err(IpcError::new(
-            codes::E_NOTFOUND,
-            format!("host {host_alias} not found"),
-        )),
-    }
+    crate::service::hosts::require_fleet_host(store, host_alias)
 }
 
 fn roots(store: &Mutex<Store>, host: &str) -> Result<(String, String, Layout), IpcError> {
