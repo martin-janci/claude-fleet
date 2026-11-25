@@ -1944,6 +1944,16 @@ pub(super) fn settings_writer(caller: &Caller, who: &SettingsWho) -> Result<(), 
              an unbound device of the hub's operator does",
             None,
         )),
+        // Nor does another person's device, trusted or not: the settings
+        // surface is the fleet admin's. The `Access::Person*` rows say so at
+        // the gate for `set_setting` and the proposal tools; `guide` is
+        // `Access::Client` and reaches this arm with no such row.
+        SettingsWho::Device(_) if !caller.is_fleet_admin_device() => Err(mcp_err(
+            "E_FORBIDDEN",
+            "only the fleet admin's own device changes the fleet's settings; \
+             this device may read them and propose a change",
+            None,
+        )),
         SettingsWho::Device(_) if caller.is_trusted_client() && caller.mode == TokenMode::Full => {
             Ok(())
         }

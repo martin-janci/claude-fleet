@@ -21095,6 +21095,31 @@ async fn an_org_bound_device_never_decides_or_removes_a_guide() {
         .is_ok(),
         "an unbound trusted device decides"
     );
+    // Nor does another person's trusted, unbound device: deciding is the
+    // fleet admin's, and `guide` has no `Access::Person` row to say so.
+    let mut colleague = trusted(client_caller("their-laptop", TokenMode::Full));
+    colleague.is_fleet_admin = false;
+    let p2 = result_json(
+        &call(
+            host_caller("web-1", TokenMode::Full),
+            serde_json::json!({ "action": "propose", "spec": cat["example"].clone() }),
+        )
+        .await
+        .expect("a host proposes again"),
+    );
+    let err = call(
+        colleague.clone(),
+        serde_json::json!({ "action": "decide", "id": p2["id"].as_i64().unwrap(), "approve": true }),
+    )
+    .await
+    .expect_err("a colleague's device never decides");
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    let listed = result_json(
+        &call(colleague, serde_json::json!({ "action": "list" }))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(listed["can_write"].as_bool(), Some(false));
     let err = call(
         bound,
         serde_json::json!({ "action": "remove", "page_id": "guide.cleanup" }),
