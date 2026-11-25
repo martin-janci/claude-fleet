@@ -377,19 +377,30 @@ pub(crate) fn fetch_owner_repo(s: &Store, project_id: i64) -> Result<(String, St
 /// The repository a checkout of project `project_id` on another host must
 /// be, for [`super::lifecycle`]'s same-repository check: the project's
 /// `github_origin` (`ProjectRow::github_origin`). `None`, and so no check,
-/// when it has none or the project is an adopted `local/<dir>` one:
-/// `owner`/`repo` are a name there, not the repository's identity (review
-/// w02-4).
+/// for an adopted `local/<dir>` project: `owner`/`repo` are a name there,
+/// not the repository's identity (review w02-4). A project whose origin
+/// was never read (a row from before migration 207 on a hub) is held to
+/// the URL its `owner`/`repo` name, so a fork is not started in its
+/// upstream's clone while the row waits for a backfill (review r5-02-3).
 pub(crate) fn fetch_repo_identity(s: &Store, project_id: i64) -> Result<Option<String>, IpcError> {
     let mut stmt = s
         .conn_ref()
-        .prepare("SELECT owner, github_origin FROM projects WHERE id=?1")?;
-    let (owner, origin) = stmt
+        .prepare("SELECT owner, repo, github_origin FROM projects WHERE id=?1")?;
+    let (owner, repo, origin) = stmt
         .query_row(rusqlite::params![project_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
         })
         .map_err(missing_row("project", project_id))?;
-    Ok(origin.filter(|_| owner != "local"))
+    if owner == "local" {
+        return Ok(None);
+    }
+    Ok(Some(origin.unwrap_or_else(|| {
+        crate::repo_url::clone_url_for(&owner, &repo)
+    })))
 }
 
 /// A system project's `base_path`, or `None` for an ordinary project.

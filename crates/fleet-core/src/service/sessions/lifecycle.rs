@@ -434,17 +434,22 @@ pub(super) fn worktree_add_script(root: &str, name: &str, base: Option<&str>) ->
 /// of one branch from `origin`, with no prompt and bounded to 20 s by
 /// `timeout`, or by perl's `alarm` where there is none (macOS ships no
 /// `timeout`, so a Mac host never fetched: review w02-3). Offline it simply
-/// fails; after one fetch ran out of time the next is skipped, so two
-/// fetches never eat the start's own time limit.
+/// fails; after one fetch failed or ran out of time the next is skipped, so
+/// two fetches never eat the start's own time limit. ssh runs in batch mode
+/// with a connect timeout: a key that needs a passphrase fails at once
+/// instead of waiting on a prompt nobody sees (review r5-02-5). The branch
+/// is fetched as `refs/heads/<branch>`, which git can read neither as an
+/// option nor as a two-sided refspec (review r5-02-1).
 const BOUNDED_FETCH_SNIPPET: &str = "fleet_fetch() {\n\
      [ -z \"$fleet_fetch_slow\" ] || return 0\n\
      fleet_rc=0\n\
+     fleet_ssh=\"${GIT_SSH_COMMAND:-ssh} -o BatchMode=yes -o ConnectTimeout=10\"\n\
      if command -v timeout >/dev/null 2>&1; then \
-     GIT_TERMINAL_PROMPT=0 timeout 20 git fetch -q origin \"$1\" >/dev/null 2>&1 || fleet_rc=$?\n\
+     GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND=\"$fleet_ssh\" timeout 20 git fetch -q origin \"refs/heads/$1\" >/dev/null 2>&1 || fleet_rc=$?\n\
      elif command -v perl >/dev/null 2>&1; then \
-     GIT_TERMINAL_PROMPT=0 perl -e 'alarm 20; exec @ARGV' git fetch -q origin \"$1\" >/dev/null 2>&1 || fleet_rc=$?\n\
+     GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND=\"$fleet_ssh\" perl -e 'alarm 20; exec @ARGV' git fetch -q origin \"refs/heads/$1\" >/dev/null 2>&1 || fleet_rc=$?\n\
      fi\n\
-     case \"$fleet_rc\" in 124|142) fleet_fetch_slow=1;; esac\n\
+     [ \"$fleet_rc\" = 0 ] || fleet_fetch_slow=1\n\
      return 0\n\
      }\n";
 
@@ -684,6 +689,13 @@ pub async fn new_session(
 
     if let Some(name) = args.new_worktree.as_deref() {
         validate_new_worktree_name(name)?;
+        // The base reaches `git fetch` and `git worktree add` as an
+        // argument (review r5-02-1).
+        if let Some(base) = args.base_branch.as_deref().map(str::trim) {
+            if !base.is_empty() {
+                crate::validate::branch_name(base)?;
+            }
+        }
     }
     // Two starts creating the same worktree at once would both run `git
     // worktree add` into one directory and share whatever it became.
@@ -1122,6 +1134,10 @@ pub(crate) fn fill_session_name(s: &Store, args: &NewSessionArgs) -> Result<Stri
     fill_session_name_avoiding(s, args, &|_| false)
 }
 
+/// Bytes kept free for the `--<adjective>-<noun>` an auto-picked name gains
+/// when the plain one is taken.
+const AUTO_NAME_PAIR_ROOM: usize = 48;
+
 /// The name `fill_session_name` mints, also passing over one `in_flight`
 /// says another start is creating (it has no row yet).
 pub(crate) fn fill_session_name_avoiding(
@@ -1150,11 +1166,24 @@ pub(crate) fn fill_session_name_avoiding(
     } else {
         None
     };
+    // A name nobody typed must fit the limit by itself: the worktree part
+    // gives way, cut at a char boundary, with room left for a `--<pair>`
+    // (review r5-02-4).
+    let wt = wt.map(|w| {
+        let room = crate::validate::TMUX_NAME_MAX
+            .saturating_sub(base.len() + term.len() + 2 + AUTO_NAME_PAIR_ROOM)
+            .max(1);
+        let mut end = w.len().min(room);
+        while !w.is_char_boundary(end) {
+            end -= 1;
+        }
+        w[..end].to_string()
+    });
     // `derive_tmux_name` (`discover.rs`) mints the same `dev-<owner>-<repo>`
     // / `dev-<owner>-<repo>--<worktree>` shape from a worktree key, "main"
     // meaning the repo root — the same convention `wt: None` encodes here.
-    // `tmux_safe` is idempotent (it only ever removes `.`/`:`), so applying
-    // it again after appending `term` is safe.
+    // `tmux_safe` is idempotent, so applying it again after appending
+    // `term` is safe.
     let worktree_key = wt.as_deref().unwrap_or("main");
     let deterministic = tmux_safe(&format!(
         "{}{term}",

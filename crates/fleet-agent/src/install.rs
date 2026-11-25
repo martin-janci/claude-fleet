@@ -413,7 +413,10 @@ pub fn uninstall(
         paths.push(unit_dir.join(name));
     }
     paths.push(layout.config_path.clone());
-    paths.extend(state_dirs.iter().cloned());
+    // "Installed" is the units and the config only. The state directories
+    // are the installing user's whatever the scope, so a run in the wrong
+    // scope must find nothing and leave the live agent's identity and
+    // status files alone (review r5-02-2).
     let mut removed = 0;
     for p in &paths {
         if remove_if_there(p)? {
@@ -433,6 +436,11 @@ pub fn uninstall(
                  as that user"
             }
         ));
+    }
+    for p in state_dirs {
+        if remove_if_there(p)? {
+            let _ = writeln!(out, "removed {}", p.display());
+        }
     }
     // The config's own directory, when nothing else is in it.
     if let Some(dir) = layout.config_path.parent() {
@@ -800,7 +808,11 @@ mod tests {
         assert!(said.contains("the agent is uninstalled"), "{said}");
 
         // Review w01-7: again, with nothing left, it does not claim to have
-        // uninstalled anything; it names the other scope.
+        // uninstalled anything; it names the other scope. Review r5-02-2:
+        // a state directory alone (the other scope's agent runs as this
+        // user) is not an install, and it is left where it is.
+        std::fs::create_dir_all(&agent_state).unwrap();
+        std::fs::write(agent_state.join("identity.json"), "{}").unwrap();
         let mut out = Vec::new();
         let err = uninstall(
             &Scope::User,
@@ -813,6 +825,7 @@ mod tests {
         assert!(err.contains("no agent is installed"), "{err}");
         assert!(err.contains("sudo fleet-agent uninstall"), "{err}");
         assert!(!String::from_utf8(out).unwrap().contains("is uninstalled"));
+        assert!(agent_state.join("identity.json").exists());
     }
 
     /// Review w01-7: a unit that is there but cannot be stopped (no user

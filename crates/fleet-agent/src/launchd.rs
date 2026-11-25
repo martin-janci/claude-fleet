@@ -277,10 +277,9 @@ pub fn uninstall(
         Err(e) => launchctl.run(&print_args(uid)).is_ok().then_some(e),
     };
     let mut removed = 0;
-    for p in [layout.plist_path.as_path(), layout.config_path.as_path()]
-        .into_iter()
-        .chain(state_dirs.iter().map(|p| p.as_path()))
-    {
+    // The plist and the config are the install; the state directories
+    // alone are not, and are left alone then (review r5-02-2).
+    for p in [layout.plist_path.as_path(), layout.config_path.as_path()] {
         if crate::install::remove_if_there(p)? {
             removed += 1;
             let _ = writeln!(out, "removed {}", p.display());
@@ -293,6 +292,11 @@ pub fn uninstall(
             layout.plist_path.display(),
             layout.config_path.display()
         ));
+    }
+    for p in state_dirs {
+        if crate::install::remove_if_there(p)? {
+            let _ = writeln!(out, "removed {}", p.display());
+        }
     }
     if let Some(dir) = layout.config_path.parent() {
         let _ = std::fs::remove_dir(dir);
@@ -509,7 +513,9 @@ mod tests {
         assert!(!state_dir.exists());
         assert!(!agent_state.exists());
 
-        // Review w01-7: nothing left is not "uninstalled".
+        // Review w01-7: nothing left is not "uninstalled"; a state
+        // directory alone is not an install and stays (review r5-02-2).
+        std::fs::create_dir_all(&agent_state).unwrap();
         let err = uninstall(
             plan.uid,
             &plan.layout,
@@ -519,6 +525,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("no agent is installed"), "{err}");
+        assert!(agent_state.exists());
     }
 
     /// Review w01-7: a job still loaded after a failed bootout keeps
