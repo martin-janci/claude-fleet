@@ -12,7 +12,8 @@ impl FleetTools {
         pass turn_seq_before to wait_for_session { until: \"turn_gt\" } or \
         session_transcript { since_turn } for the reply (run_prompt does all \
         three). Refuses a blocked or stuck session (E_INVALID_STATE) unless \
-        force=true; a working one queues it. acked: true = hook-confirmed, \
+        force=true, and one whose agent has exited (E_INVALID_STATE) even with \
+        force: use Restart or the terminal; a working one queues it. acked: true = hook-confirmed, \
         false = not within 1.5 s (check capture_session), null = unknowable.")]
     pub(super) async fn send_prompt(
         &self,

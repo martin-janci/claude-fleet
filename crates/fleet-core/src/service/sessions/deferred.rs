@@ -305,7 +305,8 @@ where
         return Err(IpcError::new(
             codes::E_INVALID_STATE,
             format!(
-                "the agent in session {} has exited; restart the session",
+                "the agent in session {} has exited; use Restart, or type into the shell in \
+                 the terminal",
                 row.id
             ),
         ));
