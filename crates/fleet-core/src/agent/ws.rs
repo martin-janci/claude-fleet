@@ -1035,10 +1035,25 @@ async fn read_loop(
                 heard = true;
                 match msg {
                     Message::Text(text) => {
-                        let allowance = budgets
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .allowance();
+                        let allowance = {
+                            let mut b = budgets.lock().unwrap_or_else(|e| e.into_inner());
+                            let allowance = b.allowance();
+                            // Pieces of an answer nobody waits on any more
+                            // (its request timed out and is no longer late,
+                            // or ended on another frame) are dropped here,
+                            // not kept for the life of the connection.
+                            assembly.retain(|id| b.waits_on(id));
+                            allowance
+                        };
+                        // Only an answer carries a stream: a `pong`, a
+                        // `report` or a kind this build does not know is
+                        // judged against the floor, never against the budget
+                        // an uncapped exec in flight opened for its answer.
+                        // The kind is read without keeping anything else.
+                        let allowance = match fleet_proto::agent_frame_kind(&text).as_deref() {
+                            Some("result" | "result_chunk") => allowance,
+                            _ => allowance.min(MIN_INBOUND_BYTES),
+                        };
                         // Lenient: the handshake (`first_hello`) is behind us
                         // here, so a `kind` this build does not know is
                         // skipped, not fatal — see the crate doc. A `kind` it
@@ -1127,6 +1142,7 @@ async fn read_loop(
                                 };
                                 if let Some(id) = answered_id(&frame) {
                                     budgets.lock().unwrap_or_else(|e| e.into_inner()).done(id);
+                                    assembly.forget(id);
                                 }
                                 registry.deliver(alias, conn_id, frame);
                             }
@@ -1280,6 +1296,11 @@ impl Budgets {
     /// The ceiling for the next inbound frame. Expired entries are dropped
     /// here rather than on a timer: without that, one uncapped `exec` would
     /// leave the connection at the full ceiling for as long as it stayed open.
+    /// Whether an answer for `id` is still expected: armed, or late.
+    fn waits_on(&self, id: &str) -> bool {
+        self.armed.contains_key(id) || self.late.contains_key(id)
+    }
+
     fn allowance(&mut self) -> usize {
         let now = Instant::now();
         let late = &mut self.late;

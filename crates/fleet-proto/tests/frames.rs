@@ -1067,3 +1067,58 @@ fn chunk_frames_use_the_spec_s_tag_and_field_names() {
         json!({ "kind": "result", "id": "01J6", "exit_code": 0, "stdout_b64": "", "stderr_b64": "", "truncated": false, "chunks": 2 })
     );
 }
+
+/// An agent frame is read in two passes (its `kind`, then that variant's
+/// fields), not through serde's buffered internally-tagged path, which kept
+/// every member of the object (unknown ones included) as a generic value
+/// first: 13–16 times the frame's size. The answers are the same: members
+/// in any order, unknown members skipped, defaults applied, a duplicate or
+/// missing `kind` refused, an unknown `kind` still recognised as such.
+#[test]
+fn agent_frames_decode_in_two_passes_with_the_same_answers() {
+    use fleet_proto::{agent_frame_kind, Decoded};
+    let junk = format!("[{}0]", "0,".repeat(100_000));
+    let text = format!(
+        r#"{{"id":"r1","junk":{junk},"exit_code":0,"stdout_b64":"","stderr_b64":"","truncated":false,"kind":"result"}}"#
+    );
+    assert_eq!(agent_frame_kind(&text).as_deref(), Some("result"));
+    match decode_agent_frame(&text).expect("decodes") {
+        AgentFrame::Result { id, chunks, .. } => {
+            assert_eq!(id, "r1");
+            assert_eq!(chunks, 0);
+        }
+        other => panic!("{other:?}"),
+    }
+    let pong = decode_agent_frame(r#"{"kind":"pong","id":"p","extra":{"a":[1,2]}}"#).unwrap();
+    assert_eq!(pong, AgentFrame::Pong { id: "p".into() });
+    for bad in [
+        r#"{"kind":"pong","kind":"pong","id":"p"}"#,
+        r#"{"id":"p"}"#,
+        r#"{"kind":"pong"}"#,
+        r#"{"kind":7,"id":"p"}"#,
+        r#"["kind","pong"]"#,
+    ] {
+        assert!(decode_agent_frame(bad).is_err(), "{bad}");
+    }
+    match decode_agent_frame_lenient_within(r#"{"kind":"future_thing","x":1}"#, 1 << 20) {
+        Ok(Decoded::Unknown { kind }) => assert_eq!(kind, "future_thing"),
+        other => panic!("{other:?}"),
+    }
+    assert!(decode_agent_frame_lenient_within(r#"{"kind":"pong","id":3}"#, 1 << 20).is_err());
+    assert_eq!(agent_frame_kind("not json"), None);
+}
+
+/// `retain` drops the pieces of every id the receiver no longer waits on,
+/// which frees their slot under `MAX_IDS` as well as their bytes.
+#[test]
+fn assembly_retain_drops_what_nobody_waits_on() {
+    use fleet_proto::Assembly;
+    let mut a = Assembly::default();
+    for i in 0..Assembly::MAX_IDS {
+        a.push(&format!("id{i}"), b"x", b"", 1 << 20).unwrap();
+    }
+    assert!(a.push("one-more", b"x", b"", 1 << 20).is_err(), "full");
+    a.retain(|id| id == "id0");
+    a.push("one-more", b"x", b"", 1 << 20).unwrap();
+    assert!(a.finish("id0", 1).unwrap().is_some());
+}

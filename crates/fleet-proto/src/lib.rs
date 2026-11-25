@@ -667,6 +667,14 @@ impl Assembly {
     }
 
     /// Forget `id`'s pieces (its caller gave up).
+    /// Keep only the ids `keep` answers true for: what the receiver still
+    /// waits on. Pieces of a request that ended some other way (it timed
+    /// out, or a non-result answer closed it) are otherwise held until the
+    /// connection ends.
+    pub fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.pending.retain(|id, _| keep(id));
+    }
+
     pub fn forget(&mut self, id: &str) {
         self.pending.remove(id);
     }
@@ -828,9 +836,9 @@ pub fn decode_agent_frame_lenient_within(
 /// no `kind` at all, or invalid JSON — is corruption either way, and stays a
 /// hard [`ProtoError::Malformed`]: the unknown-kind rule forgives evolution,
 /// not damage. See [`unknown_kind`] for how the two are told apart.
-fn decode_lenient<T: DeserializeOwned>(text: &str, cap: usize) -> Result<Decoded<T>, ProtoError> {
+fn decode_lenient<T: FrameText>(text: &str, cap: usize) -> Result<Decoded<T>, ProtoError> {
     check_size(text.len(), cap)?;
-    match serde_json::from_str::<T>(text) {
+    match T::from_frame_text(text) {
         Ok(frame) => Ok(Decoded::Frame(frame)),
         // Only the failure path pays for the classification below, and it is
         // already bounded by `cap`.
@@ -1069,11 +1077,144 @@ fn encode<T: Serialize>(frame: &T, cap: usize) -> Result<String, ProtoError> {
     Ok(text)
 }
 
-fn decode<T: DeserializeOwned>(text: &str, cap: usize) -> Result<T, ProtoError> {
+/// How a frame type is read from its text.
+///
+/// The frames are internally tagged enums (`#[serde(tag = "kind")]`), and
+/// serde reads such an enum by first buffering EVERY member of the object
+/// as a generic `Content` value (32 bytes per value, 64 per map entry),
+/// unknown members included, and only then picking the variant. A frame
+/// therefore cost 13 to 16 times its size while it was decoded: the hub's
+/// ceiling-sized frame of `[0,0,0,…]` in a member nothing reads was some
+/// 4 GiB. [`AgentFrame`] — what a host sends the hub — is read in two
+/// passes instead: its `kind` (every other member skipped, nothing kept),
+/// then that variant's own fields (unknown members skipped likewise).
+trait FrameText: Sized + DeserializeOwned {
+    fn from_frame_text(text: &str) -> serde_json::Result<Self> {
+        serde_json::from_str(text)
+    }
+}
+
+impl FrameText for HubFrame {}
+
+impl FrameText for AgentFrame {
+    fn from_frame_text(text: &str) -> serde_json::Result<Self> {
+        agent_frame_from_str(text)
+    }
+}
+
+/// The `kind` of an agent frame, read without keeping any other member:
+/// what the hub sizes a frame's budget by before decoding it. `None` for a
+/// document that is not an object with exactly one string `kind`.
+pub fn agent_frame_kind(text: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct KindOnly {
+        kind: String,
+    }
+    serde_json::from_str::<KindOnly>(text).ok().map(|k| k.kind)
+}
+
+/// [`AgentFrame`] read from `text` in two passes (see [`FrameText`]). The
+/// bodies mirror the variants field for field, with the same defaults.
+fn agent_frame_from_str(text: &str) -> serde_json::Result<AgentFrame> {
+    use serde::de::Error as _;
+    #[derive(Deserialize)]
+    struct KindOnly {
+        kind: String,
+    }
+    #[derive(Deserialize)]
+    struct HelloBody {
+        #[serde(default)]
+        agent_version: String,
+        #[serde(default)]
+        host_name: String,
+        #[serde(default)]
+        os: String,
+        #[serde(default)]
+        proto: u32,
+        #[serde(default)]
+        hook_port: Option<u16>,
+    }
+    #[derive(Deserialize)]
+    struct ResultBody {
+        id: String,
+        exit_code: i32,
+        stdout_b64: String,
+        stderr_b64: String,
+        truncated: bool,
+        #[serde(default)]
+        chunks: u32,
+    }
+    #[derive(Deserialize)]
+    struct ResultChunkBody {
+        id: String,
+        #[serde(default)]
+        stdout_b64: String,
+        #[serde(default)]
+        stderr_b64: String,
+    }
+    #[derive(Deserialize)]
+    struct PongBody {
+        id: String,
+    }
+    #[derive(Deserialize)]
+    struct ReportBody {
+        #[serde(default)]
+        reports: Vec<report::Report>,
+        #[serde(default)]
+        dropped: u32,
+    }
+    const KINDS: &[&str] = &["hello", "result", "result_chunk", "pong", "report"];
+    let KindOnly { kind } = serde_json::from_str(text)?;
+    Ok(match kind.as_str() {
+        "hello" => {
+            let b: HelloBody = serde_json::from_str(text)?;
+            AgentFrame::Hello {
+                agent_version: b.agent_version,
+                host_name: b.host_name,
+                os: b.os,
+                proto: b.proto,
+                hook_port: b.hook_port,
+            }
+        }
+        "result" => {
+            let b: ResultBody = serde_json::from_str(text)?;
+            AgentFrame::Result {
+                id: b.id,
+                exit_code: b.exit_code,
+                stdout_b64: b.stdout_b64,
+                stderr_b64: b.stderr_b64,
+                truncated: b.truncated,
+                chunks: b.chunks,
+            }
+        }
+        "result_chunk" => {
+            let b: ResultChunkBody = serde_json::from_str(text)?;
+            AgentFrame::ResultChunk {
+                id: b.id,
+                stdout_b64: b.stdout_b64,
+                stderr_b64: b.stderr_b64,
+            }
+        }
+        "pong" => {
+            let b: PongBody = serde_json::from_str(text)?;
+            AgentFrame::Pong { id: b.id }
+        }
+        "report" => {
+            let b: ReportBody = serde_json::from_str(text)?;
+            AgentFrame::Report {
+                reports: b.reports,
+                dropped: b.dropped,
+            }
+        }
+        other => return Err(serde_json::Error::unknown_variant(other, KINDS)),
+    })
+}
+
+fn decode<T: FrameText>(text: &str, cap: usize) -> Result<T, ProtoError> {
     // Size first: a hostile peer must not get serde to walk 100 MB before the
     // cap is consulted.
     check_size(text.len(), cap)?;
-    serde_json::from_str(text).map_err(ProtoError::malformed)
+    T::from_frame_text(text).map_err(ProtoError::malformed)
 }
 
 fn check_size(size: usize, cap: usize) -> Result<(), ProtoError> {
@@ -1123,6 +1264,8 @@ mod tests {
         Drain,
     }
 
+    impl FrameText for ProbeFrame {}
+
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "snake_case")]
     enum TuneMode {
@@ -1130,7 +1273,7 @@ mod tests {
         Fast,
     }
 
-    fn lenient<T: DeserializeOwned>(text: &str) -> Result<Decoded<T>, ProtoError> {
+    fn lenient<T: FrameText>(text: &str) -> Result<Decoded<T>, ProtoError> {
         decode_lenient(text, MAX_FRAME_BYTES)
     }
 
