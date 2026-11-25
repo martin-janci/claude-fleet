@@ -258,11 +258,20 @@ fn url_spans(text: &str) -> Vec<(usize, usize)> {
     let lower = text.to_ascii_lowercase();
     let mut from = 0;
     while from < text.len() {
-        let next = ["https://", "http://"]
-            .iter()
-            .filter_map(|p| lower[from..].find(p).map(|i| from + i))
-            .min();
-        let Some(start) = next else { break };
+        // One forward search for `http`, then a look at what follows it:
+        // searching for `https://` and `http://` separately from every URL
+        // rescanned the whole rest of the text for whichever one it lacked,
+        // quadratic in a prompt of many URLs (and this runs in the prompt
+        // hook, under the store lock).
+        let Some(at) = lower[from..].find("http") else {
+            break;
+        };
+        let start = from + at;
+        let rest = &lower[start..];
+        if !(rest.starts_with("https://") || rest.starts_with("http://")) {
+            from = start + 4;
+            continue;
+        }
         let mut end = start;
         for (off, c) in text[start..].char_indices() {
             if c.is_whitespace()
@@ -487,7 +496,12 @@ pub fn recognize(text: &str, ctx: &RecognizeCtx) -> Vec<Match> {
             });
         }
     }
-    let in_url = |i: usize| urls.iter().any(|&(a, b)| i >= a && i < b);
+    // `urls` is in order and its spans do not overlap: the one span that can
+    // hold `i` is the last one starting at or before it.
+    let in_url = |i: usize| {
+        let n = urls.partition_point(|&(a, _)| a <= i);
+        n > 0 && i < urls[n - 1].1
+    };
     for (a, b, key, upper) in scan_keys(text, ctx) {
         if in_url(a) {
             continue;
@@ -602,6 +616,24 @@ pub fn first_key(text: &str, ctx: &RecognizeCtx) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// URL spans are found in one forward pass: a prompt of 40 000 https
+    /// URLs (about 1 MiB) took tens of seconds when every URL rescanned the
+    /// rest of the text for `http://`. The answers are unchanged.
+    #[test]
+    fn url_spans_are_found_in_linear_time() {
+        let spans = url_spans("see https://a.example/x, http://b.example and httpd or http:/no");
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        let text = "https://example.com/a/b/c\n".repeat(40_000);
+        let started = std::time::Instant::now();
+        let spans = url_spans(&text);
+        assert_eq!(spans.len(), 40_000);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+    }
 
     #[derive(Deserialize)]
     struct Case {

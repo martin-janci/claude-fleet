@@ -805,6 +805,21 @@ pub fn resolve_session(s: &Store, session_id: i64) -> Result<bool, IpcError> {
 /// (only matches are kept), apply the loop and dump guards, and resolve.
 /// `first_prompt`: this is the conversation's first prompt. Harness blocks
 /// at the prompt's head are not the person's and are not read.
+/// How much of a prompt [`on_prompt`] reads.
+const DETECT_MAX_BYTES: usize = 64 * 1024;
+
+/// `s` cut to at most `max` bytes, at a character boundary.
+fn head_chars(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 pub fn on_prompt(
     s: &Store,
     session_id: i64,
@@ -813,6 +828,10 @@ pub fn on_prompt(
 ) -> Result<bool, IpcError> {
     let person = crate::service::prompt_origin::human_part(prompt);
     let prompt: &str = person.as_deref().unwrap_or(prompt);
+    // What a prompt names is in its first lines; a pasted log of megabytes
+    // is not read for keys and URLs (this runs under the store lock, and
+    // each key found costs a query).
+    let prompt = head_chars(prompt, DETECT_MAX_BYTES);
     let Some(st) = subject_state(s, session_id)? else {
         return Ok(false);
     };

@@ -110,12 +110,17 @@ pub fn strip_markers(reply: &str) -> String {
     }
     let mut out = String::with_capacity(reply.len());
     let mut rest = reply;
+    // A marker kind once absent from the rest is absent from every later
+    // rest (each is a suffix), so it is never searched for again: searching
+    // the whole remainder on every pass was quadratic in a reply of many
+    // markers of one kind (this runs in the Stop hook, under the store lock).
+    let (mut begin_gone, mut end_gone) = (false, false);
     loop {
-        let next = [rest.find(BEGIN), rest.find(END)]
-            .into_iter()
-            .flatten()
-            .min();
-        let Some(at) = next else {
+        let b = if begin_gone { None } else { rest.find(BEGIN) };
+        let e = if end_gone { None } else { rest.find(END) };
+        begin_gone |= b.is_none();
+        end_gone |= e.is_none();
+        let Some(at) = [b, e].into_iter().flatten().min() else {
             out.push_str(rest);
             break;
         };
@@ -123,9 +128,12 @@ pub fn strip_markers(reply: &str) -> String {
         let tail = &rest[at..];
         rest = match tail.strip_prefix(BEGIN) {
             // A block: everything through its end marker goes.
-            Some(t) => match t.find(END) {
+            Some(t) => match e.and_then(|_| t.find(END)) {
                 Some(e) => after_token(&t[e + END.len()..]),
-                None => after_token(t),
+                None => {
+                    end_gone = true;
+                    after_token(t)
+                }
             },
             None => after_token(&tail[END.len()..]),
         };
@@ -365,6 +373,20 @@ pub fn on_stop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Many markers of one kind (no end marker anywhere) are stripped in
+    /// linear time, with the same answer as before.
+    #[test]
+    fn strip_markers_is_linear_in_markers_of_one_kind() {
+        let one = format!("{BEGIN}ab12 x");
+        assert_eq!(strip_markers(&format!("keep {one}")), "keep  x");
+        let spam = format!("{END}ab12 ").repeat(100_000);
+        let started = std::time::Instant::now();
+        assert_eq!(strip_markers(&spam), "");
+        let spam = format!("{BEGIN}ab12 ").repeat(100_000);
+        assert_eq!(strip_markers(&spam), "");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
 
     #[test]
     fn the_handover_is_read_from_between_the_markers_only() {
