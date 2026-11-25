@@ -2325,7 +2325,7 @@ fn run_over_limit(
                 return Ok(None);
             };
             let item_org = s.item_org(item_id)?;
-            let (_, seen, _) =
+            let (rule, seen, _) =
                 crate::service::trackers::tickets::seen_place(s, &key, item_org, start.project_id)?;
             match start.project_id.or(seen.as_ref().map(|p| p.0)) {
                 // Where the start itself lands (`plan_resolved`): the placed
@@ -2333,10 +2333,19 @@ fn run_over_limit(
                 // w02-1), so the hold looks at what the start would bill.
                 Some(p) => {
                     project = Some(p);
+                    // A start rule's host is taken as it is, as the start
+                    // takes it; placement ranks only a host nobody named
+                    // (review r5-01-1).
+                    let rule_names_host = rule.is_some()
+                        && seen.as_ref().is_some_and(|x| x.0 == p && !x.1.is_empty());
                     let seen = crate::service::trackers::tickets::seen_host(s, seen, p)?;
-                    match crate::service::trackers::tickets::placed_host(s, p, seen) {
-                        Some((h, profile)) => (Some(h), profile),
-                        None => (None, None),
+                    if rule_names_host {
+                        (seen, None)
+                    } else {
+                        match crate::service::trackers::tickets::placed_host(s, p, seen) {
+                            Some((h, profile)) => (Some(h), profile),
+                            None => (None, None),
+                        }
                     }
                 }
                 None => (None, None),

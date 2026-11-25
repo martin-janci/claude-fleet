@@ -1378,13 +1378,19 @@ pub fn plan_resolved(
     // start rule's host under a placement rule's login) takes the login
     // there on the same account, never a name that host does not have
     // (review w06-2).
-    let named_for = if args.profile.is_some() {
+    // A rule that names a login and no host named it for the host the
+    // project last ran on, which a fallback start has left; a name with no
+    // host at all is kept only where the landing host lists it (review
+    // r5-01-2). The caller's own login is never remapped.
+    let caller_named = args.profile.is_some();
+    let named_for = if caller_named {
         None
     } else if let Some(r) = rule.as_ref().filter(|r| r.profile.is_some()) {
-        r.host_alias.clone()
+        r.host_alias.clone().or(fell_back_from.clone())
     } else {
         placement.as_ref().and_then(|w| w.host_alias.clone())
     };
+    let hostless = !caller_named && named_for.is_none();
     let profile = match named_profile {
         Some(p) => match named_for.filter(|h| h != &host_alias) {
             Some(from) => crate::service::account_limits::login_carried_to(
@@ -1395,6 +1401,22 @@ pub fn plan_resolved(
                 &p,
                 crate::store::now_unix(),
             )?,
+            None if hostless
+                && !crate::service::account_limits::login_listed_on(
+                    &s,
+                    &host_alias,
+                    &p,
+                    crate::store::now_unix(),
+                )? =>
+            {
+                crate::service::account_limits::login_with_headroom_for(
+                    &s,
+                    Some(project_id),
+                    &host_alias,
+                    None,
+                    crate::store::now_unix(),
+                )?
+            }
             None => Some(p),
         },
         // Nobody named a login: the one placement picked, else the host's

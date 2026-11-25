@@ -789,8 +789,10 @@ pub fn login_carried_to(
                 return Ok(l.profile.clone());
             }
         }
+        // No account to map by: the same name is kept where the host
+        // lists it, account read or not (review r5-01-4).
         None => {
-            if there.iter().any(|l| same_name(&l)) {
+            if login_listed_on(s, host, profile, now)? {
                 return keep();
             }
         }
@@ -798,9 +800,11 @@ pub fn login_carried_to(
     login_with_headroom_for(s, project_id, host, None, now)
 }
 
-/// Whether a start may name the login `profile` on `host`: it is signed in
-/// to a known account there. `true` as well for a host fleet has not read
-/// the logins of (or does not know), where nothing can be judged.
+/// Whether a start may name the login `profile` on `host`: the host lists
+/// the profile and it is not signed out. A listed profile with no account
+/// fleet can read (Bedrock, Vertex, an `apiKeyHelper`) cannot be judged
+/// and counts as listed (review r5-01-4). `true` as well for a host fleet
+/// has not read the logins of (or does not know).
 pub fn login_listed_on(s: &Store, host: &str, profile: &str, now: i64) -> Result<bool, IpcError> {
     let Some(row) = s.get_host_row(host)? else {
         return Ok(true);
@@ -808,7 +812,22 @@ pub fn login_listed_on(s: &Store, host: &str, profile: &str, now: i64) -> Result
     if row.claude_profiles.is_none() && row.account_uuid.is_none() {
         return Ok(true);
     }
-    Ok(login_account(s, host, Some(profile), now)?.is_some_and(|l| !l.login.signed_out))
+    let profile = profile.trim();
+    if !row
+        .claude_profiles
+        .iter()
+        .flatten()
+        .any(|p| p.name == profile)
+    {
+        return Ok(false);
+    }
+    Ok(match login_account(s, host, Some(profile), now)? {
+        Some(l) => !l.login.signed_out,
+        None => !row
+            .signed_out_logins
+            .iter()
+            .any(|n| n.profile.as_deref() == Some(profile)),
+    })
 }
 
 /// Step 4.4 on a start that did not come through the desktop's own dialog

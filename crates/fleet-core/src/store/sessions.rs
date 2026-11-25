@@ -1255,6 +1255,21 @@ impl Store {
         Ok(())
     }
 
+    /// Drop only the login NAME of an ended row whose profile was removed
+    /// (Remove login). Its account link stays: the row ran on that account,
+    /// and usage booked late for it belongs there (review r5-01-3).
+    pub fn clear_session_profile_name(&self, id: i64) -> Result<(), rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET claude_profile = NULL \
+             WHERE id = ?1 AND claude_profile IS NOT NULL",
+            [id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(())
+    }
+
     /// Drop the account link of a session on the HOST's own login
     /// (`claude_profile IS NULL`), after its `claude` was relaunched. A
     /// relaunched `claude` reads whatever login the host holds now (a `/login`

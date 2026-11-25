@@ -710,11 +710,13 @@ pub async fn handle_pair(
             // device would then BE them. An org admin's code
             // (`fenced_org`) has its own rule below; the operator's and the
             // owner's name anybody.
-            // The rule is about the MINTER: only a code a fleet admin who
-            // is not the owner minted is judged again; any other minter (the
-            // owner, a person pairing their own device at sign-in) is not.
+            // The rule is about the MINTER: every code a person other than
+            // the owner minted is judged again, whatever role they hold NOW
+            // (a fleet admin demoted since the mint must not keep a code
+            // that still binds, review r5-01-5). The rule itself lets a
+            // person pairing their own device through.
             let judged = match (req.minted_by_person, req.fenced_org) {
-                (Some(minter), None) if s.is_fleet_admin(minter)? => Some(minter),
+                (Some(minter), None) if s.personal_owner_id()? != Some(minter) => Some(minter),
                 _ => None,
             };
             if let Some(minter) = judged {
