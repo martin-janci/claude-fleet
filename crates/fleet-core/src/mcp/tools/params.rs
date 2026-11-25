@@ -383,7 +383,8 @@ pub struct QueuePromptParams {
     /// Send later: not typed before this unix second.
     #[serde(default)]
     pub not_before: Option<i64>,
-    /// Hold it while the session's account is at or past accounts.pause_at.
+    /// Hold it while the session's account is at its usage limit (a window
+    /// at 100%, the session's model window included).
     #[serde(default)]
     pub until_limit_reset: bool,
     /// Drop it instead if the session is archived before it goes out.

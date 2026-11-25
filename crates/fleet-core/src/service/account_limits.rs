@@ -966,19 +966,13 @@ pub fn refuse_over_limit_on(
     })))
 }
 
-/// Whether the account `account_uuid` is at or past `accounts.pause_at` at
-/// `now`, from the store's newest usage snapshot (as [`login_account`]).
-/// `false` without a reading or once its windows have reset: Send later's
-/// "when the limit resets" (M15 step G1.8) holds a prompt only while the
-/// limit is known to be hit.
-pub fn account_over_line(s: &Store, account_uuid: &str, now: i64) -> Result<bool, IpcError> {
-    account_over_line_on(s, account_uuid, now, None)
-}
-
-/// [`account_over_line`] for a session launched on `launch_model`: that
-/// model's own weekly window counts as well, as it does where the row is
-/// paused (`Facts::limit_for`).
-pub fn account_over_line_on(
+/// Whether the account `account_uuid` is at its usage limit at `now`: a
+/// live window (the `launch_model`'s own weekly one included) at 100%, what
+/// pauses a session row (`Facts::limit_for`), not `accounts.pause_at`.
+/// Send later's "when the limit resets" (M15 step G1.8) holds a prompt only
+/// while this is known (review w07-4); `false` without a reading or once
+/// the windows have reset.
+pub fn account_at_limit_on(
     s: &Store,
     account_uuid: &str,
     now: i64,
@@ -989,7 +983,7 @@ pub fn account_over_line_on(
         .into_iter()
         .find(|r| r.account_uuid == account_uuid)
         .and_then(|r| used_pct_on(&r.usage, Some(r.fetched_at), now, launch_model));
-    Ok(used.is_some_and(|u| u >= pause_at_pct(s)))
+    Ok(used.is_some_and(|u| u >= 100.0))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]

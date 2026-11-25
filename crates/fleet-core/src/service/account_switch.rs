@@ -921,7 +921,7 @@ pub fn my_auto_switch(
 fn queue_continue(store: &Mutex<Store>, session_id: i64, now: i64) {
     let timing = crate::store::DeferredTiming {
         not_before: Some(now + CONTINUE_AFTER_SECS),
-        // Held, not typed, should the new login be over the line too.
+        // Held, not typed, should the new login be at its limit too.
         until_limit_reset: true,
         skip_if_archived: true,
     };
