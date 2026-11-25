@@ -1032,15 +1032,26 @@ impl<H: Host> BinaryUpdater<H> {
                     let on_cand = std::fs::read_link(self.cfg.root.join("current"))
                         .ok()
                         .is_some_and(|t| t == Path::new(&safe(&cand.version.to_string())));
+                    // `current` is re-pointed before the restart, so a link
+                    // not yet on the candidate means nothing ran it and the
+                    // previous build still runs, untouched: the attempt is
+                    // abandoned rather than rolled back (which stopped the
+                    // healthy hub, restored a stale backup over every write
+                    // since and bad-listed a release never tried).
                     if !on_cand {
-                        return Some(
-                            self.fail_and_roll_back(
-                                &cand,
-                                "the install was interrupted".into(),
-                                None,
-                            )
-                            .await,
-                        );
+                        self.log(&format!(
+                            "the install of {} was interrupted before the switch; the hub was not touched",
+                            cand.version
+                        ));
+                        self.report(
+                            Failed,
+                            &cand.version,
+                            Value::Null,
+                            Some("the updater was interrupted before the install".into()),
+                        )
+                        .await;
+                        self.set_phase(Idle);
+                        return Some(Outcome::Failed("interrupted".into()));
                     }
                     self.report(Validating, &cand.version, Value::Null, None)
                         .await;
