@@ -205,6 +205,20 @@ before="$(git -C "$t/remote.git" rev-parse update-channels)"
 check "a key the fleet does not trust is refused" bash -c "! (cd '$t/repo' && RELEASE_SIGNING_KEY=\"\$(cat '$t/other.key')\" '$here/update-channels.sh' resign >/dev/null 2>&1)"
 check "and nothing was pushed" test "$(git -C "$t/remote.git" rev-parse update-channels)" = "$before"
 
+# A channel someone committed to the branch without the key is never the
+# base of a signed write: its sequence near the top would be signed as is.
+git clone -q -b update-channels "$t/remote.git" "$t/tamper"
+python3 - "$t/tamper/stable.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d["sequence"] = 18446744073709551614
+open(p, "w").write(json.dumps(d, indent=2) + "\n")
+PY
+git -C "$t/tamper" -c user.name=x -c user.email=x@x commit -qam "unsigned edit"
+git -C "$t/tamper" push -q origin update-channels
+before="$(git -C "$t/remote.git" rev-parse update-channels)"
+check "a channel that does not verify is never re-signed" bash -c "! (cd '$t/repo' && '$here/update-channels.sh' resign >/dev/null 2>&1)"
+check "and nothing was pushed over it" test "$(git -C "$t/remote.git" rev-parse update-channels)" = "$before"
+
 echo "release-key.sh"
 # The real keys.rs names the owner's key, so the script runs against an
 # empty fixture of keys.rs's shape (the constant as release-key.sh finds it

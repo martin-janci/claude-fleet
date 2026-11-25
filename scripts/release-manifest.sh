@@ -84,7 +84,16 @@ if [ -n "${RELEASE_ID:-}" ] && [ -n "${REPO:-}" ]; then
     if [ -n "$line" ]; then
       image="$(printf '%s' "$line" | sed -nE 's/^`([^`]+):[^`:]+` .*/\1/p')"
       digest="$(printf '%s' "$line" | grep -oE 'sha256:[0-9a-f]{64}' | head -n1)"
-      [ -n "$image" ] && [ -n "$digest" ] && hub_image="$image@$digest"
+      # The body is editable by anyone who can edit the draft, so it names
+      # the digest only: the repository is always this owner's fleet-hub,
+      # the one hub-image.yml pushes to. A block naming another one is not
+      # signed into a manifest fleet-updater would then pull and run.
+      want="ghcr.io/$(printf '%s' "${REPO%%/*}" | tr '[:upper:]' '[:lower:]')/fleet-hub"
+      if [ -n "$image" ] && [ "$image" != "$want" ]; then
+        echo "::error title=foreign hub image::the release body names $image, not $want; refusing to sign it"
+        exit 1
+      fi
+      [ -n "$digest" ] && hub_image="$want@$digest"
       break
     fi
     if [ "$waited" -ge "$limit" ]; then

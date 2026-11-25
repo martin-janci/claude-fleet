@@ -85,6 +85,20 @@ Design: `docs/superpowers/specs/2026-09-28-update-channel-design.md` §5.
 EOF
   fi
 
+  # Every channel already on the branch is the base the next write signs
+  # again: it must verify first. Anything with push access to this branch
+  # could otherwise commit an unsigned <track>.json (a sequence near the top,
+  # different URLs, a withdrawal) and have the release key sign it on the
+  # next add, edit or weekly re-sign.
+  for f in "$tree"/*.json; do
+    [ -e "$f" ] || continue
+    t="$(basename "$f" .json)"
+    if [ ! -f "$f.minisig" ] || ! "$here/release-verify-sig.sh" "$work/pubkeys" "$f" "$f.minisig" channel "$t"; then
+      echo "::error title=channel does not verify::$t.json on $branch is not signed by a trusted key; refusing to build on it"
+      exit 1
+    fi
+  done
+
   changed=()
   sign() {
     local track="$1" f="$tree/$1.json"
