@@ -95,22 +95,32 @@ pub(super) const ALREADY_PASTED_STATUS: i32 = 98;
 /// `/exit`, a crash or a failed self-update the tmux session lives on as a
 /// login shell, and a prompt pasted there would be run as shell commands.
 ///
-/// Two readings, and both must say "shell". `pane_current_command` alone
-/// cannot tell: while the agent runs under the launcher (`sh -c '…; exec
-/// $SHELL -l'`, no job control) tmux names the launcher shell, not the
-/// agent. So the pane's first process is read too: the launcher carries the
-/// whole pane command as its argument (several words), the shell it becomes
-/// is `zsh -l` or `-zsh`. An agent a person started by hand from that shell
-/// is the foreground job, so `pane_current_command` names it and the prompt
-/// goes in. A `ps` that fails reads as "not a shell": the guard never
-/// refuses on a reading it could not take.
-fn agent_exited_guard() -> String {
+/// "A bare shell" is decided on two facts about the pane's first process,
+/// not on a name (review r5-03-1; `pane_current_command` cannot tell, it
+/// names the launcher shell while the agent runs under it):
+///
+/// * it holds the terminal itself (`tpgid` is its own pid), so no job runs
+///   on top of it: an agent a person started by hand from that shell, as a
+///   binary or through a wrapper script, is the foreground job and passes;
+/// * its command line is a shell and nothing but flags, none of them `-c`:
+///   the fleet launcher (`sh -c '…; exec $SHELL -l'`) and a person's own
+///   launcher script (`bash run-agent.sh`) carry a word that is not a flag.
+///
+/// A `ps` or `display-message` that fails reads as "not a bare shell": the
+/// guard never refuses on a reading it could not take.
+pub(super) fn agent_exited_guard() -> String {
     format!(
-        "pc=\"$(tmux display-message -p -t \"$t\" '#{{pane_pid}} #{{pane_current_command}}' 2>/dev/null)\"; \
-         case \"${{pc#* }}\" in bash|zsh|fish|sh|dash|ksh|tcsh|csh|-bash|-zsh|-fish|-sh|-dash|-ksh) \
-         case \"$(ps -o args= -p \"${{pc%% *}}\" 2>/dev/null)\" in *' '*' '*) ;; *sh|*sh' '-*) exit {AGENT_EXITED_STATUS} ;; esac ;; esac; "
+        "pp=\"$(tmux display-message -p -t \"$t\" '#{{pane_pid}}' 2>/dev/null)\"; \
+         if [ -n \"$pp\" ]; then set -f; set -- $(ps -o tpgid= -o args= -p \"$pp\" 2>/dev/null); set +f; \
+         if [ \"${{1:-}}\" = \"$pp\" ]; then case \"${{2:-}}\" in *sh) shift 2; bare=1; \
+         for a in \"$@\"; do case \"$a\" in -[!-]*c*) bare=0 ;; -*) ;; *) bare=0 ;; esac; done; \
+         if [ \"$bare\" = 1 ]; then exit {AGENT_EXITED_STATUS}; fi ;; esac; fi; fi; "
     )
 }
+
+/// What a typing script prints first, so a caller can tell an ssh failure
+/// after the script started from one where nothing ran (review r5-03-2).
+pub(super) const TYPING_MARK: &str = "fleet-typing";
 
 /// PURE: whether `row`'s pane is known to have run an agent, so a bare shell
 /// there means the agent exited. A `shell` session is meant to be typed
@@ -146,6 +156,7 @@ pub fn build_send_script_guarded(
             "if [ \"$(tmux display-message -p -t {pane_q} '#{{session_name}}' 2>/dev/null)\" = {name_q} ]; then t={pane_q}; fi; "
         ));
     }
+    script.push_str(&format!("printf %s {TYPING_MARK}; "));
     if body.is_empty() {
         if submit {
             script.push_str("tmux send-keys -t \"$t\" Enter");
@@ -309,15 +320,13 @@ async fn run_tmux_script(
     Ok(())
 }
 
-/// PURE: whether ssh itself failed (exit 255) on a connection it had
-/// established, so the remote script may have run in part. A connection that
-/// was never made ran nothing and stays a plain failure.
+/// PURE: whether ssh itself failed (exit 255) AFTER the typing script had
+/// started, so the body may be in the pane: the script's own first output
+/// ([`TYPING_MARK`]) came back. Without it nothing ran (a refused or reset
+/// connection, a failed login, a bad ssh config), and the failure stays a
+/// plain one the callers retry (review r5-03-2).
 pub(super) fn dropped_mid_run(out: &std::process::Output) -> bool {
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    out.status.code() == Some(255)
-        && crate::ssh_diag::classify::connect_failure_kind(&stderr).is_none()
-        // sshd closing the socket before the key exchange (MaxStartups).
-        && !stderr.contains("exchange_identification")
+    out.status.code() == Some(255) && String::from_utf8_lossy(&out.stdout).contains(TYPING_MARK)
 }
 
 /// Who composed a prompt fleet delivers: it decides whether the prompt may

@@ -2170,6 +2170,10 @@ pub struct ReconcileSession<'a> {
     /// sweep respects: a row whose pane is visibly working is never demoted,
     /// whatever the agents cadence let the status say this pass.
     pub pane_working: bool,
+    /// The pane captured this pass reads idle (`derived_status == Idle`),
+    /// whatever status the pass proposes: ends a `compacting` activity an
+    /// aborted compaction left (review r5-04-5).
+    pub pane_idle: bool,
     /// The PR's evidence this pass read (result evidence), governed by
     /// `pr_observed` like `ci_status`: authoritative when the probe ran (a
     /// `None` clears it), preserved when it did not.

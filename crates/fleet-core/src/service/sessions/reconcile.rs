@@ -1186,6 +1186,7 @@ fn write_reachable_host(
             // this pass must not demote a row its pane shows working (F2's
             // demote-lift-demote flap during one long tool call).
             pane_working: pane_status == Some(crate::service::pane_intel::ClaudeStatus::Working),
+            pane_idle: pane_status == Some(crate::service::pane_intel::ClaudeStatus::Idle),
         });
     }
     let now = now_unix();

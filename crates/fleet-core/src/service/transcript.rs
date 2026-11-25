@@ -2259,6 +2259,7 @@ fn transcript_read_script(args: &TranscriptArgs) -> Result<String, IpcError> {
 }
 
 /// `session_conversation`'s read: a fixed [`CONV_READ_BYTES`] tail.
+#[cfg(test)]
 fn conversation_read_script(args: &TranscriptArgs) -> Result<String, IpcError> {
     tail_script(args, conv_read_bytes(args.turns))
 }
@@ -2671,17 +2672,39 @@ async fn fetch_conversation_as(
     ssh: &Arc<SshClient>,
     authors: &[crate::store::PromptAuthorRow],
 ) -> Result<Conversation, IpcError> {
-    let mut budget = conv_read_bytes(args.turns);
-    let script = conversation_read_script(&args)?;
-    let mut text = read_tail(&args, &script, ssh).await?;
+    let base = conv_read_bytes(args.turns);
+    let window = args.turns.max(1);
+    let key = (args.host_alias.clone(), args.claude_session_id.clone());
+    // A turn that needed a wider read last time starts there (review
+    // r5-04-2): the ladder is not climbed from the bottom on every poll.
+    let mut budget = remembered_conv_read(&key).map_or(base, |b| b.max(base));
+    let mut text = read_tail_bytes(&args, budget, ssh).await?;
     let mut turns = agent.parse_transcript(&text);
     // A tail cut inside the window's opening turn (or inside one line) is
     // read again wider, so the turn comes back with its prompt and a fixed
     // `at` (reviews w10-1, w10-5).
-    while let Some(wider) = wider_conv_read(budget, text.len(), &turns, args.turns.max(1)) {
-        budget = wider;
-        text = read_tail_bytes(&args, budget, ssh).await?;
-        turns = agent.parse_transcript(&text);
+    while let Some(wider) = wider_conv_read(budget, text.len(), &turns, window) {
+        match read_tail_bytes(&args, wider, ssh).await {
+            Ok(more) => {
+                budget = wider;
+                text = more;
+                turns = agent.parse_transcript(&text);
+            }
+            // A wider read that failed (a slow link, the wall clock) does
+            // not cost the caller the narrow one it already has.
+            Err(e) => {
+                tracing::debug!(error = %e.message, wider, "[transcript] wider read failed; serving the cut tail");
+                break;
+            }
+        }
+    }
+    if budget > base {
+        // Kept only while the narrow read would still come back cut: once
+        // the long turn is over, the next poll reads the narrow tail again.
+        let narrow = agent.parse_transcript(tail_of(&text, base));
+        let still_cut =
+            text.len() >= base && wider_conv_read(base, base, &narrow, window).is_some();
+        remember_conv_read(key, still_cut.then_some(budget));
     }
     if !authors.is_empty() {
         attach_prompt_authors(&mut turns, authors);
@@ -2716,19 +2739,70 @@ fn wider_conv_read(budget: usize, read: usize, turns: &[ConvTurn], window: usize
     if read < budget || budget >= MAX_READ_BYTES {
         return None;
     }
+    // Only the FIRST parsed turn of a tail can be cut, and a cut turn is a
+    // bare reply: it opens with the assistant's text or a tool call. A whole
+    // turn may have no prompt either (a slash command, a `!` bash line, a
+    // task notification, a harness block, a compact boundary), and taking
+    // those for a cut made every poll of an idle session re-read megabytes
+    // (review r5-04-1). So: the window reaches the first turn, that turn is
+    // a bare reply, and nothing in the window has a prompt.
+    let bare_reply = |t: &ConvTurn| {
+        t.prompt.is_none()
+            && t.prompt_uuid.is_none()
+            && matches!(
+                t.items.first(),
+                None | Some(
+                    ConvItem::Text { .. } | ConvItem::Tool { .. } | ConvItem::Subagent { .. }
+                )
+            )
+    };
     let prompted = turns
         .iter()
-        .rev()
-        .take(window)
         .any(|t| t.prompt.is_some() || t.prompt_uuid.is_some());
-    if prompted {
-        return None;
-    }
-    Some(if budget < CONV_READ_BYTES {
+    let cut = turns.len() <= window && !prompted && turns.first().is_none_or(bare_reply);
+    cut.then_some(if budget < CONV_READ_BYTES {
         CONV_READ_BYTES
     } else {
         MAX_READ_BYTES
     })
+}
+
+/// The last `bytes` of `text`, from a character boundary.
+fn tail_of(text: &str, bytes: usize) -> &str {
+    let mut from = text.len().saturating_sub(bytes);
+    while !text.is_char_boundary(from) {
+        from += 1;
+    }
+    &text[from..]
+}
+
+/// The wider budget each conversation (host, session id) last needed, in
+/// memory only: a hint, wrong at worst for one read.
+type ConvReads = Mutex<std::collections::HashMap<(String, String), usize>>;
+static CONV_READS: std::sync::LazyLock<ConvReads> = std::sync::LazyLock::new(Default::default);
+
+/// Conversations remembered at most; past it the hints are dropped.
+const CONV_READS_MAX: usize = 512;
+
+fn remembered_conv_read(key: &(String, String)) -> Option<usize> {
+    CONV_READS.lock().ok()?.get(key).copied()
+}
+
+fn remember_conv_read(key: (String, String), budget: Option<usize>) {
+    let Ok(mut reads) = CONV_READS.lock() else {
+        return;
+    };
+    match budget {
+        Some(b) => {
+            if reads.len() >= CONV_READS_MAX && !reads.contains_key(&key) {
+                reads.clear();
+            }
+            reads.insert(key, b);
+        }
+        None => {
+            reads.remove(&key);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -5101,11 +5175,38 @@ mod tests {
         ));
         assert!(prompted.last().unwrap().prompt.is_some());
         assert_eq!(wider_conv_read(small, small, &prompted, 1), None);
-        // Only the window counts: an older cut turn above a prompted one in
-        // a one-turn window needs nothing, the reverse does.
+        // An older cut turn above a prompted one needs nothing.
         let mut both = headless.clone();
         both.extend(prompted.clone());
         assert_eq!(wider_conv_read(small, small, &both, 1), None);
+        // Review r5-04-1: a WHOLE turn with no prompt (a task notification,
+        // a slash command) is not a cut one, alone or after a cut turn.
+        let notified = parse_conversation(concat!(
+            r#"{"type":"user","timestamp":"2026-01-01T00:01:00Z","message":{"content":"<task-notification><task-id>t1</task-id><status>completed</status><summary>done</summary></task-notification>"}}"#,
+            "\n",
+            r#"{"type":"assistant","timestamp":"2026-01-01T00:01:05Z","message":{"content":[{"type":"text","text":"noted"}]}}"#,
+        ));
+        assert_eq!(notified.len(), 1, "{notified:?}");
+        assert!(notified[0].prompt.is_none());
+        assert_eq!(wider_conv_read(small, small, &notified, 1), None);
+        let mut after_cut = headless.clone();
+        after_cut.extend(notified);
+        assert_eq!(wider_conv_read(small, small, &after_cut, 1), None);
+    }
+
+    /// Review r5-04-2: a wider budget is remembered per conversation and
+    /// forgotten again; `tail_of` never splits a character.
+    #[test]
+    fn a_wider_read_is_remembered_per_conversation() {
+        let key = ("h-r5".to_string(), "sid-r5".to_string());
+        assert_eq!(remembered_conv_read(&key), None);
+        remember_conv_read(key.clone(), Some(CONV_READ_BYTES));
+        assert_eq!(remembered_conv_read(&key), Some(CONV_READ_BYTES));
+        remember_conv_read(key.clone(), None);
+        assert_eq!(remembered_conv_read(&key), None);
+        assert_eq!(tail_of("aé", 1), "");
+        assert_eq!(tail_of("aéb", 2), "b");
+        assert_eq!(tail_of("ab", 9), "ab");
     }
 
     #[cfg(unix)]

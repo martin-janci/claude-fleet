@@ -293,10 +293,15 @@ where
             format!("session {} is not running", row.id),
         ));
     }
+    let timing = args.timing();
     // `stopped`: the agent's process is gone and the pane is its login
-    // shell. Nothing wakes such a row, so a queued prompt would wait for
-    // ever (review w09-1).
-    if row.claude_status.as_deref() == Some("stopped") {
+    // shell. Nothing wakes such a row, so a prompt meant for now would wait
+    // with no error (review w09-1). A timed one is queued as before (review
+    // r5-03-5): it is typed once the session is restarted, which is what
+    // "schedule a follow-up, then press Restart" and the Scheduled list's
+    // Undo rely on.
+    let timed = timing.not_before.is_some() || timing.until_limit_reset;
+    if row.claude_status.as_deref() == Some("stopped") && !timed {
         return Err(IpcError::new(
             codes::E_INVALID_STATE,
             format!(
@@ -305,7 +310,6 @@ where
             ),
         ));
     }
-    let timing = args.timing();
     if let Some(t) = timing.not_before {
         crate::validate::unix_seconds_ahead("not_before", t, now)?;
     }
@@ -1675,6 +1679,15 @@ mod tests {
             .next_deferred_prompt(id)
             .unwrap()
             .is_none());
+        // Review r5-03-5: a timed one is queued, for after the restart.
+        let mut later = args(id, "after the restart");
+        later.not_before = Some(now_unix() + 3_600);
+        let r = queue_prompt_with(later, &store, now_unix(), |_, _| async {
+            panic!("typed into a shell")
+        })
+        .await
+        .unwrap();
+        assert!(!r.delivered && r.queued_id.is_some());
     }
 
     /// Reviews w15-5 / w16-4: a `not_before` in milliseconds never comes due.

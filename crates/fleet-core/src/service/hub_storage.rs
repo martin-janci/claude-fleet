@@ -286,11 +286,26 @@ const KEEP_DAILY_FLOOR: usize = 3;
 
 /// The free space under `dir` once the oldest dailies were removed, one at a
 /// time down to [`KEEP_DAILY_FLOOR`], until `needed` fits. Nothing is
-/// removed when it fits already. `None` when the volume cannot be read (the
-/// copy is then tried, as before).
+/// removed when it fits already, and nothing when removing every daily
+/// beyond the floor would still not make it fit (review r5-05-1): a skipped
+/// backup must not cost the history it could not add to. `None` when the
+/// volume cannot be read (the copy is then tried, as before).
 fn make_room(dir: &Path, needed: u64, free: &dyn Fn() -> Option<u64>) -> Option<u64> {
     let mut now = free()?;
-    let mut keep = KEEP_DAILY;
+    if now >= needed {
+        return Some(now);
+    }
+    let names = daily_names(dir);
+    let spare = names.len().saturating_sub(KEEP_DAILY_FLOOR);
+    let reclaimable: u64 = names[..spare]
+        .iter()
+        .filter_map(|n| std::fs::metadata(dir.join(n)).ok())
+        .map(|m| m.len())
+        .sum();
+    if now.saturating_add(reclaimable) < needed {
+        return Some(now);
+    }
+    let mut keep = names.len();
     while now < needed && keep > KEEP_DAILY_FLOOR {
         keep -= 1;
         prune_daily(dir, keep);
@@ -351,11 +366,11 @@ fn daily_path(dir: &Path, now: i64) -> PathBuf {
         .expect("an unbounded range always finds a free name")
 }
 
-/// Keep the newest `keep` `daily-<digit>….db` files in `dir` (the stamp
-/// sorts by time); remove the rest.
-pub fn prune_daily(dir: &Path, keep: usize) {
+/// The `daily-<digit>….db` files in `dir`, oldest first (the stamp sorts by
+/// time).
+fn daily_names(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+        return Vec::new();
     };
     let prefix = format!("{DAILY_PREFIX}-");
     let mut names: Vec<String> = entries
@@ -368,6 +383,13 @@ pub fn prune_daily(dir: &Path, keep: usize) {
         })
         .collect();
     names.sort_unstable();
+    names
+}
+
+/// Keep the newest `keep` `daily-<digit>….db` files in `dir` (the stamp
+/// sorts by time); remove the rest.
+pub fn prune_daily(dir: &Path, keep: usize) {
+    let names = daily_names(dir);
     let drop = names.len().saturating_sub(keep);
     for name in &names[..drop] {
         if let Err(e) = std::fs::remove_file(dir.join(name)) {
@@ -509,23 +531,29 @@ mod tests {
         for day in 1..=KEEP_DAILY {
             std::fs::write(
                 dir.path().join(format!("daily-202001{day:02}-000000.db")),
-                b"x",
+                [0u8; 10],
             )
             .unwrap();
         }
         let count = || std::fs::read_dir(dir.path()).unwrap().count() as u64;
-        // Each daily holds 10 units of a 140-unit volume that is full.
+        // Each daily holds 10 bytes of a 140-byte volume that is full.
         let free = || Some((KEEP_DAILY as u64 - count()) * 10);
         assert_eq!(make_room(dir.path(), 0, &free), Some(0));
         assert_eq!(count(), KEEP_DAILY as u64, "it fits: nothing removed");
+        // Review r5-05-1: the dailies beyond the floor hold 110 bytes; when
+        // even those would not make the copy fit, none is removed.
+        assert_eq!(make_room(dir.path(), 111, &free), Some(0));
+        assert_eq!(make_room(dir.path(), u64::MAX, &free), Some(0));
+        assert_eq!(count(), KEEP_DAILY as u64, "it cannot fit: nothing removed");
         assert_eq!(make_room(dir.path(), 25, &free), Some(30));
         assert_eq!(count(), KEEP_DAILY as u64 - 3);
         assert!(!dir.path().join("daily-20200103-000000.db").exists());
         assert!(dir.path().join("daily-20200104-000000.db").exists());
-        // Never below the floor, however much is needed.
-        let got = make_room(dir.path(), u64::MAX, &free).unwrap();
+        // Down to the floor when that is what it takes, never below it.
+        assert_eq!(make_room(dir.path(), 110, &free), Some(110));
         assert_eq!(count(), KEEP_DAILY_FLOOR as u64);
-        assert!(got < u64::MAX);
+        assert_eq!(make_room(dir.path(), 120, &free), Some(110));
+        assert_eq!(count(), KEEP_DAILY_FLOOR as u64);
         // An unreadable volume: nothing removed, the copy is tried.
         assert_eq!(make_room(dir.path(), u64::MAX, &|| None), None);
     }

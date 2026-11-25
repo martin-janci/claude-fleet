@@ -581,16 +581,41 @@ pub(crate) fn detect_stuck(text: &str) -> Option<StuckKind> {
     // LAST such words means a session printed them (a diff of reconnect
     // code, its own summary), and a pane with its input box up is not
     // waiting on either (review w08-1; `codex.rs::stuck` reads the same way).
+    //
+    // Nor are words IN or BELOW the input box (review r5-04-3): a draft that
+    // says "why does it keep reconnecting", a wrapped row of it, or a status
+    // line under the box that prints a branch name. The box is the last `❯`
+    // row drawn right under a rule; a past prompt echoed in the scrollback
+    // has no rule above it.
+    let is_rule = |l: &str| {
+        let l = l.trim();
+        !l.is_empty() && l.chars().all(|c| c == '─')
+    };
+    let input_row = |l: &str| {
+        let l = clean_line(l);
+        l.starts_with('❯') && parse_choice(l).is_none() && !is_focused_submit_row(l)
+    };
+    let input_box = (1..lines.len()).rev().find(|&i| {
+        input_row(lines[i])
+            && lines[..i]
+                .iter()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .is_some_and(|l| is_rule(l))
+    });
+    let own_screen = |at: usize| {
+        no_live_input_below(at) && !input_row(lines[at]) && input_box.is_none_or(|b| at < b)
+    };
     let reconnect_cue = lines
         .iter()
         .rposition(|l| l.contains("reconnecting") || l.contains("connection lost, retrying"));
-    if reconnect_cue.is_some_and(no_live_input_below) {
+    if reconnect_cue.is_some_and(own_screen) {
         return Some(StuckKind::Reconnect);
     }
     let enter_cue = lines
         .iter()
         .rposition(|l| l.contains("press enter to continue") || l.contains("press enter to retry"));
-    if enter_cue.is_some_and(no_live_input_below) {
+    if enter_cue.is_some_and(own_screen) {
         return Some(StuckKind::PressEnter);
     }
 
@@ -1508,6 +1533,26 @@ mod tests {
                 "{working}"
             );
         }
+    }
+
+    /// Review r5-04-3: the words in the draft in the input box, or in a
+    /// status line under it, are not a stuck pane (a real capture).
+    #[test]
+    fn reconnect_and_press_enter_in_or_below_the_input_box_are_not_stuck() {
+        let pane = include_str!("testdata/pane_intel/working_draft_in_input_box.txt");
+        let draft = "and then also check the tests";
+        assert!(pane.contains(draft));
+        for words in [
+            "why does it keep reconnecting",
+            "then press enter to continue",
+        ] {
+            let drafted = pane.replace(draft, words);
+            assert_eq!(analyze(&drafted).stuck, None, "{words}: in the box");
+            let footer = format!("{}\n  fix/{}\n", pane.trim_end(), words.replace(' ', "-"));
+            assert_eq!(analyze(&footer).stuck, None, "{words}: under the box");
+        }
+        let footer = format!("{}\n  press enter to continue\n", pane.trim_end());
+        assert_eq!(analyze(&footer).stuck, None, "under the box");
     }
 
     #[test]
