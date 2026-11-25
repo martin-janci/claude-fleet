@@ -537,7 +537,12 @@ impl HttpTransport for DirectTransport {
         }
         let bytes = render_request(&req, &at)?;
         let max = self.max_body;
-        let guard = self.addr_guard.or(self.extra_ca.as_ref().map(|_| false));
+        // An extra CA needs the pinned connect path, not the address
+        // refusal: that one is a tracker's (`with_address_guard`, which the
+        // tracker transports always set). With a CA alone (an OIDC issuer
+        // behind a private CA), an issuer on loopback used to be refused,
+        // with a tracker's advice, though without the CA it worked.
+        let guard = self.addr_guard.or(self.extra_ca.as_ref().map(|_| true));
         let exchange = async {
             let stream = match guard {
                 Some(allow_private) => self.connect_guarded(&at, allow_private).await?,
