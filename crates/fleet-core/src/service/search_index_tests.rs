@@ -127,6 +127,12 @@ async fn a_pass_indexes_new_text_and_resumes_where_it_stopped() {
             .upsert_session("dev", "h1", None, None, 1, 1, "running", None)
             .unwrap();
         s.set_claude_session_id(sid, "c-1").unwrap();
+        crate::service::settings::set(
+            &s,
+            crate::service::settings::SEARCH_INDEX_TRANSCRIPTS,
+            "true",
+        )
+        .unwrap();
         s.set_transcript_path_for_row(sid, "c-1", file.to_str().unwrap())
             .unwrap();
         sid

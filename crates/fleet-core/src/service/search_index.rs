@@ -326,6 +326,10 @@ pub async fn index_host(
     let s = lock(store)?;
     s.atomically(|s| {
         let mut written = 0;
+        // Turned off while this host was being read: nothing is written.
+        if !settings::get_bool(s, settings::SEARCH_INDEX_TRANSCRIPTS) {
+            return Ok(written);
+        }
         for t in &targets {
             let Some(read) = reads.get(&t.session_id) else {
                 continue;
@@ -389,11 +393,17 @@ pub fn spawn_index(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) {
         Err(_) => return,
     };
     if !enabled {
-        // Once per process while off: the chunks of a previous "on" go.
-        if !CLEARED.swap(true, Ordering::SeqCst) {
+        // Once per process while off: the chunks of a previous "on" go. Not
+        // while a pass is still running (it would write after the clear),
+        // and marked done only once a clear succeeded, so a failed one is
+        // tried again on the next tick.
+        if !CLEARED.load(Ordering::SeqCst) && !RUNNING.load(Ordering::SeqCst) {
             if let Ok(s) = store.lock() {
-                if let Err(e) = s.clear_transcript_chunks() {
-                    tracing::warn!(error = %e.message, "clearing indexed transcript text failed");
+                match s.clear_transcript_chunks() {
+                    Ok(_) => CLEARED.store(true, Ordering::SeqCst),
+                    Err(e) => {
+                        tracing::warn!(error = %e.message, "clearing indexed transcript text failed")
+                    }
                 }
             }
         }

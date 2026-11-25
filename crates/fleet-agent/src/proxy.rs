@@ -34,22 +34,27 @@ impl Proxy {
     /// other scheme is refused, as is a path.
     pub fn parse(url: &str) -> Result<Self, String> {
         let url = url.trim();
+        // What an error names: the URL without any `user:pass@`, which
+        // these messages carry into the journal and launchd's log.
+        let shown = without_userinfo(url);
+        let url_for_errors = shown.as_str();
         let Some(rest) = url.strip_prefix("http://") else {
             return Err(format!(
-                "proxy {url:?}: only an http:// proxy is supported (it tunnels the agent's \
+                "proxy {url_for_errors:?}: only an http:// proxy is supported (it tunnels the agent's \
                  own TLS with CONNECT)"
             ));
         };
         let rest = rest.strip_suffix('/').unwrap_or(rest);
         if rest.contains('/') || rest.contains('?') || rest.contains('#') {
-            return Err(format!("proxy {url:?}: a proxy URL has no path"));
+            return Err(format!("proxy {url_for_errors:?}: a proxy URL has no path"));
         }
         let (userinfo, authority) = match rest.rsplit_once('@') {
             Some((u, a)) => (Some(u), a),
             None => (None, rest),
         };
-        let (host, port) = split_host_port(authority)
-            .ok_or_else(|| format!("proxy {url:?}: no host, or a port that is not a number"))?;
+        let (host, port) = split_host_port(authority).ok_or_else(|| {
+            format!("proxy {url_for_errors:?}: no host, or a port that is not a number")
+        })?;
         let authorization = userinfo.map(|u| {
             let (user, pass) = u.split_once(':').unwrap_or((u, ""));
             let plain = format!("{}:{}", percent_decode(user), percent_decode(pass));
@@ -308,6 +313,17 @@ pub fn no_proxy_matches(list: &str, host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refused proxy URL is named without its credentials.
+    #[test]
+    fn a_proxy_error_never_names_its_credentials() {
+        let e = Proxy::parse("socks5://alice:s3cret@proxy.example:1080").unwrap_err();
+        assert!(!e.contains("s3cret") && !e.contains("alice"), "{e}");
+        assert!(e.contains("proxy.example"), "{e}");
+        let e = Proxy::parse("http://bob:pw@proxy.example/path").unwrap_err();
+        assert!(!e.contains("pw@") && !e.contains("bob"), "{e}");
+        assert_eq!(without_userinfo("http://h:3128"), "http://h:3128");
+    }
     use std::collections::HashMap;
 
     #[test]
@@ -474,5 +490,29 @@ mod tests {
 
         let err = p.tunnel("denied.example", 443).await.unwrap_err();
         assert!(err.contains("HTTP 403"), "{err}");
+    }
+}
+
+/// `url` with the `user[:pass]@` of its authority replaced by `***@`.
+fn without_userinfo(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some((a, b)) => (Some(a), b),
+        None => (None, url),
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let shown = match rest[..end].rfind('@') {
+        Some(at) => format!("***{}", &rest[at..]),
+        None => rest.to_string(),
+    };
+    match scheme {
+        Some(sc) => format!(
+            "{sc}://{shown}{}",
+            if rest[..end].contains('@') {
+                &rest[end..]
+            } else {
+                ""
+            }
+        ),
+        None => shown,
     }
 }

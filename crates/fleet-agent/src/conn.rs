@@ -1565,9 +1565,16 @@ pub async fn run(
     // unit's cgroup, so an oom-kill of the agent is not one of every session.
     tokio::spawn(crate::scope::run());
     let endpoint = Endpoint::parse(&config.hub, config.insecure)?;
-    let proxy = crate::proxy::Proxy::resolve(config.proxy.as_deref(), endpoint.host(), |k| {
-        std::env::var(k).ok()
-    })?;
+    // A plain-http hub is a loopback test (`--insecure` allows nothing
+    // else), and a proxy between the agent and it would see the token in
+    // clear: such a hub is dialed directly, whatever the environment says.
+    let proxy = if endpoint.is_tls() {
+        crate::proxy::Proxy::resolve(config.proxy.as_deref(), endpoint.host(), |k| {
+            std::env::var(k).ok()
+        })?
+    } else {
+        None
+    };
     if let Some(p) = &proxy {
         tracing::info!(proxy = %format!("{}:{}", p.host, p.port), "[agent] reaching the hub through a proxy");
     }
