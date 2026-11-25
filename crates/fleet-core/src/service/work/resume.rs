@@ -955,7 +955,9 @@ pub fn resume_session_args(
 
 /// The login a resume onto `host` runs under (review w02-2): `asked` when
 /// the caller named one (`""` = the host's own); else the past session's,
-/// when its row is still known and was on `host`; else the host's own. A
+/// when its row is still known and was on `host`; else, when it ran on
+/// another host on a known account, the login on `host` a move would take
+/// (review w06-7, `move_session::target_login_in`); else the host's own. A
 /// login fleet picked (the past session's or the host's own) that is past
 /// `accounts.pause_at` gives way to another login on the host with headroom
 /// ([`account_limits::login_with_headroom_for`]): the conversation resumes under
@@ -983,13 +985,72 @@ pub(crate) fn resume_profile(
         Some(id) => past_session_login(s, id, host)?,
         None => None,
     };
+    let past = match past {
+        Some(login) => login,
+        // Review w06-7: the past session ran on another host. The login
+        // travels by account, as a move's does
+        // (`move_session::target_login_in`): the login on `host` signed in
+        // to the same account first, else the host's own or the one with
+        // headroom. Unknown account, or no login there may take it: the
+        // host's own choice, as before (a resume refuses nothing here).
+        None => match (plan.link_id, plan.project_id) {
+            (Some(id), Some(pid)) => past_session_elsewhere(s, id, host)?
+                .and_then(|(profile, account)| {
+                    crate::service::move_session::target_login_in(
+                        s,
+                        pid,
+                        host,
+                        profile.as_deref(),
+                        Some(&account),
+                        now,
+                    )
+                    .ok()
+                })
+                .flatten(),
+            _ => None,
+        },
+    };
     crate::service::account_limits::login_with_headroom_for(
         s,
         plan.project_id,
         host,
-        past.flatten().as_deref(),
+        past.as_deref(),
         now,
     )
+}
+
+/// The login and account of the session link `link_id` ran in, when that
+/// row is still in the store, ran on a host other than `host` and its
+/// account is known (the row's own, else the one its login is signed in to
+/// on its host).
+fn past_session_elsewhere(
+    s: &Store,
+    link_id: i64,
+    host: &str,
+) -> Result<Option<(Option<String>, String)>, IpcError> {
+    let Some(link) = s.get_work_link(link_id)? else {
+        return Ok(None);
+    };
+    let Some(pid) = link.participant_id else {
+        return Ok(None);
+    };
+    let Some(session_id) = s.participant_by_id(pid)?.and_then(|p| p.session_id) else {
+        return Ok(None);
+    };
+    let Some(row) = s
+        .get_session_by_id(session_id)?
+        .filter(|r| r.host_alias != host)
+    else {
+        return Ok(None);
+    };
+    let account = match row.account_uuid.clone() {
+        Some(a) => Some(a),
+        None => s.get_host_row(&row.host_alias)?.and_then(|src| {
+            crate::service::move_session::login_account_on(&src, row.claude_profile.as_deref())
+                .map(str::to_string)
+        }),
+    };
+    Ok(account.map(|a| (row.claude_profile, a)))
 }
 
 /// The login of the session link `link_id` ran in, when that row is still
@@ -1579,6 +1640,41 @@ mod tests {
         seed_usage(&s, "h", Some("full"), "acct-full", 95.0, now);
         assert_eq!(profile(None).as_deref(), Some("work"), "past the line");
         assert_eq!(profile(Some("full")).as_deref(), Some("full"), "named");
+    }
+
+    /// Review w06-7: a resume onto another host picks the login by the past
+    /// session's account, as a move does, not the host's own login.
+    #[test]
+    fn a_resume_on_another_host_keeps_the_past_sessions_account() {
+        use crate::service::account_limits::seed_usage;
+        let s = Store::open_in_memory().unwrap();
+        let now = crate::store::now_unix();
+        // mac ran it under `work` (acct-work); htz's own login is acct-own,
+        // its `client` profile acct-work.
+        seed_usage(&s, "mac", Some("work"), "acct-work", 10.0, now);
+        seed_usage(&s, "htz", None, "acct-own", 10.0, now);
+        seed_usage(&s, "htz", Some("client"), "acct-work", 10.0, now);
+        let pid = s.upsert_project("o", "r", "/srv/o/r").unwrap();
+        let id = s
+            .upsert_session("dev-o-r--abc-1", "mac", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_session_profile(id, Some("work")).unwrap();
+        let link = s
+            .link_session_work(id, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        let plan: ResumePlan = serde_json::from_value(serde_json::json!({
+            "key": "ABC-1",
+            "link_id": link.id,
+            "project_id": pid,
+            "modes": [],
+        }))
+        .unwrap();
+        let profile = |host: &str| resume_profile(&s, &plan, host, None, now).unwrap();
+        assert_eq!(profile("htz").as_deref(), Some("client"), "same account");
+        assert_eq!(profile("mac").as_deref(), Some("work"), "same host");
+        // A host with no login on that account: its own, as before.
+        seed_usage(&s, "pi", None, "acct-pi", 10.0, now);
+        assert_eq!(profile("pi"), None);
     }
 
     #[test]
