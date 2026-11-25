@@ -31,6 +31,9 @@ export interface Health {
   /** The hub's own disk and backups (hardening survey 2026-10-26); absent
    *  on a desktop of its own, from an older hub and for a scoped caller. */
   storage?: StorageHealth | null;
+  /** The Writing help toggles that are on, by setting key (review w19-2);
+   *  absent from an older hub. */
+  writing_help?: string[] | null;
 }
 
 /** One background loop (`service::loops::LoopHealth`). */

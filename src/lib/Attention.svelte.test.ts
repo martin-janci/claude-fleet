@@ -219,6 +219,34 @@ describe('Attention: the notifications matrix (11.9)', () => {
     expect(shown).toEqual([]);
   });
 
+  it('w11-12: what quiet hours held back is summed up once when they end, without what was answered', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    try {
+      vi.setSystemTime(new Date(2026, 10, 24, 23, 10));
+      fleetSettings.set({ ...get(fleetSettings), 'notify.quiet_hours': '22:00-07:00', 'notify.quiet_except': '' });
+      const a = row({ tmux_name: 'dev-n1', claude_status: 'working' });
+      const b = row({ tmux_name: 'dev-n2', claude_status: 'working' });
+      const c = row({ tmux_name: 'dev-n3', claude_status: 'working' });
+      sessions.set([a, b, c]);
+      render(Attention);
+      await tick();
+      sessions.set([a, b, c].map((r) => ({ ...r, claude_status: 'blocked' })));
+      await tick();
+      // Answered from the phone during the night: not in the summary.
+      sessions.set([{ ...a, claude_status: 'blocked' }, { ...b, claude_status: 'blocked' }, c]);
+      await tick();
+      vi.advanceTimersByTime(30_000);
+      expect(shown).toEqual([]);
+      vi.setSystemTime(new Date(2026, 10, 25, 7, 0, 5));
+      vi.advanceTimersByTime(30_000);
+      expect(shown).toEqual(['2 sessions need you']);
+      vi.advanceTimersByTime(60_000);
+      expect(shown).toEqual(['2 sessions need you']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   describe('review w11: a cause is announced once, and old news is not repeated', () => {
     const hostRow = (alias: string, reachable: boolean) => ({ alias, reachable, last_pinged_at: 1, hidden: false }) as unknown as HostRow;
     beforeEach(() => {

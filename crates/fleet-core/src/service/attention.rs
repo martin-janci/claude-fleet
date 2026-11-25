@@ -652,12 +652,30 @@ pub struct MissionWait {
     pub open_cards: u32,
 }
 
+/// The words a brake's own question starts with
+/// (`work::orchestrate::brake`).
+pub const BRAKE_QUESTION_PREFIX: &str = "paused: ";
+
+/// Whether `card` is a brake's own question: an `ask` card from the loop
+/// whose `payload.question` starts with [`BRAKE_QUESTION_PREFIX`].
+pub fn is_brake_card(card: &crate::store::CardRow) -> bool {
+    card.source == "loop"
+        && card.kind == "ask"
+        && card
+            .payload
+            .as_ref()
+            .and_then(|p| p.get("question"))
+            .and_then(|q| q.as_str())
+            .is_some_and(|q| q.starts_with(BRAKE_QUESTION_PREFIX))
+}
+
 /// Whether a mission waits on a person, and why. An `active` mission is
-/// asked; a `paused` one only for an open question: a brake (budget, no
-/// progress, owner disabled) pauses it AND asks the person on an `ask`
-/// card, which must reach the Inbox and the badges like any question
-/// (review 23b w09-1). A person's own pause raises no card, so it stays
-/// silent. A draft is still being written, a finished one waits on nobody.
+/// asked; a `paused` one only for a brake's own open card
+/// ([`is_brake_card`]): a brake (budget, no progress, owner disabled)
+/// pauses it AND asks the person, which must reach the Inbox and the
+/// badges like any question (review 23b w09-1). A person's own pause (one
+/// mission or Pause all) stays silent, a question the planner had already
+/// open included (review w03-7). A draft is still being written, a finished one waits on nobody.
 /// A question outranks the grant (only a person answers it, and signing
 /// does not), and the grant outranks plain confirmations (signing clears
 /// most of them at once).
@@ -675,7 +693,7 @@ pub fn mission_waiting(
     if paused {
         let since = open
             .iter()
-            .filter(|c| c.kind == "ask")
+            .filter(|c| is_brake_card(c))
             .map(|c| c.created_at)
             .min()?;
         return Some(MissionWait {
@@ -902,16 +920,27 @@ mod tests {
         }
         // Review 23b w09-1: a brake pauses a mission and asks on an `ask`
         // card; that question waits like any other. A paused mission with
-        // no open question (a person's pause) waits on nobody, grant or
-        // confirm queue aside.
+        // no brake card (a person's pause) waits on nobody, grant or
+        // confirm queue aside, and (review w03-7) a planner's question
+        // already open does not make it wait either.
         assert_eq!(
             mission_waiting(&mission("paused", 2), false, &cards),
+            None,
+            "a person paused it: the planner's open question stays quiet"
+        );
+        let mut brake = card("ask", "open", 90);
+        brake.source = "loop".into();
+        brake.payload = Some(serde_json::json!({ "question": "paused: budget spent" }));
+        let mut with_brake = cards.to_vec();
+        with_brake.push(brake);
+        assert_eq!(
+            mission_waiting(&mission("paused", 2), false, &with_brake),
             Some(MissionWait {
                 reason: MissionWaitReason::Question,
-                since: 70,
-                open_cards: 2,
+                since: 90,
+                open_cards: 3,
             }),
-            "paused with an open ask waits"
+            "paused by a brake: its own card waits"
         );
         assert_eq!(
             mission_waiting(&mission("paused", 2), false, &cards[..1]),

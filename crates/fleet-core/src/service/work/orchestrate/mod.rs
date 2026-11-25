@@ -176,7 +176,7 @@ pub fn fill_spend(s: &Store, m: &mut MissionRow, now: i64) -> Result<(), IpcErro
     let grant = s.live_mission_grant(m.id, now)?;
     m.budget_micros = grant.as_ref().and_then(|g| g.budget_micros);
     // Whether it waits on a person (G1.6): only an active mission does, or
-    // a paused one a brake asked a question on (review 23b w09-1), so the
+    // a paused one on its brake's own question (review 23b w09-1, w03-7), so the
     // others skip the card read.
     m.waiting_on = if m.state == "active" || m.state == "paused" {
         let cards = s.mission_cards(m.id, crate::store::CARDS_OPEN_CAP)?;
@@ -2197,7 +2197,7 @@ fn brake(s: &Store, m: &MissionRow, kind: &str, why: String) -> Result<(), IpcEr
         kind: "ask".into(),
         item_id: None,
         role: None,
-        reason: format!("paused: {why}"),
+        reason: format!("{}{why}", crate::service::attention::BRAKE_QUESTION_PREFIX),
         context: None,
         auto: false,
     };

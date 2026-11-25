@@ -16,8 +16,9 @@
 //!
 //! Send later's time choices (M15 step G1.8, migration 155) narrow "idle" per
 //! prompt: `not_before` holds it until a time ("In 1 hour", "Tomorrow
-//! 09:00", "At…"), `until_limit_reset` while the session's account is at or
-//! past `accounts.pause_at`, and `skip_if_archived` drops it instead once the
+//! 09:00", "At…"), `until_limit_reset` while the session's account is at
+//! its usage limit (a window at 100%, what pauses the row; not
+//! `accounts.pause_at`, review w07-4), and `skip_if_archived` drops it instead once the
 //! session is archived. A prompt that is not due yet does not hold back one
 //! queued after it that is. The reconcile tick is the clock: a timed prompt
 //! goes in on the first tick at which its time has come and the session is
@@ -41,7 +42,7 @@ pub struct QueuePromptArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_before: Option<i64>,
     /// Send later "When the limit resets": held while the session's account
-    /// is at or past `accounts.pause_at`.
+    /// is at its usage limit (a window at 100%, review w07-4).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub until_limit_reset: bool,
     /// "Skip it if the session is archived first".
@@ -162,12 +163,13 @@ fn archived(row: &SessionRow) -> bool {
     row.work.as_ref().is_some_and(|w| w.archived_at.is_some())
 }
 
-/// Whether the session's account is known to be at or past the line now.
+/// Whether the session's account is known to be at its limit now: a window
+/// at 100%, what pauses the row (review w07-4), not the pause line.
 fn account_over(s: &Store, row: &SessionRow, now: i64) -> Result<bool, IpcError> {
     match row.account_uuid.as_deref() {
         // The row's own model counts too: a session launched on Opus is
         // paused by the weekly Opus window alone (review w07-3).
-        Some(uuid) => crate::service::account_limits::account_over_line_on(
+        Some(uuid) => crate::service::account_limits::account_at_limit_on(
             s,
             uuid,
             now,
@@ -305,7 +307,8 @@ where
         return Err(IpcError::new(
             codes::E_INVALID_STATE,
             format!(
-                "the agent in session {} has exited; restart the session",
+                "the agent in session {} has exited; use Restart, or type into the shell in \
+                 the terminal",
                 row.id
             ),
         ));
@@ -1945,6 +1948,23 @@ mod tests {
         .await
         .unwrap();
         assert!(r.delivered);
+    }
+
+    /// Review w07-4: the wait holds only at the limit (a window at 100%,
+    /// what pauses the row), not at `accounts.pause_at`.
+    #[tokio::test]
+    async fn the_limit_wait_does_not_hold_at_the_pause_line() {
+        let (store, id) = store_with("idle");
+        set_account_use(&store, id, 95.0, T + 1_000);
+        let r = queue_prompt_with(
+            timed(id, "go", |a| a.until_limit_reset = true),
+            &store,
+            T,
+            |_, _| async { Ok(()) },
+        )
+        .await
+        .unwrap();
+        assert!(r.delivered, "95% is past the 90% pause line, not the limit");
     }
 
     fn archive(store: &Mutex<Store>, id: i64) {

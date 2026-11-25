@@ -1816,7 +1816,10 @@ pub(super) struct Snapshot {
 }
 
 /// The account the login `profile` on `host` is signed in to, if known.
-fn login_account_on<'a>(host: &'a crate::store::HostRow, profile: Option<&str>) -> Option<&'a str> {
+pub(crate) fn login_account_on<'a>(
+    host: &'a crate::store::HostRow,
+    profile: Option<&str>,
+) -> Option<&'a str> {
     match profile {
         None => host.account_uuid.as_deref(),
         Some(p) => host

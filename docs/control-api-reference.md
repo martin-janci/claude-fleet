@@ -1015,7 +1015,7 @@ Parameters (* required): `body`*, `client_msg_id`, `confirm_nonce`, `deliver`, `
 
 ### `send_prompt`
 
-Send and SUBMIT a prompt to a Claude session's REPL (pasted, then one Enter); the first prompt to an unnamed session also names it. Marked untrusted unless raw=true (master) or the caller is a trusted client. Returns { delivered, session_id, turn_seq_before, queued, acked }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } for the reply (run_prompt does all three). Refuses a blocked or stuck session (E_INVALID_STATE) unless force=true; a working one queues it. acked: true = hook-confirmed, false = not within 1.5 s (check capture_session), null = unknowable.
+Send and SUBMIT a prompt to a Claude session's REPL (pasted, then one Enter); the first prompt to an unnamed session also names it. Marked untrusted unless raw=true (master) or the caller is a trusted client. Returns { delivered, session_id, turn_seq_before, queued, acked }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } for the reply (run_prompt does all three). Refuses a blocked or stuck session (E_INVALID_STATE) unless force=true, and one whose agent has exited (E_INVALID_STATE) even with force: use Restart or the terminal; a working one queues it. acked: true = hook-confirmed, false = not within 1.5 s (check capture_session), null = unknowable.
 
 Access: the master, a paired device or a per-host token · deadline 60 s.
 

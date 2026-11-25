@@ -109,6 +109,32 @@ generated from it.
    `CONTRACT_REVISION` fails until fleet-mobile accepts the new revision;
    any other PR only warns.
 
+### A release commit that reached main without its tag
+
+When the `chore(release): vX.Y.Z` commit lands through a PR (step 3 run on
+a branch, then merged) instead of being pushed with its tag in step 4,
+`main` already carries the new version and the hub image pin, but nothing
+is built: there is no tag, so no release and no `fleet-hub:X.Y.Z` image, and
+an operator who curls `deploy/hub/docker-compose.yml` from `main` gets
+`manifest unknown`. `scripts/release.sh X.Y.Z` cannot finish it (package.json
+is already at that version), so tag `main`'s tip without bumping anything:
+
+```bash
+git checkout main && git pull --ff-only
+scripts/release.sh --tag-only 0.3.0
+git push origin v0.3.0
+```
+
+`--tag-only` refuses unless every carrier already says the version
+(`scripts/check-version-consistency.sh --expect-tag`) and `CHANGELOG.md`
+has its `## [0.3.0]` section (the release notes), and it runs the same gates
+as a release: on `main`, clean tree, no such tag yet, `HEAD` is
+`origin/main`'s tip and [CI is green on it](#the-ci-gate). It tags `HEAD`
+itself, so the commits merged after the release commit ship in the release
+too; the CHANGELOG section does not list them unless you add them in a PR
+first. `RELEASE_DRY_RUN=1` prints what it would tag and creates nothing.
+Then continue at step 5.
+
 ## The phone app
 
 The Android app lives in its own repository and is built there, never here.

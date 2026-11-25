@@ -25,6 +25,11 @@ use tokio_util::sync::CancellationToken;
 pub const DAILY_PREFIX: &str = "daily";
 /// Daily backups kept (as `backup.sh` keeps 14).
 pub const KEEP_DAILY: usize = 14;
+/// The copy taken before a migration: `pre-migrate-<schema>-<stamp>.db`,
+/// `<schema>` the version the database is migrated FROM (review w14-8).
+pub const PRE_MIGRATE_PREFIX: &str = "pre-migrate";
+/// Pre-migration copies kept.
+pub const KEEP_PRE_MIGRATE: usize = 3;
 /// A backup is taken when the newest one is older than this.
 pub const BACKUP_EVERY_SECS: i64 = 86_400;
 /// How often the tick looks.
@@ -281,6 +286,83 @@ pub fn backup_if_due(data_dir: &Path, now: i64) -> Result<Option<BackupInfo>, St
     Ok(Some(info))
 }
 
+/// What [`backup_before_migrate`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreMigrate {
+    /// No database yet, or it is already at (or past) this build's schema.
+    NotNeeded,
+    /// The copy, taken before the store migrates from `info.schema`.
+    Taken(BackupInfo),
+    /// Not enough free space for the copy: the migration goes ahead without
+    /// one, rather than the hub staying down (the reason, for the operator).
+    NoSpace(String),
+}
+
+/// Copy `<data_dir>/state.db` to `<data_dir>/backups/pre-migrate-<schema>-<stamp>.db`
+/// when this build is about to migrate it (its schema is below
+/// [`crate::store::known_schema_version`]), then keep the newest
+/// [`KEEP_PRE_MIGRATE`] of them (review w14-8: `docker compose pull && up -d`
+/// migrates, and the only way back was yesterday's daily). Call it before the
+/// store is opened for writing. An `Err` is a copy that failed for a reason
+/// other than space; the caller should not migrate then.
+pub fn backup_before_migrate(data_dir: &Path, now: i64) -> Result<PreMigrate, String> {
+    let db = data_dir.join("state.db");
+    if !db.is_file() {
+        return Ok(PreMigrate::NotNeeded);
+    }
+    let Some(from) = crate::store::backup::schema_version_at(&db)? else {
+        return Ok(PreMigrate::NotNeeded);
+    };
+    if from >= crate::store::known_schema_version() {
+        return Ok(PreMigrate::NotNeeded);
+    }
+    let dir = data_dir.join("backups");
+    crate::store::backup::create_private_dir(&dir)?;
+    let needed = db_bytes(&db);
+    if let Some((free, _)) = disk_space(&dir) {
+        if free < needed {
+            return Ok(PreMigrate::NoSpace(format!(
+                "{} free under {}, a copy of the database needs about {}",
+                free,
+                dir.display(),
+                needed
+            )));
+        }
+    }
+    let dest = stamped_path(&dir, &format!("{PRE_MIGRATE_PREFIX}-{from}"), now);
+    let info = backup_to(&db, &dest)?;
+    prune_pre_migrate(&dir, KEEP_PRE_MIGRATE);
+    Ok(PreMigrate::Taken(info))
+}
+
+/// Keep the newest `keep` `pre-migrate-<schema>-<stamp>.db` files in `dir`,
+/// newest by the stamp (not the schema: a restored older database migrates
+/// again); remove the rest.
+fn prune_pre_migrate(dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let prefix = format!("{PRE_MIGRATE_PREFIX}-");
+    // (stamp, name) for `pre-migrate-<digits>-<stamp>.db`.
+    let mut found: Vec<(String, String)> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|n| {
+            let rest = n.strip_prefix(&prefix)?.strip_suffix(".db")?;
+            let (schema, stamp) = rest.split_once('-')?;
+            (!schema.is_empty() && schema.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| (stamp.to_string(), n.clone()))
+        })
+        .collect();
+    found.sort_unstable();
+    let drop = found.len().saturating_sub(keep);
+    for (_, name) in &found[..drop] {
+        if let Err(e) = std::fs::remove_file(dir.join(name)) {
+            tracing::warn!(file = %name, error = %e, "[backup] could not prune an old pre-migration copy");
+        }
+    }
+}
+
 /// The dailies never pruned to make room for a new one.
 const KEEP_DAILY_FLOOR: usize = 3;
 
@@ -351,17 +433,23 @@ fn prune_parts(dir: &Path, now: i64) {
 /// `<dir>/daily-YYYYmmdd-HHMMSS.db` in UTC (`backup.sh`'s stamp), with
 /// `-<n>` when the name is taken.
 fn daily_path(dir: &Path, now: i64) -> PathBuf {
+    stamped_path(dir, DAILY_PREFIX, now)
+}
+
+/// `<dir>/<prefix>-YYYYmmdd-HHMMSS.db` in UTC, with `-<n>` when the name is
+/// taken.
+fn stamped_path(dir: &Path, prefix: &str, now: i64) -> PathBuf {
     let rfc = fleet_update::time::format_rfc3339(now);
     let stamp = rfc
         .trim_end_matches('Z')
         .replace(['-', ':'], "")
         .replace('T', "-");
-    let first = dir.join(format!("{DAILY_PREFIX}-{stamp}.db"));
+    let first = dir.join(format!("{prefix}-{stamp}.db"));
     if !first.exists() {
         return first;
     }
     (1..)
-        .map(|n| dir.join(format!("{DAILY_PREFIX}-{stamp}-{n}.db")))
+        .map(|n| dir.join(format!("{prefix}-{stamp}-{n}.db")))
         .find(|p| !p.exists())
         .expect("an unbounded range always finds a free name")
 }
@@ -556,6 +644,79 @@ mod tests {
         assert_eq!(count(), KEEP_DAILY_FLOOR as u64);
         // An unreadable volume: nothing removed, the copy is tried.
         assert_eq!(make_room(dir.path(), u64::MAX, &|| None), None);
+    }
+
+    /// Review w14-8: a database this build will migrate is copied to
+    /// `pre-migrate-<schema>-<stamp>.db` first, the newest three kept by
+    /// stamp; one already at this build's schema, or none at all, is not.
+    #[test]
+    fn a_database_about_to_migrate_is_copied_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let now = crate::store::now_unix();
+        assert_eq!(
+            backup_before_migrate(&data, now).unwrap(),
+            PreMigrate::NotNeeded
+        );
+
+        let db = data.join("state.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+                 INSERT INTO schema_version (version) VALUES (5), (7);",
+            )
+            .unwrap();
+        }
+        let backups = data.join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        for name in [
+            "pre-migrate-9-20200101-000000.db",
+            "pre-migrate-3-20200102-000000.db",
+            "pre-migrate-1-20200103-000000.db",
+            "pre-0.6.4-20200101-000000.db",
+        ] {
+            std::fs::write(backups.join(name), b"x").unwrap();
+        }
+        let PreMigrate::Taken(info) = backup_before_migrate(&data, now).unwrap() else {
+            panic!("an old schema is copied");
+        };
+        assert_eq!(info.schema, Some(7));
+        let name = info
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            name.starts_with("pre-migrate-7-2") && name.ends_with(".db"),
+            "{name}"
+        );
+        let mut left: Vec<String> = std::fs::read_dir(&backups)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec![
+                "pre-0.6.4-20200101-000000.db".to_string(),
+                "pre-migrate-1-20200103-000000.db".to_string(),
+                "pre-migrate-3-20200102-000000.db".to_string(),
+                name,
+            ],
+            "the oldest by stamp went, whatever its schema; other prefixes stay"
+        );
+
+        // Migrated to this build's schema: nothing to copy.
+        std::fs::remove_file(&db).unwrap();
+        drop(Store::open_with_bus(&db, Arc::new(NoopEventBus)).unwrap());
+        assert_eq!(
+            backup_before_migrate(&data, now).unwrap(),
+            PreMigrate::NotNeeded
+        );
     }
 
     #[test]

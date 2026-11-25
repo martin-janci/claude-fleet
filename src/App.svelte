@@ -13,7 +13,7 @@
   import { appVersion, loadAppVersion, versionLine } from './lib/app_version';
   import { startLimitToasts } from './lib/limit_toast';
   import { setContextRedPct } from './lib/attention';
-  import { trackersHealth, trackersSummary } from './lib/tracker_health';
+  import { refreshTrackersHealth, trackersHealth, trackersSummary } from './lib/tracker_health';
   import Sidebar from './lib/Sidebar.svelte';
   import FirstRun from './lib/FirstRun.svelte';
   import SettingsDialog from './lib/SettingsDialog.svelte';
@@ -117,7 +117,7 @@
   import UpdateReveal from './lib/UpdateReveal.svelte';
   import { markStartup, startCatchUp, takeUpdateReveal, trackActivity } from './lib/startup';
   import { loadProjectPicks } from './lib/project_picks';
-  import { loadFleetSettings } from './lib/fleet_settings';
+  import { loadFleetSettings, setHubWritingHelp } from './lib/fleet_settings';
   import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
   import UpdateBanner from './lib/UpdateBanner.svelte';
   import StorePoisonBanner from './lib/StorePoisonBanner.svelte';
@@ -314,6 +314,7 @@
     if (hr0.ok) {
       health = hr0.value;
       setContextRedPct(hr0.value.context_red_pct);
+      setHubWritingHelp(hr0.value.writing_help);
       trackersHealth.set(hr0.value.trackers ?? null);
     } else if (hr0.error.code === 'E_HUB_CONTRACT') {
       healthFailure = `health: ${hr0.error.code}`;
@@ -362,7 +363,12 @@
       // read the fleet's settings from one store, so a write from the phone
       // or another desktop is read back here, not only while Settings is
       // open. One call per flush, however many keys the flush carried.
-      onSettingsChanged: () => void loadFleetSettings(),
+      // A device the hub refuses its settings reads which Writing help
+      // toggles are on from the health answer instead (review w19-2).
+      onSettingsChanged: () =>
+        void loadFleetSettings().then((r) => {
+          if (!r.ok) void refreshTrackersHealth();
+        }),
     });
     markStartup('backend');
     const [pr, sr, hr, ar] = await Promise.all([

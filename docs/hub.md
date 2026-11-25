@@ -447,6 +447,15 @@ the phone warn when the newest backup is over two days old or under 2 GB (or
 5%) is free. Keep copying `backups/` off the box (Hyper Backup): a backup on
 the same disk does not survive the disk.
 
+**Before a migration.** When a new image is about to migrate the database
+(its schema is older than the build's), the hub first copies it to
+`<data>/backups/pre-migrate-<schema>-<stamp>.db`, `<schema>` being the
+version it migrates from, and keeps the newest three `pre-migrate-*` files.
+So `docker compose pull && up -d` always leaves a way back to the database
+the previous version wrote. A start with no migration to run copies nothing.
+If the copy fails, the hub does not migrate and exits with the reason; if
+only free space is short, it migrates without a copy and says so on stderr.
+
 Or by hand, or from a scheduler:
 
 ```bash
@@ -512,7 +521,8 @@ file, and one that was killed leaves a stale file, which reads as not ready.
 **Restore drill** (rehearse it once; a backup nobody restored is a hope).
 The backups to restore from are `backup.sh`'s `state-<stamp>.db` (and
 `upgrade.sh`'s `pre-<version>-<stamp>.db`) in `backups/` beside the compose
-file, and the hub's own daily `daily-<stamp>.db` and `fleet-hub backup`'s
+file, and the hub's own daily `daily-<stamp>.db`, its
+`pre-migrate-<schema>-<stamp>.db` and `fleet-hub backup`'s
 `<prefix>-<stamp>.db` under `/var/lib/fleet-hub/backups/`, inside the data
 volume, where the *Back up first* copy (`pre-upgrade-<stamp>.db`) is too.
 With a bind-mounted `./data` (*Behind an existing reverse proxy*):
@@ -680,6 +690,7 @@ out, set `provision.install_ag=false` right after upgrading.
 | `~/.claude/CLAUDE.md` between the sentinels | fleet | the rest is the user's |
 | `~/.claude/settings.json` → the 9 `FLEET_HOOK_EVENTS` entries | fleet | sibling hooks are kept |
 | `~/.claude/fleet-hook.headers` | fleet (secret, 0600) | `provision_hook` |
+| `~/.claude-fleet/voice/` (`bin/arecord`, `voice.env`, `voice.headers` secret 0600) | fleet | `provision_voice` |
 | `~/.claude.json` → `mcpServers.claude-fleet` | fleet (secret) | sibling keys are kept |
 | `~/.tmux.conf` `set -g set-clipboard on` line | fleet (append-only) | `provision_tmux_clipboard` |
 | every other skill, hook, plugin, `~/.claude/projects` | the user / dotfiles | never touched |
@@ -984,12 +995,13 @@ So `fleet-agent` relays them:
   agent adds no credential. That bearer is not the host token but a
   hook-only token derived from it (`fhk1_` + HMAC-SHA256 under the host
   token, `mcp::auth::hook_token`): the hub recomputes it from the stored
-  host token and accepts it on `/hook` and on `GET /voice/capture` (the
-  host's recorder reads the same headers file) only, so another local
-  account that takes the port while the agent is down collects nothing that
-  can dial `/agent` or call `/mcp`. It could post hook events and, for a
-  session of that host with the microphone on, start the claimed device's
-  capture and read the audio. Rotating the host token rotates it. An older
+  host token and accepts it on `/hook` only, so another local account that
+  takes the port while the agent is down collects nothing that can dial
+  `/agent`, call `/mcp` or open a microphone: it could post hook events.
+  The host's recorder presents a voice-only token of its own on
+  `GET /voice/capture` (`fvc1_`, `mcp::auth::voice_token`, from
+  `~/.claude-fleet/voice/voice.headers`; review w01-3), which never travels
+  through the relay. Rotating the host token rotates both. An older
   agent relays it unchanged; an older hub writes the host token as before. A
   request carrying an `Origin`, or a `Host` that is not loopback, is refused
   (a browser aimed at the port). The hub's answer — status, `Content-Type`,

@@ -43,8 +43,8 @@ pub struct DeferredPromptRow {
     /// older hub, and when the prompt waits only for an idle moment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_before: Option<i64>,
-    /// Not typed while the session's account is at or past
-    /// `accounts.pause_at`.
+    /// Not typed while the session's account is at its usage limit (a
+    /// window at 100%, review w07-4).
     #[serde(default, skip_serializing_if = "is_false")]
     pub until_limit_reset: bool,
     /// Dropped, not typed, once the session is archived.

@@ -288,7 +288,7 @@ async fn run_tmux_script(
         return Err(IpcError::new(
             codes::E_INVALID_STATE,
             "the agent in this session has exited, so the prompt was not typed into its \
-             shell; restart the session",
+             shell, force or not; use Restart, or type into the shell in the terminal",
         ));
     }
     // Cut off part-way (review w09-4): the script was run again after its
@@ -1381,6 +1381,26 @@ mod prompt_tests {
             .await
             .unwrap();
         assert!(out.status.success());
+    }
+
+    /// Review r5-03-7: `force` does not pass the exited-agent guard, and the
+    /// refusal says so and names the ways that do: Restart or the terminal.
+    #[tokio::test]
+    async fn an_exited_agent_refusal_names_restart_and_the_terminal() {
+        use crate::ssh_fake::{FakeSsh, Match, Reply};
+        let fake = FakeSsh::new();
+        fake.on_host(
+            "h",
+            Match::contains("tmux"),
+            Reply::fail(AGENT_EXITED_STATUS, ""),
+        );
+        let e = run_tmux_script("h", &fake, "tmux send-keys")
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID_STATE);
+        for want in ["force or not", "Restart", "terminal"] {
+            assert!(e.message.contains(want), "{want}: {}", e.message);
+        }
     }
 
     #[test]

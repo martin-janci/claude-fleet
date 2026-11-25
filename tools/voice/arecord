@@ -2,7 +2,7 @@
 # claude-fleet voice relay: an `arecord` stand-in for Claude Code's /voice on a
 # host with no sound card. Installed by fleet provisioning; do not edit here.
 # Streams the microphone of the app attached to this session from the fleet
-# server (GET /voice/capture), with this host's hook token.
+# server (GET /voice/capture), with this host's voice token.
 #
 # Claude Code calls exactly:
 #   arecord --version                                  presence check
@@ -10,7 +10,10 @@
 #   arecord -f S16_LE -r 16000 -c 1 -t raw -q -        record to stdout
 set -u
 ENV_FILE="$HOME/.claude-fleet/voice/voice.env"
-HEADERS="$HOME/.claude/fleet-hook.headers"
+# Its own bearer (voice.headers); the hook headers only on a host provisioned
+# before it existed, which a hub that derives hook tokens now refuses (401).
+HEADERS="$HOME/.claude-fleet/voice/voice.headers"
+[ -r "$HEADERS" ] || HEADERS="$HOME/.claude/fleet-hook.headers"
 FALLBACK_PORT="${FLEET_VOICE_FALLBACK_PORT:-4713}"
 FALLBACK_TOKEN="$HOME/.config/fleet-voice/token"
 

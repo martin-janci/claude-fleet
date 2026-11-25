@@ -111,6 +111,8 @@ pub(crate) const AG_FILES: &[(&str, &str)] = &[
 pub const VOICE_ARECORD: &str = include_str!("../../../../tools/voice/arecord");
 /// Where the stand-in (`bin/arecord`) and its `voice.env` live on a host.
 pub const VOICE_DIR: &str = "~/.claude-fleet/voice";
+/// The `arecord` stand-in's bearer header, in [`VOICE_DIR`] (review w01-3).
+pub const VOICE_HEADERS_FILE: &str = "voice.headers";
 
 /// Where provisioning stages [`AG_FILES`] before running their installer.
 const AG_STAGE_DIR: &str = "~/.local/share/fleet/ag-src";
@@ -336,8 +338,9 @@ async fn provision_one_tracked(
         base.session_start_context,
     )
     .await?;
-    // 5. The `/voice` recorder stand-in and the URL it streams from.
-    provision_voice(ssh, host, base).await?;
+    // 5. The `/voice` recorder stand-in, the URL it streams from and its
+    //    bearer.
+    provision_voice(ssh, host, base, token).await?;
     // 6. The same MCP entry in every login profile. Last, so a profile that
     //    cannot be written never keeps the host's own files from landing.
     provision_profiles(ssh, host, base, token).await?;
@@ -684,9 +687,16 @@ pub(crate) async fn rewrite_login_config(
 /// Voice relay F1: install fleet's `arecord` stand-in at
 /// `~/.claude-fleet/voice/bin/arecord` (executable; the pane command puts
 /// that dir first on `claude`'s PATH, `tmux::VOICE_PATH_PREFIX`) and
-/// `voice.env` with the hub URL it streams from. The bearer is not here:
-/// the stand-in reads the hook headers file `provision_hook` wrote.
-async fn provision_voice(ssh: &dyn SshExec, host: &str, base: &HubBase) -> Result<(), IpcError> {
+/// `voice.env` with the hub URL it streams from, and [`VOICE_HEADERS_FILE`]
+/// (0600) with its own bearer, [`HubBase::voice_token`]: not the hook
+/// headers, whose token a squatter on the agent's relay port could read
+/// (review w01-3).
+async fn provision_voice(
+    ssh: &dyn SshExec,
+    host: &str,
+    base: &HubBase,
+    token: &str,
+) -> Result<(), IpcError> {
     let bin = format!("{VOICE_DIR}/bin");
     let path = format!("{bin}/arecord");
     write_host_file(ssh, host, &bin, &path, VOICE_ARECORD).await?;
@@ -706,6 +716,14 @@ async fn provision_voice(ssh: &dyn SshExec, host: &str, base: &HubBase) -> Resul
             ),
         ));
     }
+    write_host_file_secret(
+        ssh,
+        host,
+        VOICE_DIR,
+        &format!("{VOICE_DIR}/{VOICE_HEADERS_FILE}"),
+        &super::hooks_install::hook_headers_content(&base.voice_token(token)),
+    )
+    .await?;
     let env = format!("FLEET_VOICE_URL={}\n", quote(&base.url));
     write_host_file(
         ssh,
@@ -828,7 +846,7 @@ pub async fn provision_content_only(
         base.session_start_context,
     )
     .await?;
-    provision_voice(ssh, host, base).await?;
+    provision_voice(ssh, host, base, &token).await?;
     let warning = if install_ag(store) {
         provision_ag(ssh, host).await
     } else {
@@ -3578,19 +3596,27 @@ mod tests {
     /// What [`provision_voice`] issues on a remote host for [`base`].
     fn voice_steps() -> Vec<Step> {
         use Step::*;
-        vec![
+        let mut steps = vec![
             write_step(
                 "~/.claude-fleet/voice/bin",
                 "~/.claude-fleet/voice/bin/arecord",
                 VOICE_ARECORD,
             ),
             Script("chmod 755 \"$HOME\"/'.claude-fleet/voice/bin/arecord'".into()),
-            write_step(
-                "~/.claude-fleet/voice",
-                "~/.claude-fleet/voice/voice.env",
-                "FLEET_VOICE_URL='http://127.0.0.1:4180'\n",
-            ),
-        ]
+        ];
+        // Its own bearer (review w01-3): the host token on a loopback base.
+        steps.extend(secret_write_steps(
+            VOICE_DIR,
+            &format!("{VOICE_DIR}/{VOICE_HEADERS_FILE}"),
+            &expected_headers(),
+            true,
+        ));
+        steps.push(write_step(
+            "~/.claude-fleet/voice",
+            "~/.claude-fleet/voice/voice.env",
+            "FLEET_VOICE_URL='http://127.0.0.1:4180'\n",
+        ));
+        steps
     }
 
     /// Every argument the remote shell sees must be inert: `bash -lc` gets
@@ -4393,10 +4419,11 @@ mod tests {
         }
         assert_eq!(steps.len(), expected.len(), "step count");
         assert_quoting_invariants(&calls);
-        // The secret reached the host exactly three times (claude.json, the
-        // hook settings, and the SessionStart headers file), all over stdin.
+        // The secret reached the host exactly four times (claude.json, the
+        // hook settings, the SessionStart headers file and the recorder's
+        // voice headers), all over stdin.
         let uploads = calls.iter().filter(|c| is_secret_upload(c)).count();
-        assert_eq!(uploads, 3);
+        assert_eq!(uploads, 4);
         assert!(calls
             .iter()
             .filter(|c| is_secret_upload(c))
@@ -5272,6 +5299,21 @@ mod tests {
         // the host's own (which the MCP entry still holds).
         let derived = crate::mcp::auth::hook_token(&format!("{TOKEN}-relay"));
         assert!(all.contains(&derived), "hooks carry the hook-only token");
+        // Review w01-3: the recorder's own headers file holds the voice
+        // token, and no file carries one where the other belongs.
+        let voice = crate::mcp::auth::voice_token(&format!("{TOKEN}-relay"));
+        let voice_writes: Vec<String> = fake
+            .calls()
+            .iter()
+            .filter_map(Call::stdin_str)
+            .filter(|s| s.contains(&voice))
+            .collect();
+        assert_eq!(
+            voice_writes,
+            vec![crate::service::hooks_install::hook_headers_content(&voice)],
+            "the voice token is written once, as the voice headers"
+        );
+        assert!(!voice_writes[0].contains(&derived));
         for call in fake.calls() {
             let text = format!(
                 "{}\n{}",

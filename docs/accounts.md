@@ -422,7 +422,9 @@ start the worker on the login a refusal named.
 A resume (`work_link { resume }`, Resume in the desktop) runs under the
 login `profile` names (`""` = the host's own); without one, under the past
 session's login when its row is still known and the resume lands on the
-same host, else the host's own login; either gives way to the login on the
+same host; on another host, by the past session's account as a move does
+(the login there signed in to that account first, else the host's own or
+the one with headroom); else the host's own login; each gives way to the login on the
 host with headroom when it is past `accounts.pause_at`. A ticket start on a
 named host that names no login does the same with the host's own
 (`account_limits::login_with_headroom_for`). Neither a ticket start nor a resume

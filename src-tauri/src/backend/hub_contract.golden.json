@@ -399,7 +399,8 @@
       "tunnels_mode",
       "usage_by_day",
       "usage_by_host",
-      "version"
+      "version",
+      "writing_help"
     ],
     "Health.decide": [
       "attempts",

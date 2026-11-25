@@ -10,6 +10,8 @@ import {
   hubHasSetting,
   hubGatedOn,
   hubGated,
+  hubWritingHelp,
+  setHubWritingHelp,
   hubSettingKeys,
   fleetSettings,
   basePathError,
@@ -215,5 +217,32 @@ describe('hubGatedOn', () => {
     for (const key of ['work.context_help', 'work.prompt_tune', 'work.draft_morning_brief'] as const) {
       expect(get(hubGated)(key)).toBe(false);
     }
+  });
+
+  // w19-2: the hub says which toggles are on in `fleet_health`, which every
+  // device may read; a device refused the settings goes by that.
+  it("a refused read goes by the hub's own list of what is on", async () => {
+    const mock = mockedInvoke as ReturnType<typeof vi.fn>;
+    hubSettingKeys.set(null);
+    hubWritingHelp.set(null);
+    fleetSettings.set({ ...SETTING_DEFAULTS });
+    mock.mockRejectedValueOnce({ code: 'E_FORBIDDEN', message: 'not this device' });
+    await loadFleetSettings();
+    setHubWritingHelp(['work.prompt_tune', 'work.context_help']);
+    expect(get(hubGated)('work.prompt_tune')).toBe(true);
+    expect(get(hubGated)('work.context_help')).toBe(true);
+    expect(get(hubGated)('work.draft_briefs')).toBe(false);
+    // Even a toggle newer than its feature: the hub said off.
+    expect(get(hubGated)('work.draft_morning_brief')).toBe(false);
+    // A health read from an older hub, without the field, keeps the last answer.
+    setHubWritingHelp(undefined);
+    expect(get(hubGated)('work.prompt_tune')).toBe(true);
+    hubWritingHelp.set(null);
+  });
+
+  it("settings this device read win over the hub's list", () => {
+    const keys = new Set(['work.prompt_tune']);
+    expect(hubGatedOn({ 'work.prompt_tune': 'false' }, keys, 'work.prompt_tune', new Set(['work.prompt_tune']))).toBe(false);
+    expect(hubGatedOn({ 'work.prompt_tune': 'true' }, keys, 'work.prompt_tune', new Set())).toBe(true);
   });
 });
