@@ -978,10 +978,20 @@ fn resolve_and_rebind(
 
 /// Spawn the post-turn context refresh (spec §1.5) off the hook's response
 /// path. Best-effort: skipped when no runtime is reachable (sync tests).
+///
+/// One refresh per session at a time: a Stop hook replayed in a loop (any
+/// POST with the host's token) started one transcript read over SSH per
+/// request, without bound. A Stop while one is running is covered by it.
 fn spawn_refresh_context(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>, row_id: i64) {
+    static REFRESHING: crate::rt::KeySet = std::sync::Mutex::new(None);
+    let owner = Arc::as_ptr(store) as usize;
+    let Some(claim) = crate::rt::claim(&REFRESHING, owner, row_id.to_string()) else {
+        return;
+    };
     let store = Arc::clone(store);
     let ssh = Arc::clone(ssh);
     let _ = crate::rt::try_spawn(async move {
+        let _claim = claim;
         crate::service::context::refresh_context(store, ssh, row_id).await;
     });
 }
