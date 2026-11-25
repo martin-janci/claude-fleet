@@ -310,6 +310,44 @@ async fn authorize(
         }
     };
     let personal_owner = rows.personal_owner;
+    // Every refused request is logged through this one throttle (at most one
+    // warn per source address per interval, and a hub-wide cap), the `/hook`
+    // fallbacks included: they used to warn on every request.
+    // Owned before the closure: it must not hold a borrow of the request
+    // across the awaits below (the body is not `Sync`).
+    let refused_peer = pairing::limiter_key(
+        request
+            .extensions()
+            .get::<axum::extract::ConnectInfo<SocketAddr>>()
+            .map(|c| c.0.ip()),
+        request.headers(),
+    );
+    let refused_path = request.uri().path().to_string();
+    let refuse = |status: StatusCode| -> StatusCode {
+        let peer = &refused_peer;
+        // The throttle is the log's, not the answer's: a repeat inside
+        // the interval is still `401` (a client reads 401 as "pair
+        // again" and 429 as "the hub is busy, retry" — a revoked desktop
+        // must see the first), logged at debug instead of warn.
+        let quiet = |key: &str, every| state.rate.check(key, every).is_err();
+        if status == StatusCode::UNAUTHORIZED
+            && (state
+                .rate
+                .check_capped(&format!("auth:{peer}"), AUTH_FAIL_INTERVAL, AUTH_FAIL_KEYS)
+                .is_err()
+                || quiet("auth:*", AUTH_FAIL_WARN_EVERY))
+        {
+            tracing::debug!(
+                %peer,
+                path = %refused_path,
+                "[mcp] rejected request (repeat, not logged at warn)"
+            );
+            return status;
+        }
+        // The path only: the URI / query can carry the legacy `?token=`.
+        tracing::warn!(%status, %peer, path = %refused_path, "[mcp] rejected request");
+        status
+    };
     let mut caller = match auth::check_request(
         request.headers(),
         &state.master,
@@ -338,13 +376,7 @@ async fn authorize(
         {
             auth::bearer_token(request.headers().get(axum::http::header::AUTHORIZATION))
                 .and_then(|t| auth::resolve_hook_token(t, &rows.hosts))
-                .ok_or_else(|| {
-                    tracing::warn!(
-                        "[mcp] rejected {} request: unknown hook token",
-                        request.uri().path()
-                    );
-                    StatusCode::UNAUTHORIZED
-                })?
+                .ok_or_else(|| refuse(StatusCode::UNAUTHORIZED))?
         }
         Err(StatusCode::UNAUTHORIZED)
             if request.uri().path() == "/hook" && state.allowed_hosts.is_empty() =>
@@ -353,42 +385,9 @@ async fn authorize(
             // token can satisfy this legacy path.
             query_token(request.uri().query())
                 .and_then(|t| auth::resolve_token(t, &state.master, &[], &[], personal_owner))
-                .ok_or_else(|| {
-                    tracing::warn!("[mcp] rejected /hook request: no valid token");
-                    StatusCode::UNAUTHORIZED
-                })?
+                .ok_or_else(|| refuse(StatusCode::UNAUTHORIZED))?
         }
-        Err(status) => {
-            let peer = pairing::limiter_key(
-                request
-                    .extensions()
-                    .get::<axum::extract::ConnectInfo<SocketAddr>>()
-                    .map(|c| c.0.ip()),
-                request.headers(),
-            );
-            // The throttle is the log's, not the answer's: a repeat inside
-            // the interval is still `401` (a client reads 401 as "pair
-            // again" and 429 as "the hub is busy, retry" — a revoked desktop
-            // must see the first), logged at debug instead of warn.
-            let quiet = |key: &str, every| state.rate.check(key, every).is_err();
-            if status == StatusCode::UNAUTHORIZED
-                && (state
-                    .rate
-                    .check_capped(&format!("auth:{peer}"), AUTH_FAIL_INTERVAL, AUTH_FAIL_KEYS)
-                    .is_err()
-                    || quiet("auth:*", AUTH_FAIL_WARN_EVERY))
-            {
-                tracing::debug!(
-                    %peer,
-                    path = %request.uri().path(),
-                    "[mcp] rejected request (repeat, not logged at warn)"
-                );
-                return Err(status);
-            }
-            // The path only: the URI / query can carry the legacy `?token=`.
-            tracing::warn!(%status, %peer, path = %request.uri().path(), "[mcp] rejected request");
-            return Err(status);
-        }
+        Err(status) => return Err(refuse(status)),
     };
     // Identity sub-project 1: the caller's realm roles, before any gate
     // reads them — for the `/hook?token=` fallback as for the header form.
